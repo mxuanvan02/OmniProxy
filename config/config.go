@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -184,6 +185,10 @@ type Config struct {
 	//         "http://host:port",  "http://user:pass@host:port"
 	// Leave empty to connect directly.
 	ProxyURL string `json:"proxyURL,omitempty"`
+
+	// Kiro API HTTP timeout. Can be overridden by API_TIMEOUT_MS env var.
+	// Default: 300000 (5 minutes). Matches the CLI's API_TIMEOUT_MS convention.
+	KiroApiTimeoutMs int `json:"apiTimeoutMs,omitempty"`
 
 	// SanitizeClaudeCodePrompt is kept for backward-compatible JSON loading only.
 	// Migrated to FilterClaudeCode on first load. Do not use directly.
@@ -858,6 +863,24 @@ func GetProxyURL() string {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
 	return cfg.ProxyURL
+}
+
+// GetKiroApiTimeout returns the Kiro API HTTP client timeout.
+// Priority: API_TIMEOUT_MS env var > config file > default (5 minutes).
+func GetKiroApiTimeout() time.Duration {
+	// Env var wins (CLI convention: API_TIMEOUT_MS in milliseconds)
+	if envVal := os.Getenv("API_TIMEOUT_MS"); envVal != "" {
+		if ms, err := strconv.Atoi(envVal); err == nil && ms > 0 {
+			return time.Duration(ms) * time.Millisecond
+		}
+	}
+
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg != nil && cfg.KiroApiTimeoutMs > 0 {
+		return time.Duration(cfg.KiroApiTimeoutMs) * time.Millisecond
+	}
+	return 5 * time.Minute
 }
 
 // UpdateProxySettings updates the outbound proxy config
