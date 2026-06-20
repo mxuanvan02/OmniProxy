@@ -127,3 +127,50 @@ func TestAccountAllowOverageMigration(t *testing.T) {
 		}
 	}
 }
+
+func TestFindAccountByEmail(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	// No accounts yet — should return nil
+	if got := FindAccountByEmail("test@example.com"); got != nil {
+		t.Fatalf("expected nil for empty config, got %v", got)
+	}
+
+	// Add an account with an email
+	acc := Account{
+		ID:         "acc-1",
+		Email:      "test@example.com",
+		Enabled:    true,
+		AuthMethod: "social",
+	}
+	if err := AddAccount(acc); err != nil {
+		t.Fatalf("AddAccount: %v", err)
+	}
+
+	// Should find it
+	found := FindAccountByEmail("test@example.com")
+	if found == nil {
+		t.Fatal("expected to find account by email")
+	}
+	if found.ID != "acc-1" {
+		t.Fatalf("expected acc-1, got %s", found.ID)
+	}
+
+	// Non-existent email returns nil
+	if got := FindAccountByEmail("nonexistent@example.com"); got != nil {
+		t.Fatalf("expected nil for unknown email, got %v", got)
+	}
+
+	// Empty string returns nil
+	if got := FindAccountByEmail(""); got != nil {
+		t.Fatalf("expected nil for empty email, got %v", got)
+	}
+
+	// Case-sensitive match
+	if got := FindAccountByEmail("TEST@example.com"); got != nil {
+		t.Fatalf("expected nil for different case, got %v", got)
+	}
+}

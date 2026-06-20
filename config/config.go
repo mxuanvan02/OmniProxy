@@ -466,6 +466,22 @@ func FindAccountByProfileArn(profileArn string) *Account {
 	return nil
 }
 
+// FindAccountByEmail searches for an existing account by email.
+// Returns nil when email is empty or no match is found.
+func FindAccountByEmail(email string) *Account {
+	if email == "" {
+		return nil
+	}
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	for _, a := range cfg.Accounts {
+		if a.Email == email {
+			return &a
+		}
+	}
+	return nil
+}
+
 func AddAccount(account Account) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
