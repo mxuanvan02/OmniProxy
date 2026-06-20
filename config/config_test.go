@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestUpdateSettingsPatchPreservesOmittedAPIKeyFields(t *testing.T) {
@@ -52,6 +53,14 @@ func TestUpdateSettingsPatchCanExplicitlyDisableAPIKey(t *testing.T) {
 	}
 	if got := GetPassword(); got != "admin-password" {
 		t.Fatalf("expected password to be preserved, got %q", got)
+	}
+}
+
+func TestGetKiroApiTimeout(t *testing.T) {
+	// Test with no config value — should return default 5min
+	defaultTimeout := GetKiroApiTimeout()
+	if defaultTimeout != 5*time.Minute {
+		t.Fatalf("expected default 5m, got %v", defaultTimeout)
 	}
 }
 

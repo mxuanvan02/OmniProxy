@@ -70,8 +70,9 @@ func GetClientForProxy(proxyURL string) *http.Client {
 	if cached, ok := proxyClientCache.Load(proxyURL); ok {
 		return cached.(*http.Client)
 	}
+	timeout := config.GetKiroApiTimeout()
 	client := &http.Client{
-		Timeout:   5 * time.Minute,
+		Timeout:   timeout,
 		Transport: buildKiroTransport(proxyURL),
 	}
 	proxyClientCache.Store(proxyURL, client)
@@ -128,8 +129,9 @@ func buildKiroTransport(proxyURL string) *http.Transport {
 
 // InitKiroHttpClient initializes (or reinitializes) the HTTP clients used for Kiro API requests.
 func InitKiroHttpClient(proxyURL string) {
+	timeout := config.GetKiroApiTimeout()
 	client := &http.Client{
-		Timeout:   5 * time.Minute,
+		Timeout:   timeout,
 		Transport: buildKiroTransport(proxyURL),
 	}
 	kiroHttpStore.Store(client)
