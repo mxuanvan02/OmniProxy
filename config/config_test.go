@@ -57,6 +57,10 @@ func TestUpdateSettingsPatchCanExplicitlyDisableAPIKey(t *testing.T) {
 }
 
 func TestGetKiroApiTimeout(t *testing.T) {
+	prev := os.Getenv("API_TIMEOUT_MS")
+	os.Unsetenv("API_TIMEOUT_MS")
+	defer os.Setenv("API_TIMEOUT_MS", prev)
+
 	// Test with no config value — should return default 5min
 	defaultTimeout := GetKiroApiTimeout()
 	if defaultTimeout != 5*time.Minute {
@@ -134,5 +138,52 @@ func TestAccountAllowOverageMigration(t *testing.T) {
 		if _, ok := a["allowOverage"]; ok {
 			t.Fatalf("expected allowOverage to be omitted from persisted file, got %+v", a)
 		}
+	}
+}
+
+func TestFindAccountByEmail(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	// No accounts yet — should return nil
+	if got := FindAccountByEmail("test@example.com"); got != nil {
+		t.Fatalf("expected nil for empty config, got %v", got)
+	}
+
+	// Add an account with an email
+	acc := Account{
+		ID:         "acc-1",
+		Email:      "test@example.com",
+		Enabled:    true,
+		AuthMethod: "social",
+	}
+	if err := AddAccount(acc); err != nil {
+		t.Fatalf("AddAccount: %v", err)
+	}
+
+	// Should find it
+	found := FindAccountByEmail("test@example.com")
+	if found == nil {
+		t.Fatal("expected to find account by email")
+	}
+	if found.ID != "acc-1" {
+		t.Fatalf("expected acc-1, got %s", found.ID)
+	}
+
+	// Non-existent email returns nil
+	if got := FindAccountByEmail("nonexistent@example.com"); got != nil {
+		t.Fatalf("expected nil for unknown email, got %v", got)
+	}
+
+	// Empty string returns nil
+	if got := FindAccountByEmail(""); got != nil {
+		t.Fatalf("expected nil for empty email, got %v", got)
+	}
+
+	// Case-sensitive match
+	if got := FindAccountByEmail("TEST@example.com"); got != nil {
+		t.Fatalf("expected nil for different case, got %v", got)
 	}
 }

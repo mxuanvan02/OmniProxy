@@ -53,6 +53,25 @@ func isAuthErrorMessage(msg string) bool {
 		strings.Contains(msg, "refresh token expired")
 }
 
+// isNetworkError reports whether an error string indicates a transport-level
+// network failure (connection refused, DNS failure, timeout, reset, etc.).
+// These affect all accounts equally and should not trigger model-lock cooldowns
+// that exhaust the pool — a brief per-account rotation is sufficient.
+func isNetworkError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "connection refused") ||
+		strings.Contains(lower, "no such host") ||
+		strings.Contains(lower, "i/o timeout") ||
+		strings.Contains(lower, "connection reset") ||
+		strings.Contains(lower, "broken pipe") ||
+		strings.Contains(lower, "eof") ||
+		strings.Contains(lower, "dial tcp") ||
+		strings.Contains(lower, "dial udp") ||
+		strings.Contains(lower, "timeout exceeded") ||      // Go http.Client.Timeout
+		strings.Contains(lower, "client.timeout") ||         // Go http.Client error prefix
+		strings.Contains(lower, "context deadline exceeded") // Request context timeout
+}
+
 // hasStatusToken returns true when status appears in s with non-digit boundaries
 // on both sides, so "401" matches "refresh failed: 401 ..." but not "request_401abc".
 func hasStatusToken(s, status string) bool {
@@ -142,6 +161,12 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error, model
 		// re-registration + social fallback internally. If all paths fail, brief
 		// cooldown prevents tight loops while next cycle retries.
 		h.pool.RecordError(account.ID, false, model)
+	case isNetworkError(errMsg):
+		// Network errors (connection refused, DNS failure, timeout) affect all
+		// accounts equally when the gateway is down. Do NOT model-lock — just
+		// rotate to the next account. The brief cooldown from RecordError would
+		// exhaust the pool unnecessarily.
+		logger.Debugf("[AccountFailover] Network error for %s: %v — rotating without cooldown", account.Email, err)
 	default:
 		h.pool.RecordError(account.ID, false, model)
 	}

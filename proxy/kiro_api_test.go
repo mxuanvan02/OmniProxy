@@ -9,6 +9,49 @@ import (
 	"testing"
 )
 
+func TestRefreshAccountInfoDoesNotDisableOnAuthError(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+
+	acc := config.Account{
+		ID:           "test-acc",
+		Email:        "test@example.com",
+		Enabled:      true,
+		AccessToken:  "expired-token",
+		RefreshToken: "expired-refresh",
+		AuthMethod:   "social",
+		Region:       "us-east-1",
+	}
+	if err := config.AddAccount(acc); err != nil {
+		t.Fatalf("AddAccount: %v", err)
+	}
+
+	// Call RefreshAccountInfo — since GetUsageLimits will fail (no live server),
+	// this exercises the error path. The account should NOT be disabled.
+	_, err := RefreshAccountInfo(&acc)
+	_ = err // We expect an error, that's fine
+
+	// Reload and check the account is still enabled
+	after := config.GetAccounts()
+	var found bool
+	for _, a := range after {
+		if a.ID == "test-acc" {
+			found = true
+			if !a.Enabled {
+				t.Fatalf("account was disabled by RefreshAccountInfo error path")
+			}
+			if a.BanStatus == "BANNED" {
+				t.Fatalf("account was banned by RefreshAccountInfo error path")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("account disappeared after RefreshAccountInfo")
+	}
+}
+
 func TestResolveProfileArnReturnsCachedValueWithoutRequest(t *testing.T) {
 	kiroRestHttpStore.Store(&http.Client{
 		Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {

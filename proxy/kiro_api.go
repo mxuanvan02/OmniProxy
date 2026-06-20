@@ -264,43 +264,17 @@ func RefreshAccountInfo(account *config.Account) (*config.AccountInfo, error) {
 	// get usage and subscription info
 	usage, err := GetUsageLimits(account)
 	if err != nil {
-		// detect ban status
-		errMsg := err.Error()
-		if strings.Contains(errMsg, "TEMPORARILY_SUSPENDED") {
-			// account temporarily banned, auto-disable and mark banned
-			logger.Warnf("[RefreshAccountInfo] Account %s is temporarily suspended: %v", account.Email, err)
-
-			// update account ban status and auto-disable
-			updatedAccount := *account
-			updatedAccount.Enabled = false
-			updatedAccount.BanStatus = "BANNED"
-			updatedAccount.BanReason = "AWS temporarily suspended - unusual user activity detected"
-			updatedAccount.BanTime = time.Now().Unix()
-
-			// save updated account status
-			if updateErr := config.UpdateAccount(account.ID, updatedAccount); updateErr != nil {
-				logger.Errorf("[RefreshAccountInfo] Failed to update account ban status: %v", updateErr)
-			}
-
-			return nil, fmt.Errorf("Account suspended: %w", err)
-		} else if strings.Contains(errMsg, "403") || strings.Contains(errMsg, "401") ||
-			strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "expired") {
-			// token-related error, may need re-authentication
-			logger.Warnf("[RefreshAccountInfo] Authentication error for %s: %v", account.Email, err)
-
-			// set account ban status to auth failure and auto-disable
-			updatedAccount := *account
-			updatedAccount.Enabled = false
-			updatedAccount.BanStatus = "BANNED"
-			updatedAccount.BanReason = "Authentication failed - token invalid or expired"
-			updatedAccount.BanTime = time.Now().Unix()
-
-			// save updated account status
-			if updateErr := config.UpdateAccount(account.ID, updatedAccount); updateErr != nil {
-				logger.Errorf("[RefreshAccountInfo] Failed to update account ban status: %v", updateErr)
-			}
-		}
-
+		// Background refresh should NOT auto-disable accounts on transient errors.
+		// The request-time retry loop (handleAccountFailure) handles cooldowns and
+		// account rotation. Background refresh only fetches fresh info — if the
+		// gateway is temporarily unreachable, logging the error and returning is
+		// sufficient. The account remains usable for the next request.
+		//
+		// Auto-disabling here was causing persistent 503 errors: a transient
+		// gateway blip during the 10-minute refresh cycle would permanently mark
+		// accounts as BANNED, and subsequent SSO re-auth would update tokens but
+		// forget to re-enable the account.
+		logger.Warnf("[RefreshAccountInfo] Failed to refresh %s: %v — account remains enabled", account.Email, err)
 		return nil, fmt.Errorf("GetUsageLimits: %w", err)
 	}
 
