@@ -5165,6 +5165,46 @@ func (h *Handler) apiKiroSsoExchange(w http.ResponseWriter, r *http.Request) {
 			existing.ExpiresAt = newExpiresAt
 			existing.Email = email
 			existing.AuthMethod = authMethod
+			existing.Enabled = true
+			existing.BanStatus = "ACTIVE"
+			existing.BanReason = ""
+			existing.BanTime = 0
+			if tokenEndpoint != "" {
+				existing.TokenEndpoint = tokenEndpoint
+				existing.IssuerURL = issuerURL
+				existing.Scopes = scopesStr
+			}
+			if err := config.UpdateAccount(existing.ID, *existing); err != nil {
+				w.WriteHeader(500)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+			h.pool.Reload()
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"source":  "kiro-sso-" + session.Provider,
+				"account": map[string]interface{}{
+					"id":    existing.ID,
+					"email": email,
+				},
+			})
+			return
+		}
+	}
+
+	// Fallback: try to find existing account by email to avoid duplicates
+	// when profileArn was unavailable (e.g. gateway was down during resolution).
+	if email != "" {
+		if existing := config.FindAccountByEmail(email); existing != nil {
+			existing.AccessToken = newAccessToken
+			existing.RefreshToken = newRefreshToken
+			existing.ExpiresAt = newExpiresAt
+			existing.Enabled = true
+			existing.BanStatus = "ACTIVE"
+			existing.BanReason = ""
+			existing.BanTime = 0
+			existing.ProfileArn = profileArn
+			existing.AuthMethod = authMethod
 			if tokenEndpoint != "" {
 				existing.TokenEndpoint = tokenEndpoint
 				existing.IssuerURL = issuerURL
