@@ -66,7 +66,10 @@ func isNetworkError(msg string) bool {
 		strings.Contains(lower, "broken pipe") ||
 		strings.Contains(lower, "eof") ||
 		strings.Contains(lower, "dial tcp") ||
-		strings.Contains(lower, "dial udp")
+		strings.Contains(lower, "dial udp") ||
+		strings.Contains(lower, "timeout exceeded") ||      // Go http.Client.Timeout
+		strings.Contains(lower, "client.timeout") ||         // Go http.Client error prefix
+		strings.Contains(lower, "context deadline exceeded") // Request context timeout
 }
 
 // hasStatusToken returns true when status appears in s with non-digit boundaries

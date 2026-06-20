@@ -57,6 +57,10 @@ func TestUpdateSettingsPatchCanExplicitlyDisableAPIKey(t *testing.T) {
 }
 
 func TestGetKiroApiTimeout(t *testing.T) {
+	prev := os.Getenv("API_TIMEOUT_MS")
+	os.Unsetenv("API_TIMEOUT_MS")
+	defer os.Setenv("API_TIMEOUT_MS", prev)
+
 	// Test with no config value — should return default 5min
 	defaultTimeout := GetKiroApiTimeout()
 	if defaultTimeout != 5*time.Minute {
