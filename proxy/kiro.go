@@ -29,6 +29,9 @@ type kiroEndpoint struct {
 	Name      string
 }
 
+// kiroEndpoints holds the default (us-east-1) streaming endpoint templates.
+// buildKiroEndpoints derives region-specific URLs from these. Tests override
+// this slice to point at a local test server.
 var kiroEndpoints = []kiroEndpoint{
 	{
 		URL:       "https://q.us-east-1.amazonaws.com/generateAssistantResponse",
@@ -270,9 +273,34 @@ func setPayloadProfileArnForAccount(payload *KiroPayload, account *config.Accoun
 	}
 }
 
+// buildKiroEndpoints derives region-specific streaming endpoints. For us-east-1
+// it uses the kiroEndpoints templates as-is (and tests override that slice). For
+// any other region the legacy codewhisperer.<region> host does NOT exist — only
+// q.<region>.amazonaws.com does — so all endpoints point at q.<region>.
+// Without this, IdC/enterprise profiles outside us-east-1 (e.g. eu-central-1)
+// hit a non-existent host / wrong region and the upstream returns 403.
+func buildKiroEndpoints(region string) []kiroEndpoint {
+	region = strings.ToLower(strings.TrimSpace(region))
+	if region == "" {
+		region = "us-east-1"
+	}
+	if region == "us-east-1" {
+		out := make([]kiroEndpoint, len(kiroEndpoints))
+		copy(out, kiroEndpoints)
+		return out
+	}
+	q := fmt.Sprintf("https://q.%s.amazonaws.com/generateAssistantResponse", region)
+	return []kiroEndpoint{
+		{URL: q, Origin: "AI_EDITOR", AmzTarget: "", Name: "Kiro IDE"},
+		{URL: q, Origin: "AI_EDITOR", AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse", Name: "CodeWhisperer"},
+		{URL: q, Origin: "AI_EDITOR", AmzTarget: "AmazonQDeveloperStreamingService.SendMessage", Name: "AmazonQ"},
+	}
+}
+
 // getSortedEndpoints returns endpoints ordered by user preference, with optional fallback.
-func getSortedEndpoints(preferred string) []kiroEndpoint {
+func getSortedEndpoints(preferred, region string) []kiroEndpoint {
 	fallback := config.GetEndpointFallback()
+	endpoints := buildKiroEndpoints(region)
 
 	var primary int
 	switch preferred {
@@ -284,17 +312,17 @@ func getSortedEndpoints(preferred string) []kiroEndpoint {
 		primary = 2
 	default:
 		// "auto": Kiro first, then fallback to others
-		return []kiroEndpoint{kiroEndpoints[0], kiroEndpoints[1], kiroEndpoints[2]}
+		return []kiroEndpoint{endpoints[0], endpoints[1], endpoints[2]}
 	}
 
 	if !fallback {
 		// No fallback: only use the selected endpoint
-		return []kiroEndpoint{kiroEndpoints[primary]}
+		return []kiroEndpoint{endpoints[primary]}
 	}
 
 	// With fallback: selected first, then others in order
-	result := []kiroEndpoint{kiroEndpoints[primary]}
-	for i, ep := range kiroEndpoints {
+	result := []kiroEndpoint{endpoints[primary]}
+	for i, ep := range endpoints {
 		if i != primary {
 			result = append(result, ep)
 		}
@@ -376,7 +404,11 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	}
 
 	// Build endpoint list ordered by configuration, then reorder for api-key auth.
-	endpoints := getSortedEndpoints(config.GetPreferredEndpoint())
+	// Use the profile-derived runtime region (regionForAccount), not the raw
+	// account.Region — for AWS IdC the profile region (e.g. eu-central-1) can
+	// differ from the SSO region stored on the account (e.g. us-east-1). This
+	// runs after profile-ARN resolution above, so account.ProfileArn is set.
+	endpoints := getSortedEndpoints(config.GetPreferredEndpoint(), regionForAccount(account))
 	var authMethod string
 	if account != nil {
 		authMethod = account.AuthMethod

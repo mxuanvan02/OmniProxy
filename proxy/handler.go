@@ -6061,6 +6061,21 @@ func (h *Handler) apiImportSSOCache(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// regionFromArn extracts the AWS region from a CodeWhisperer profile ARN of the
+// form arn:aws:codewhisperer:<region>:<account>:profile/<id>. Returns "" if the
+// ARN is empty or malformed.
+func regionFromArn(arn string) string {
+	arn = strings.TrimSpace(arn)
+	if arn == "" {
+		return ""
+	}
+	parts := strings.Split(arn, ":")
+	if len(parts) < 4 {
+		return ""
+	}
+	return strings.TrimSpace(parts[3])
+}
+
 func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		AccessToken  string `json:"accessToken"`
@@ -6128,6 +6143,27 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	if newRefreshToken != "" {
 		req.RefreshToken = newRefreshToken
 	}
+
+	// Discover the profile ARN explicitly. The OIDC /token refresh used for
+	// idc/Builder-ID accounts never returns a profileArn, so newProfileArn is
+	// empty here. Persisting an account with an empty ProfileArn makes the
+	// upstream CodeWhisperer call reject generateAssistantResponse with
+	// HTTP 403 "User is not authorized to make this call". Every other import
+	// path resolves the ARN via DiscoverProfileArn — do the same here for parity.
+	if newProfileArn == "" && req.AuthMethod != "social" {
+		externalIdp := req.AuthMethod == "external_idp"
+		// Probe across regions: enterprise IdC profiles often live outside the
+		// SSO region (e.g. SSO us-east-1 but profile eu-central-1, served by
+		// q.eu-central-1 — codewhisperer.<region> only exists in us-east-1).
+		if pa := auth.DiscoverProfileArnMultiRegion(accessToken, req.Region, externalIdp); pa != "" {
+			newProfileArn = pa
+		}
+	}
+	// NOTE: do NOT overwrite req.Region with the profile ARN's region. For AWS
+	// IdC the SSO/OIDC region (used for token refresh, e.g. us-east-1) often
+	// differs from the CodeWhisperer profile region (e.g. eu-central-1). Region
+	// must stay the SSO region so future refreshes succeed; the runtime endpoint
+	// region is derived from the profile ARN at call time (see regionForAccount).
 
 	// get user info
 	email, _, _ := auth.GetUserInfo(accessToken)
