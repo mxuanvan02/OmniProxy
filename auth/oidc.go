@@ -164,6 +164,17 @@ func PollSocialLogin(deviceCode, provider string) (accessToken, refreshToken, pr
 // profile whose ARN contains the token's region, then falls back to the first profile returned.
 // Builder ID accounts legitimately have none and return "" without error.
 // When externalIdp is true, includes TokenType: EXTERNAL_IDP for enterprise SSO tokens.
+// kiroProfileHost returns the CodeWhisperer/Q service host for a region.
+// The legacy `codewhisperer.<region>` host only exists in us-east-1; every other
+// region (e.g. eu-central-1) is served by `q.<region>.amazonaws.com`.
+func kiroProfileHost(region string) string {
+	region = strings.ToLower(strings.TrimSpace(region))
+	if region == "" || region == "us-east-1" {
+		return "https://codewhisperer.us-east-1.amazonaws.com"
+	}
+	return fmt.Sprintf("https://q.%s.amazonaws.com", region)
+}
+
 func DiscoverProfileArn(accessToken, region string, externalIdp bool) string {
 	if accessToken == "" {
 		return ""
@@ -173,7 +184,7 @@ func DiscoverProfileArn(accessToken, region string, externalIdp bool) string {
 	}
 	region = strings.ToLower(region)
 
-	runtimeHost := fmt.Sprintf("https://codewhisperer.%s.amazonaws.com", region)
+	runtimeHost := kiroProfileHost(region)
 
 	payload := map[string]int{"maxResults": 10}
 	body, _ := json.Marshal(payload)
@@ -233,6 +244,44 @@ func DiscoverProfileArn(accessToken, region string, externalIdp bool) string {
 		}
 	}
 	return fallback
+}
+
+// kiroProfileRegions lists the AWS regions where the Amazon Q Developer profile
+// (and its service endpoint q.<region>.amazonaws.com) actually exists. Per AWS
+// docs the Q Developer profile is only supported in us-east-1 and eu-central-1,
+// and the IAM Identity Center (SSO) region may differ from the profile region —
+// so an account is probed across both to locate its profile.
+// Ref: https://docs.aws.amazon.com/amazonq/latest/qdeveloper-ug/q-admin-setup-subscribe-regions.html
+var kiroProfileRegions = []string{
+	"us-east-1", "eu-central-1",
+}
+
+// DiscoverProfileArnMultiRegion probes Kiro/Q service endpoints across regions and
+// returns the first profile ARN found. preferredRegion (the account's SSO region)
+// is tried first. Returns "" when no profile is available in any region.
+func DiscoverProfileArnMultiRegion(accessToken, preferredRegion string, externalIdp bool) string {
+	if accessToken == "" {
+		return ""
+	}
+	seen := map[string]bool{}
+	var regions []string
+	add := func(r string) {
+		r = strings.ToLower(strings.TrimSpace(r))
+		if r != "" && !seen[r] {
+			seen[r] = true
+			regions = append(regions, r)
+		}
+	}
+	add(preferredRegion)
+	for _, r := range kiroProfileRegions {
+		add(r)
+	}
+	for _, r := range regions {
+		if arn := DiscoverProfileArn(accessToken, r, externalIdp); arn != "" {
+			return arn
+		}
+	}
+	return ""
 }
 
 // deriveMachineID builds a stable machine identifier from the access token and region,

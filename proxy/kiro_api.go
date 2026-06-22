@@ -14,12 +14,45 @@ import (
 )
 
 const (
+	// kiroRestAPIBase is the default CodeWhisperer REST base (us-east-1).
+	// For region-aware requests use kiroRestBase(account) instead — IdC/enterprise
+	// accounts are frequently provisioned in other regions (e.g. eu-central-1),
+	// and hitting us-east-1 with a foreign-region profileArn yields a 403
+	// "User is not authorized to make this call".
 	kiroRestAPIBase = "https://codewhisperer.us-east-1.amazonaws.com"
 )
 
+// kiroRestBase returns the CodeWhisperer/Q REST base URL for the account's
+// effective runtime region (see regionForAccount). The legacy codewhisperer.<region>
+// host only exists in us-east-1; other regions are served by q.<region>.
+func kiroRestBase(account *config.Account) string {
+	region := regionForAccount(account)
+	if region == "us-east-1" {
+		return "https://codewhisperer.us-east-1.amazonaws.com"
+	}
+	return fmt.Sprintf("https://q.%s.amazonaws.com", region)
+}
+
+// regionForAccount resolves the AWS region to use for CodeWhisperer runtime
+// calls (generateAssistantResponse, getUsageLimits, ...). The profile ARN is
+// authoritative — for AWS IdC the profile can live in a different region
+// (e.g. eu-central-1) than the SSO/OIDC region stored in account.Region
+// (e.g. us-east-1). Falls back to account.Region, then us-east-1.
+func regionForAccount(account *config.Account) string {
+	if account != nil {
+		if r := regionFromArn(account.ProfileArn); r != "" {
+			return strings.ToLower(r)
+		}
+		if r := strings.TrimSpace(account.Region); r != "" {
+			return strings.ToLower(r)
+		}
+	}
+	return "us-east-1"
+}
+
 // GetUsageLimits gets account usage and subscription info
 func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
-	url := fmt.Sprintf("%s/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true", kiroRestAPIBase)
+	url := fmt.Sprintf("%s/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true", kiroRestBase(account))
 	url = withProfileArnQuery(url, account)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -49,7 +82,7 @@ func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
 
 // GetUserInfo get user info
 func GetUserInfo(account *config.Account) (*UserInfoResponse, error) {
-	url := fmt.Sprintf("%s/GetUserInfo", kiroRestAPIBase)
+	url := fmt.Sprintf("%s/GetUserInfo", kiroRestBase(account))
 
 	payload := `{"origin":"KIRO_IDE"}`
 	req, err := http.NewRequest("POST", url, strings.NewReader(payload))
@@ -80,7 +113,7 @@ func GetUserInfo(account *config.Account) (*UserInfoResponse, error) {
 
 // ListAvailableModels gets available model list
 func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
-	url := fmt.Sprintf("%s/ListAvailableModels?origin=AI_EDITOR&maxResults=50", kiroRestAPIBase)
+	url := fmt.Sprintf("%s/ListAvailableModels?origin=AI_EDITOR&maxResults=50", kiroRestBase(account))
 	url = withProfileArnQuery(url, account)
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -138,6 +171,20 @@ func ResolveProfileArn(account *config.Account) (string, error) {
 		}
 		account.ProfileArn = profileArn
 		return profileArn, nil
+	}
+
+	// Fallback: probe Kiro/Q endpoints across regions. Enterprise IdC profiles
+	// frequently live outside the SSO region (e.g. SSO us-east-1, profile
+	// eu-central-1) and ListAvailableProfiles at the SSO region returns empty.
+	if account.AccessToken != "" {
+		externalIdp := account.AuthMethod == "external_idp"
+		if arn := auth.DiscoverProfileArnMultiRegion(account.AccessToken, account.Region, externalIdp); arn != "" {
+			if updateErr := config.UpdateAccountProfileArn(account.ID, arn); updateErr != nil {
+				logger.Warnf("[ProfileArn] Failed to cache profile ARN for %s: %v", account.Email, updateErr)
+			}
+			account.ProfileArn = arn
+			return arn, nil
+		}
 	}
 
 	// Fallback: refresh token to get profileArn from auth response
@@ -199,7 +246,7 @@ func isTransientProfileFetchError(err error) bool {
 }
 
 func listAvailableProfiles(account *config.Account) (string, error) {
-	req, err := http.NewRequest("POST", fmt.Sprintf("%s/ListAvailableProfiles", kiroRestAPIBase), strings.NewReader(`{"maxResults":10}`))
+	req, err := http.NewRequest("POST", fmt.Sprintf("%s/ListAvailableProfiles", kiroRestBase(account)), strings.NewReader(`{"maxResults":10}`))
 	if err != nil {
 		return "", err
 	}

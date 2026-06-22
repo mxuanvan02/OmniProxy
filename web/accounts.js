@@ -1168,6 +1168,8 @@ let testModalRunning = false;
       '<option value="Github">' + escapeHtml(t('local.providerGithub')) + '</option>' +
       '</select>' +
       '</div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + '</label>' +
+      '<input type="text" id="localRegion" placeholder="us-east-1" /></div>' +
       '<div class="form-group">' +
       '<label>' + escapeHtml(t('local.tokenFile')) + ' <small>' + escapeHtml(t('local.tokenRequired')) + '</small></label>' +
       '<div class="input-row">' +
@@ -1277,12 +1279,19 @@ let testModalRunning = false;
       if (!clientData.clientId || !clientData.clientSecret) return toastWarning(t('local.clientSecretMissing'));
     }
     const authMethod = clientData ? 'idc' : 'social';
+    // Region resolution: explicit input wins, then the token file, then the
+    // client/registration file ({hash}.json), which is where AWS SSO cache
+    // usually stores it. Without the correct region (e.g. eu-central-1 for
+    // many enterprise IdC tenants), requests hit us-east-1 and the upstream
+    // rejects the foreign-region profileArn with HTTP 403.
+    const regionInput = ($('localRegion')?.value || '').trim();
+    const region = regionInput || tokenData.region || clientData?.region || '';
     const payload = {
       refreshToken: tokenData.refreshToken,
       accessToken: tokenData.accessToken || '',
       clientId: clientData?.clientId || '',
       clientSecret: clientData?.clientSecret || '',
-      region: tokenData.region || '',
+      region,
       authMethod, provider
     };
     const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
