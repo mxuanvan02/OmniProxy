@@ -26,6 +26,10 @@ const (
 // effective runtime region (see regionForAccount). The legacy codewhisperer.<region>
 // host only exists in us-east-1; other regions are served by q.<region>.
 func kiroRestBase(account *config.Account) string {
+	// ksk_ API keys use management.kiro.dev Smithy endpoints
+	if account != nil && strings.HasPrefix(account.AccessToken, "ksk_") {
+		return "https://management.eu-central-1.kiro.dev"
+	}
 	region := regionForAccount(account)
 	if region == "us-east-1" {
 		return "https://codewhisperer.us-east-1.amazonaws.com"
@@ -113,12 +117,24 @@ func GetUserInfo(account *config.Account) (*UserInfoResponse, error) {
 
 // ListAvailableModels gets available model list
 func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
-	url := fmt.Sprintf("%s/ListAvailableModels?origin=AI_EDITOR&maxResults=50", kiroRestBase(account))
-	url = withProfileArnQuery(url, account)
+	var req *http.Request
+	var err error
 
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
+	// ksk_ keys use Smithy protocol: POST / with X-Amz-Target
+	if account != nil && strings.HasPrefix(account.AccessToken, "ksk_") {
+		req, err = http.NewRequest("POST", "https://management.eu-central-1.kiro.dev/?origin=KIRO_CLI",
+			strings.NewReader(`{"origin":"KIRO_CLI"}`))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("X-Amz-Target", "AmazonCodeWhispererService.ListAvailableModels")
+	} else {
+		url := fmt.Sprintf("%s/ListAvailableModels?origin=AI_EDITOR&maxResults=50", kiroRestBase(account))
+		url = withProfileArnQuery(url, account)
+		req, err = http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	setKiroHeaders(req, account)
@@ -299,6 +315,10 @@ func setKiroHeaders(req *http.Request, account *config.Account) {
 	headerValues := buildRuntimeHeaderValues(account, host)
 
 	req.Header.Set("Accept", "application/json")
+	// ksk_ keys use Smithy x-amz-json-1.0 content type
+	if account != nil && strings.HasPrefix(account.AccessToken, "ksk_") {
+		req.Header.Set("Content-Type", "application/x-amz-json-1.0")
+	}
 	applyKiroBaseHeaders(req, account, headerValues)
 }
 

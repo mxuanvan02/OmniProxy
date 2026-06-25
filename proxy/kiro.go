@@ -334,9 +334,19 @@ func getSortedEndpoints(preferred, region string) []kiroEndpoint {
 // when the account uses API-key auth. The Kiro IDE gateway (kiro.dev) rejects
 // tokentype: API_KEY tokens, so the raw CodeWhisperer endpoint must come first.
 // Mirrors 9router's getOrderedBaseUrls().
-func sortEndpointsForAuth(endpoints []kiroEndpoint, authMethod string) []kiroEndpoint {
+func sortEndpointsForAuth(endpoints []kiroEndpoint, authMethod string, accessToken string) []kiroEndpoint {
 	if authMethod != "api_key" {
 		return endpoints
+	}
+	// ksk_ API keys use Smithy protocol via runtime.kiro.dev with root path.
+	// X-Amz-Target header selects the operation. Region is eu-central-1 (fallback).
+	if strings.HasPrefix(accessToken, "ksk_") {
+		return []kiroEndpoint{{
+			URL:       "https://runtime.eu-central-1.kiro.dev/",
+			Origin:    "KIRO_CLI",
+			AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
+			Name:      "Kiro Runtime (ksk)",
+		}}
 	}
 	var amazon []kiroEndpoint
 	var others []kiroEndpoint
@@ -410,15 +420,23 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 	// runs after profile-ARN resolution above, so account.ProfileArn is set.
 	endpoints := getSortedEndpoints(config.GetPreferredEndpoint(), regionForAccount(account))
 	var authMethod string
+	var accessToken string
 	if account != nil {
 		authMethod = account.AuthMethod
+		accessToken = account.AccessToken
 	}
-	endpoints = sortEndpointsForAuth(endpoints, authMethod)
+	endpoints = sortEndpointsForAuth(endpoints, authMethod, accessToken)
 
 	var lastErr error
 	for _, ep := range endpoints {
 		// Update the origin field for the selected endpoint.
 		payload.ConversationState.CurrentMessage.UserInputMessage.Origin = ep.Origin
+
+		// ksk_ API keys: don't include profileArn in body (server resolves from token)
+		isKsk := account != nil && strings.HasPrefix(account.AccessToken, "ksk_")
+		if isKsk {
+			payload.ProfileArn = ""
+		}
 
 		reqBody, _ := json.Marshal(payload)
 		req, err := http.NewRequest("POST", ep.URL, bytes.NewReader(reqBody))
@@ -433,14 +451,20 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		}
 		headerValues := buildStreamingHeaderValues(account, host)
 
-		req.Header.Set("Content-Type", "application/json")
+		// ksk_ keys use Smithy protocol content-type
+		if isKsk {
+			req.Header.Set("Content-Type", "application/x-amz-json-1.0")
+		} else {
+			req.Header.Set("Content-Type", "application/json")
+		}
 		req.Header.Set("Accept", "*/*")
 		if ep.AmzTarget != "" {
 			req.Header.Set("X-Amz-Target", ep.AmzTarget)
 		}
 		applyKiroBaseHeaders(req, account, headerValues)
-		req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
-		req.Header.Set("x-amzn-codewhisperer-optout", "true")
+		if !isKsk {
+			req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
+		}
 		req.Header.Set("Amz-Sdk-Request", "attempt=1; max=3")
 		req.Header.Set("Amz-Sdk-Invocation-Id", uuid.New().String())
 

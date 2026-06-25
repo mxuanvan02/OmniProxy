@@ -5815,11 +5815,15 @@ func (h *Handler) apiImportKiroApiKey(w http.ResponseWriter, r *http.Request) {
 	email := extractEmailFromJWT(body.ApiKey)
 
 	now := time.Now()
+	// ksk_ keys operate in eu-central-1 region
+	if strings.HasPrefix(body.ApiKey, "ksk_") && region == "us-east-1" {
+		region = "eu-central-1"
+	}
 	account := config.Account{
 		ID:           uuid.New().String(),
 		Email:        email,
 		AuthMethod:   "api_key",
-		Provider:     "API Key",
+		Provider:     "Kiro API Key",
 		AccessToken:  body.ApiKey,
 		RefreshToken: "",
 		ProfileArn:   profileArn,
@@ -5846,6 +5850,13 @@ func (h *Handler) apiImportKiroApiKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func resolveApiKeyProfile(apiKey, region string) (string, error) {
+	if strings.HasPrefix(apiKey, "ksk_") {
+		arn, err := resolveKskProfile(apiKey, region)
+		if err == nil && arn != "" {
+			return arn, nil
+		}
+		return "", nil
+	}
 	endpoint := fmt.Sprintf("https://codewhisperer.%s.amazonaws.com", region)
 	payload := strings.NewReader(`{"maxResults":10}`)
 
@@ -5880,29 +5891,49 @@ func resolveApiKeyProfile(apiKey, region string) (string, error) {
 		return "", fmt.Errorf("parse response: %w", err)
 	}
 
-	for _, p := range result.Profiles {
-			arn := p.Arn
-			if arn == "" {
-				arn = p.ProfileArn
-			}
-			if arn != "" {
-				parts := strings.Split(arn, ":")
-				if len(parts) >= 5 && parts[3] == region {
-					return arn, nil
-				}
-			}
+	return "", fmt.Errorf("no profiles found for this API key")
+}
+
+func resolveKskProfile(apiKey, region string) (string, error) {
+	// ksk_ keys use Smithy protocol: POST to root path with X-Amz-Target header.
+	// GetProfile succeeds at eu-central-1 (fallback region for ksk_ keys).
+	regions := []string{"eu-central-1", "us-east-1"}
+	if region != "" && region != "eu-central-1" && region != "us-east-1" {
+		regions = append([]string{region}, regions...)
+	}
+	for _, r := range regions {
+		endpoint := fmt.Sprintf("https://management.%s.kiro.dev/", r)
+		req, err := http.NewRequest("POST", endpoint, strings.NewReader(`{}`))
+		if err != nil {
+			continue
 		}
-	for _, p := range result.Profiles {
-		arn := p.Arn
-		if arn == "" {
-			arn = p.ProfileArn
+		req.Header.Set("Content-Type", "application/x-amz-json-1.0")
+		req.Header.Set("X-Amz-Target", "AmazonCodeWhispererService.GetProfile")
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		req.Header.Set("tokentype", "API_KEY")
+		req.Header.Set("Accept", "*/*")
+		client := auth.GetAuthClientForProxy(config.GetProxyURL())
+		resp, err := client.Do(req)
+		if err != nil {
+			continue
 		}
-		if arn != "" {
-			return arn, nil
+		defer resp.Body.Close()
+		if resp.StatusCode != 200 {
+			continue
+		}
+		var result struct {
+			Profile struct {
+				Arn string `json:"arn"`
+			} `json:"profile"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			continue
+		}
+		if result.Profile.Arn != "" {
+			return result.Profile.Arn, nil
 		}
 	}
-
-	return "", fmt.Errorf("no profiles found for this API key")
+	return "", fmt.Errorf("could not resolve profile for ksk_ key")
 }
 
 func extractEmailFromJWT(token string) string {

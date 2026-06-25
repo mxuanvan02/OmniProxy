@@ -3,13 +3,18 @@ package proxy
 import (
 	"crypto/sha256"
 	"fmt"
-	"superkiro/config"
 	"net/http"
+	"strings"
+	"superkiro/config"
 )
 
 const (
 	kiroStreamingSDKVersion = "1.0.34"
 	kiroRuntimeSDKVersion   = "1.0.0"
+
+	// kiro-cli (Rust binary) user-agent strings — required for ksk_ API key auth
+	kiroCliUserAgent    = "aws-sdk-rust/1.3.15 ua/2.1 api/codewhispererstreaming/0.1.16551 os/linux lang/rust/1.92.0 exec-env/AmazonQ-For-CLI Version/2.8.1 md/appVersion-2.8.1 app/AmazonQ-For-CLI"
+	kiroCliAmzUserAgent = "aws-sdk-rust/1.3.15 ua/2.1 api/codewhispererstreaming/0.1.16551 os/linux lang/rust/1.92.0 exec-env/AmazonQ-For-CLI Version/2.8.1 m/F app/AmazonQ-For-CLI"
 )
 
 type kiroHeaderValues struct {
@@ -82,6 +87,8 @@ func applyKiroBaseHeaders(req *http.Request, account *config.Account, values kir
 	if account != nil {
 		switch account.AuthMethod {
 		case "api_key":
+			// ALL API keys (including ksk_) require tokentype: API_KEY header.
+			// The kiro.dev management/runtime endpoints validate this header.
 			req.Header.Set("tokentype", "API_KEY")
 		case "external_idp":
 			// Enterprise SSO (Azure AD) tokens are IdP-issued JWTs, not AWS Cognito
@@ -90,9 +97,15 @@ func applyKiroBaseHeaders(req *http.Request, account *config.Account, values kir
 			req.Header.Set("TokenType", "EXTERNAL_IDP")
 		}
 	}
-	req.Header.Set("User-Agent", values.UserAgent)
-	req.Header.Set("x-amz-user-agent", values.AmzUserAgent)
-	req.Header.Set("x-amzn-codewhisperer-optout", "true")
+	// ksk_ API keys use Smithy-style user-agent matching kiro-cli binary
+	if account != nil && strings.HasPrefix(account.AccessToken, "ksk_") {
+		req.Header.Set("User-Agent", kiroCliUserAgent)
+		req.Header.Set("x-amz-user-agent", kiroCliAmzUserAgent)
+	} else {
+		req.Header.Set("User-Agent", values.UserAgent)
+		req.Header.Set("x-amz-user-agent", values.AmzUserAgent)
+	}
+	req.Header.Set("x-amzn-codewhisperer-optout", "false")
 	if values.Host != "" {
 		req.Host = values.Host
 	}
