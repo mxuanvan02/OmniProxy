@@ -10,6 +10,18 @@ import (
 	"time"
 )
 
+// Endpoint labels identify which client-facing API a request came through. They
+// are the "endpoint" dimension in usage accounting (By Endpoint table) and the
+// in-flight label in TrackActive — distinct from the upstream account.Provider
+// (BuilderId/ExternalIdp) that the "provider" dimension records. Use these
+// constants everywhere instead of bare string literals so the two roles never
+// get crossed again (e.g. an OpenAI request mislabelled "claude").
+const (
+	endpointClaude          = "claude"
+	endpointOpenAI          = "openai"
+	endpointOpenAIResponses = "openai-responses"
+)
+
 // RequestRecord is a single usage event captured during a proxy request.
 type RequestRecord struct {
 	Timestamp       string  `json:"timestamp"`
@@ -26,11 +38,21 @@ type RequestRecord struct {
 }
 
 // PeriodSummary holds aggregated stats for a single time bucket.
+//
+// The By* breakdown maps are populated only on the per-day daily buckets so the
+// usage breakdowns survive past the ring buffer's 500-record cap. They are
+// omitempty + nil on legacy daily files and on the nested per-dimension
+// summaries (which never carry their own sub-breakdowns).
 type PeriodSummary struct {
 	Requests          int     `json:"requests"`
 	PromptTokens      int     `json:"promptTokens"`
 	CompletionTokens  int     `json:"completionTokens"`
 	Cost              float64 `json:"cost"`
+
+	ByModel    map[string]*PeriodSummary `json:"byModel,omitempty"`
+	ByAccount  map[string]*PeriodSummary `json:"byAccount,omitempty"`
+	ByAPIKey   map[string]*PeriodSummary `json:"byApiKey,omitempty"`
+	ByEndpoint map[string]*PeriodSummary `json:"byEndpoint,omitempty"`
 }
 
 // UsageStats holds the full response for the usage stats endpoint.
@@ -181,7 +203,21 @@ func (t *UsageTracker) Append(r RequestRecord) {
 	day.CompletionTokens += r.OutputTokens
 	day.Cost += r.Cost
 
-	// Remove from active requests
+	// Per-day breakdowns so the By* tables survive past the ring buffer cap.
+	if day.ByModel == nil {
+		day.ByModel = make(map[string]*PeriodSummary)
+		day.ByAccount = make(map[string]*PeriodSummary)
+		day.ByAPIKey = make(map[string]*PeriodSummary)
+		day.ByEndpoint = make(map[string]*PeriodSummary)
+	}
+	addToSummaryMap(day.ByModel, r.Model, r.InputTokens, r.OutputTokens, r.Cost)
+	addToSummaryMap(day.ByAccount, r.AccountID, r.InputTokens, r.OutputTokens, r.Cost)
+	if r.APIKeyID != "" {
+		addToSummaryMap(day.ByAPIKey, r.APIKeyID, r.InputTokens, r.OutputTokens, r.Cost)
+	}
+	if r.Endpoint != "" {
+		addToSummaryMap(day.ByEndpoint, r.Endpoint, r.InputTokens, r.OutputTokens, r.Cost)
+	}
 	delete(t.activeReqs, r.AccountID)
 
 	// Push SSE to all listeners (already holding lock, pass data directly)
@@ -201,12 +237,18 @@ func (t *UsageTracker) Append(r RequestRecord) {
 	}(activeSnapshot, recentSnapshot)
 }
 
-// TrackActive marks a request as in-flight.
-func (t *UsageTracker) TrackActive(accountID, provider, model string) {
+// TrackActive marks a request as in-flight. endpoint is the client-facing API
+// surface (EndpointClaude/EndpointOpenAI/EndpointOpenAIResponses), NOT the
+// upstream account provider — the ActiveRequest.Provider field is only a
+// topology display label, so it carries the endpoint here.
+func (t *UsageTracker) TrackActive(accountID, endpoint, model string) {
+	if t == nil {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.activeReqs[accountID] = ActiveRequest{
-		Provider:  provider,
+		Provider:  endpoint,
 		Model:     model,
 		AccountID: accountID,
 	}
@@ -214,6 +256,9 @@ func (t *UsageTracker) TrackActive(accountID, provider, model string) {
 
 // RemoveActive removes an active request (on failure).
 func (t *UsageTracker) RemoveActive(accountID string) {
+	if t == nil {
+		return
+	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	delete(t.activeReqs, accountID)
@@ -233,29 +278,16 @@ func (t *UsageTracker) GetStats(period string) *UsageStats {
 		ByEndpoint: make(map[string]*PeriodSummary),
 	}
 
-	// Collect recent requests from ring buffer
+	// Recent requests stay sourced from the ring buffer — it is the live
+	// "recent activity" feed, intentionally capped at ringCap.
 	stats.RecentRequests = t.getRecentRequestsLocked(cutoff)
 
-	// Aggregate by dimensions
-	for _, rec := range stats.RecentRequests {
-		stats.TotalRequests++
-		stats.TotalPromptTokens += rec.InputTokens
-		stats.TotalCompletionTokens += rec.OutputTokens
-		stats.TotalCost += rec.Cost
-
-		// By model
-		t.addToSummary(stats.ByModel, rec.Model, rec.InputTokens, rec.OutputTokens, rec.Cost)
-		// By account
-		t.addToSummary(stats.ByAccount, rec.AccountID, rec.InputTokens, rec.OutputTokens, rec.Cost)
-		// By API key
-		if rec.APIKeyID != "" {
-			t.addToSummary(stats.ByAPIKey, rec.APIKeyID, rec.InputTokens, rec.OutputTokens, rec.Cost)
-		}
-		// By endpoint
-		if rec.Endpoint != "" {
-			t.addToSummary(stats.ByEndpoint, rec.Endpoint, rec.InputTokens, rec.OutputTokens, rec.Cost)
-		}
-	}
+	// Headline totals AND the By* breakdowns come from the uncapped daily
+	// aggregation, summed over the days inside the requested period. This is what
+	// "đếm dồn theo thời gian" should show and keeps the tables growing past the
+	// ring buffer's ringCap cap (the "stuck at 500" bug). Days persisted before
+	// per-day breakdowns existed contribute to the totals but carry no By* detail.
+	t.sumDailyTotalsLocked(stats, period)
 
 	// Active requests
 	stats.ActiveRequests = make([]ActiveRequest, 0, len(t.activeReqs))
@@ -390,7 +422,13 @@ func (t *UsageTracker) getAllRecordsLocked() []RequestRecord {
 	return result
 }
 
-func (t *UsageTracker) addToSummary(m map[string]*PeriodSummary, key string, prompt, completion int, cost float64) {
+// addToSummaryMap accumulates a single request into a breakdown map keyed by
+// model/account/apikey/endpoint. Used to build the per-day breakdowns stored on
+// each daily bucket so the By* tables are not capped by the ring buffer.
+func addToSummaryMap(m map[string]*PeriodSummary, key string, prompt, completion int, cost float64) {
+	if key == "" {
+		return
+	}
 	s, ok := m[key]
 	if !ok {
 		s = &PeriodSummary{}
@@ -400,6 +438,76 @@ func (t *UsageTracker) addToSummary(m map[string]*PeriodSummary, key string, pro
 	s.PromptTokens += prompt
 	s.CompletionTokens += completion
 	s.Cost += cost
+}
+
+// mergeSummaryInto folds one source breakdown map into a destination, summing
+// the per-key totals. Used to combine multiple days' breakdowns over a period.
+func mergeSummaryMapInto(dst, src map[string]*PeriodSummary) {
+	for key, s := range src {
+		if s == nil {
+			continue
+		}
+		d, ok := dst[key]
+		if !ok {
+			d = &PeriodSummary{}
+			dst[key] = d
+		}
+		d.Requests += s.Requests
+		d.PromptTokens += s.PromptTokens
+		d.CompletionTokens += s.CompletionTokens
+		d.Cost += s.Cost
+	}
+}
+
+// sumDailyTotalsLocked fills the headline totals (TotalRequests/tokens/cost)
+// from the uncapped daily aggregation, summing only the days that fall within
+// the requested period. dailyData is keyed by UTC date ("2006-01-02"). The ring
+// buffer is capped at ringCap and must not be used for these lifetime-style
+// totals (that was the "stuck at 500" bug). Caller must hold t.mu.
+func (t *UsageTracker) sumDailyTotalsLocked(stats *UsageStats, period string) {
+	cutoffDate := dailyCutoffDate(period)
+	for dateKey, day := range t.dailyData {
+		if day == nil {
+			continue
+		}
+		if cutoffDate != "" && dateKey < cutoffDate {
+			continue
+		}
+		stats.TotalRequests += day.Requests
+		stats.TotalPromptTokens += day.PromptTokens
+		stats.TotalCompletionTokens += day.CompletionTokens
+		stats.TotalCost += day.Cost
+
+		// Merge each day's per-dimension breakdown so the By* tables are also
+		// lifetime-accurate instead of capped at the ring buffer size. Legacy
+		// daily buckets written before this field existed have nil maps and
+		// simply contribute nothing to the breakdown (their totals still count).
+		mergeSummaryMapInto(stats.ByModel, day.ByModel)
+		mergeSummaryMapInto(stats.ByAccount, day.ByAccount)
+		mergeSummaryMapInto(stats.ByAPIKey, day.ByAPIKey)
+		mergeSummaryMapInto(stats.ByEndpoint, day.ByEndpoint)
+	}
+}
+
+// dailyCutoffDate returns the earliest UTC date ("2006-01-02") to include for a
+// period, or "" to include every day. Daily buckets have day granularity, so
+// sub-day periods (today/24h) both collapse to "today in UTC".
+func dailyCutoffDate(period string) string {
+	now := time.Now().UTC()
+	switch period {
+	case "all":
+		return ""
+	case "today", "24h":
+		return now.Format("2006-01-02")
+	case "7d":
+		return now.AddDate(0, 0, -6).Format("2006-01-02")
+	case "30d":
+		return now.AddDate(0, 0, -29).Format("2006-01-02")
+	case "60d":
+		return now.AddDate(0, 0, -59).Format("2006-01-02")
+	default:
+		return now.AddDate(0, 0, -6).Format("2006-01-02")
+	}
 }
 
 // SSE broadcasting

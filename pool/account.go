@@ -225,7 +225,12 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 		return acc
 	}
 
-	// fallback: find account with shortest cooldown that supports the model and is not model-locked
+	// Fallback: no immediately-available account. Return the enabled account that
+	// becomes available soonest (shortest account cooldown OR model lock), so the
+	// request attempts a real upstream call instead of surfacing a misleading 503
+	// "No available accounts". A purely in-memory model lock must NOT make an
+	// otherwise-usable account vanish — that is what forced an operator restart.
+	// Only quota-blocked accounts (a persisted, intentional state) stay excluded.
 	var best *config.Account
 	var earliest time.Time
 	for i := range p.accounts {
@@ -239,16 +244,23 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 		if isQuotaBlocked(*acc, allowOverUsage) {
 			continue
 		}
-		if p.isModelLocked(acc.ID, model, now) {
-			continue
+		// Soonest time this account is free of every in-memory penalty.
+		var until time.Time
+		if cd, ok := p.cooldowns[acc.ID]; ok && cd.After(until) {
+			until = cd
 		}
-		if cooldown, ok := p.cooldowns[acc.ID]; ok {
-			if best == nil || cooldown.Before(earliest) {
-				best = acc
-				earliest = cooldown
+		if locks, ok := p.modelLocks[acc.ID]; ok && model != "" {
+			if ml, ok := locks[model]; ok && ml.After(until) {
+				until = ml
 			}
-		} else {
+		}
+		if until.IsZero() {
+			// No penalty at all — usable right now.
 			return acc
+		}
+		if best == nil || until.Before(earliest) {
+			best = acc
+			earliest = until
 		}
 	}
 	return best

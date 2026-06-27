@@ -1273,12 +1273,17 @@ let testModalRunning = false;
     let tokenData, clientData;
     try { tokenData = JSON.parse(tokenJson); } catch { return toastWarning(t('local.tokenInvalid')); }
     if (!tokenData.refreshToken) return toastWarning(t('local.refreshTokenMissing'));
-    if (!isSocial) {
+    // Enterprise external IdP (e.g. Kiro IDE via Microsoft/Azure AD): the token
+    // file itself carries authMethod=external_idp plus tokenEndpoint/scopes and
+    // its own clientId. Refresh goes to the IdP token endpoint, NOT AWS OIDC, so
+    // the {hash}.json registration file is irrelevant and must not be required.
+    const isExternalIdp = tokenData.authMethod === 'external_idp' || !!tokenData.tokenEndpoint;
+    if (!isSocial && !isExternalIdp) {
       if (!clientJson) return toastWarning(t('local.clientMissing'));
       try { clientData = JSON.parse(clientJson); } catch { return toastWarning(t('local.clientInvalid')); }
       if (!clientData.clientId || !clientData.clientSecret) return toastWarning(t('local.clientSecretMissing'));
     }
-    const authMethod = clientData ? 'idc' : 'social';
+    const authMethod = isExternalIdp ? 'external_idp' : (clientData ? 'idc' : 'social');
     // Region resolution: explicit input wins, then the token file, then the
     // client/registration file ({hash}.json), which is where AWS SSO cache
     // usually stores it. Without the correct region (e.g. eu-central-1 for
@@ -1289,10 +1294,14 @@ let testModalRunning = false;
     const payload = {
       refreshToken: tokenData.refreshToken,
       accessToken: tokenData.accessToken || '',
-      clientId: clientData?.clientId || '',
-      clientSecret: clientData?.clientSecret || '',
+      clientId: isExternalIdp ? (tokenData.clientId || '') : (clientData?.clientId || ''),
+      clientSecret: isExternalIdp ? '' : (clientData?.clientSecret || ''),
       region,
-      authMethod, provider
+      authMethod,
+      provider: isExternalIdp ? (tokenData.provider || 'ExternalIdp') : provider,
+      tokenEndpoint: isExternalIdp ? (tokenData.tokenEndpoint || '') : '',
+      issuerUrl: isExternalIdp ? (tokenData.issuerUrl || '') : '',
+      scopes: isExternalIdp ? (tokenData.scopes || '') : ''
     };
     const res = await api('/auth/credentials', { method: 'POST', body: JSON.stringify(payload) });
     const d = await res.json();

@@ -1,0 +1,10 @@
+# Runtime data (config with secrets, usage history, pid)
+/data/
+
+# Compiled binary
+/superkiro
+
+# Editor / OS
+.DS_Store
+*.orig
+*.rej

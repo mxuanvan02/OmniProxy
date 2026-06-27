@@ -187,3 +187,45 @@ func TestFindAccountByEmail(t *testing.T) {
 		t.Fatalf("expected nil for different case, got %v", got)
 	}
 }
+
+// TestFindAccountByProfileArnAndEmail guards the external_idp dedup fix: two
+// Azure AD users in the same AWS org share one Q Developer profile ARN, so a new
+// login must only match the SAME user (profileArn AND email), never clobber a
+// different org member who happens to share the ARN.
+func TestFindAccountByProfileArnAndEmail(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	const sharedArn = "arn:aws:codewhisperer:us-east-1:111:profile/ORG"
+	if err := AddAccount(Account{ID: "alice", Email: "alice@corp.com", ProfileArn: sharedArn, AuthMethod: "external_idp", Enabled: true}); err != nil {
+		t.Fatalf("AddAccount alice: %v", err)
+	}
+	if err := AddAccount(Account{ID: "bob", Email: "bob@corp.com", ProfileArn: sharedArn, AuthMethod: "external_idp", Enabled: true}); err != nil {
+		t.Fatalf("AddAccount bob: %v", err)
+	}
+
+	// Same ARN + bob's email must return bob, NOT alice (the first ARN match).
+	found := FindAccountByProfileArnAndEmail(sharedArn, "bob@corp.com")
+	if found == nil || found.ID != "bob" {
+		t.Fatalf("expected bob for shared ARN + bob email, got %#v", found)
+	}
+
+	// A brand-new org user (same shared ARN, unseen email) must NOT match anyone,
+	// so the caller appends instead of overwriting alice/bob.
+	if got := FindAccountByProfileArnAndEmail(sharedArn, "carol@corp.com"); got != nil {
+		t.Fatalf("expected nil for new org user sharing the ARN, got %q", got.ID)
+	}
+
+	// Empty email (unresolved JWT) must never dedup — would otherwise collapse
+	// every empty-email account onto the first ARN match.
+	if got := FindAccountByProfileArnAndEmail(sharedArn, ""); got != nil {
+		t.Fatalf("expected nil for empty email, got %q", got.ID)
+	}
+
+	// Empty ARN returns nil regardless of email.
+	if got := FindAccountByProfileArnAndEmail("", "alice@corp.com"); got != nil {
+		t.Fatalf("expected nil for empty ARN, got %q", got.ID)
+	}
+}

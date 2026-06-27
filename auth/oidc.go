@@ -140,7 +140,7 @@ func PollSocialLogin(deviceCode, provider string) (accessToken, refreshToken, pr
 	}
 
 	if result.Error == "authorization_pending" || result.Error == "slow_down" || result.Error == "no_tokens" {
-		return "", "", "", 0, fmt.Errorf(result.Error)
+		return "", "", "", 0, fmt.Errorf("%s", result.Error)
 	}
 	if result.Error != "" {
 		return "", "", "", 0, fmt.Errorf("authorization error: %s", result.Error)

@@ -11,6 +11,7 @@ import (
 	"superkiro/logger"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -520,6 +521,11 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 	var lastAssistantContent string
 	var lastReasoningContent string
 
+	// KIRO_DEBUG_USAGE=1 dumps every upstream event type plus any token/usage
+	// fields it carries, so we can confirm from a live stream whether the
+	// upstream actually reports real token counts (vs only credits + context %).
+	debugUsage := os.Getenv("KIRO_DEBUG_USAGE") == "1"
+
 	for {
 		// Prelude: 12 bytes (total_len + headers_len + crc)
 		prelude := make([]byte, 12)
@@ -562,6 +568,20 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 		}
 
 		inputTokens, outputTokens = updateTokensFromEvent(event, inputTokens, outputTokens)
+
+		if debugUsage {
+			// Log the raw event type and, when present, any token/usage-shaped
+			// payload so we can see exactly what the upstream emits per request.
+			if eventType == "meteringEvent" || eventType == "contextUsageEvent" ||
+				hasUsageShape(event) {
+				if raw, err := json.Marshal(event); err == nil {
+					logger.Infof("[UsageDebug] event=%s running(in=%d out=%d) payload=%s",
+						eventType, inputTokens, outputTokens, string(raw))
+				}
+			} else {
+				logger.Infof("[UsageDebug] event=%s running(in=%d out=%d)", eventType, inputTokens, outputTokens)
+			}
+		}
 
 		// Dispatch by event type.
 		switch eventType {
@@ -606,6 +626,26 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 		callback.OnComplete(inputTokens, outputTokens)
 	}
 	return nil
+}
+
+// hasUsageShape reports whether an event (or a nested map) carries any
+// token/usage-shaped key. Used only by the KIRO_DEBUG_USAGE capture to surface
+// otherwise-unrecognized frames that might hold real upstream token counts.
+func hasUsageShape(event map[string]interface{}) bool {
+	candidates := []map[string]interface{}{event}
+	collectUsageMaps(event, &candidates)
+	for _, m := range candidates {
+		if m == nil {
+			continue
+		}
+		for k := range m {
+			lk := strings.ToLower(k)
+			if strings.Contains(lk, "token") || strings.Contains(lk, "usage") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, currentOutputTokens int) (int, int) {

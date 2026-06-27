@@ -471,6 +471,26 @@ func FindAccountByProfileArn(profileArn string) *Account {
 	return nil
 }
 
+// FindAccountByProfileArnAndEmail searches for an account matching BOTH the
+// profile ARN and email. Used for external_idp (Azure AD) accounts where every
+// user in the same AWS org shares one Q Developer profile ARN, so profileArn
+// alone is not a unique identity — matching the per-user email/sub as well
+// prevents a new login from clobbering a different user's account.
+// Returns nil when either field is empty or no match is found.
+func FindAccountByProfileArnAndEmail(profileArn, email string) *Account {
+	if profileArn == "" || email == "" {
+		return nil
+	}
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	for _, a := range cfg.Accounts {
+		if a.ProfileArn == profileArn && a.Email == email {
+			return &a
+		}
+	}
+	return nil
+}
+
 // FindAccountByEmail searches for an existing account by email.
 // Returns nil when email is empty or no match is found.
 func FindAccountByEmail(email string) *Account {

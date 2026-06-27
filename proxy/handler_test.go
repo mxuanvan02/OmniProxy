@@ -35,7 +35,7 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 		ID:          "first",
 		Enabled:     true,
 		AccessToken: "token-first",
-		ProfileArn:  "arn:aws:codewhisperer:profile/first",
+		ProfileArn:  "arn:aws:codewhisperer:us-east-1:000000000001:profile/first",
 	}); err != nil {
 		t.Fatalf("add first account: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 		ID:          "second",
 		Enabled:     true,
 		AccessToken: "token-second",
-		ProfileArn:  "arn:aws:codewhisperer:profile/second",
+		ProfileArn:  "arn:aws:codewhisperer:us-east-1:000000000002:profile/second",
 	}); err != nil {
 		t.Fatalf("add second account: %v", err)
 	}
@@ -478,5 +478,66 @@ func TestBuildAnthropicModelsResponseGeneratesThinkingVariants(t *testing.T) {
 	}
 	if supportsImage, ok := models[0]["supports_image"].(bool); !ok || !supportsImage {
 		t.Fatalf("expected image capability to be preserved, got %#v", models[0]["supports_image"])
+	}
+}
+
+// TestFindDedupTargetExternalIdpDoesNotClobberOtherUser is the core regression
+// for the "old account disappears on login" bug: external_idp (Azure AD) users
+// in the same AWS org share one Q Developer profile ARN, so deduping by ARN
+// alone would overwrite a different user's account. findDedupTarget must require
+// a matching email for external_idp, and must never match when email is empty.
+func TestFindDedupTargetExternalIdpDoesNotClobberOtherUser(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+
+	const sharedArn = "arn:aws:codewhisperer:us-east-1:0:profile/ORG_SHARED"
+	if err := config.AddAccount(config.Account{
+		ID: "old", Enabled: true, AuthMethod: "external_idp",
+		Email: "alice@corp.com", ProfileArn: sharedArn,
+	}); err != nil {
+		t.Fatalf("add old account: %v", err)
+	}
+
+	// A different org user logging in (same shared ARN, different email) must NOT
+	// match the existing account — it should be appended instead of overwritten.
+	if got := findDedupTarget(sharedArn, "bob@corp.com", "external_idp"); got != nil {
+		t.Fatalf("external_idp dedup clobbered a different user: matched %q", got.ID)
+	}
+
+	// Empty email (JWT email unresolved) must also never match — appending a new
+	// account is safer than overwriting an unrelated one.
+	if got := findDedupTarget(sharedArn, "", "external_idp"); got != nil {
+		t.Fatalf("external_idp dedup matched on empty email: matched %q", got.ID)
+	}
+
+	// Re-login of the SAME user (same ARN + same email) MUST match, so tokens are
+	// updated in place rather than creating a duplicate.
+	got := findDedupTarget(sharedArn, "alice@corp.com", "external_idp")
+	if got == nil || got.ID != "old" {
+		t.Fatalf("expected re-login of same user to match account old, got %#v", got)
+	}
+}
+
+// TestFindDedupTargetIdcMatchesByProfileArnOnly verifies non-external_idp auth
+// methods keep the original profileArn-only dedup behaviour (unchanged).
+func TestFindDedupTargetIdcMatchesByProfileArnOnly(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+
+	const arn = "arn:aws:codewhisperer:us-east-1:0:profile/IDC_USER"
+	if err := config.AddAccount(config.Account{
+		ID: "idc1", Enabled: true, AuthMethod: "idc",
+		Email: "user@corp.com", ProfileArn: arn,
+	}); err != nil {
+		t.Fatalf("add idc account: %v", err)
+	}
+
+	// idc dedups on ARN alone — a differing/empty email still matches.
+	if got := findDedupTarget(arn, "", "idc"); got == nil || got.ID != "idc1" {
+		t.Fatalf("expected idc dedup to match by ARN regardless of email, got %#v", got)
 	}
 }

@@ -325,3 +325,80 @@ func TestReloadDropsOverQuotaAccountWhenAllowOverUsageDisabled(t *testing.T) {
 		t.Fatalf("expected over-quota account to be dropped, got %q", got.ID)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Model-lock fallback (503 "No available accounts" regression)
+// ---------------------------------------------------------------------------
+
+// TestGetNextForModelReturnsModelLockedAccountAsFallback verifies that when the
+// only account is model-locked (a purely in-memory penalty), GetNext still
+// returns it instead of nil. Previously the fallback pass skipped model-locked
+// accounts entirely, so a transient first-use failure on a freshly-added
+// account produced a 503 "No available accounts" that only a process restart
+// could clear.
+func TestGetNextForModelReturnsModelLockedAccountAsFallback(t *testing.T) {
+	p := &AccountPool{
+		accounts:    []config.Account{{ID: "only", Enabled: true}},
+		cooldowns:   make(map[string]time.Time),
+		errorCounts: make(map[string]int),
+		modelLists:  make(map[string]map[string]bool),
+		modelLocks:  make(map[string]map[string]time.Time),
+	}
+	// Arm a model lock 3 errors deep so RecordError actually sets it.
+	for i := 0; i < 3; i++ {
+		p.RecordError("only", false, "claude-sonnet-4.5")
+	}
+
+	acc := p.GetNextForModelExcluding("claude-sonnet-4.5", nil)
+	if acc == nil {
+		t.Fatal("expected model-locked account to be returned by fallback, got nil (503 regression)")
+	}
+	if acc.ID != "only" {
+		t.Fatalf("expected account 'only', got %q", acc.ID)
+	}
+}
+
+// TestGetNextForModelPrefersSoonestUnlocking verifies the fallback returns the
+// account whose in-memory penalty expires first when every candidate is locked.
+func TestGetNextForModelPrefersSoonestUnlocking(t *testing.T) {
+	now := time.Now()
+	p := &AccountPool{
+		accounts: []config.Account{
+			{ID: "late", Enabled: true},
+			{ID: "soon", Enabled: true},
+		},
+		cooldowns:   make(map[string]time.Time),
+		errorCounts: make(map[string]int),
+		modelLists:  make(map[string]map[string]bool),
+		modelLocks: map[string]map[string]time.Time{
+			"late": {"m": now.Add(10 * time.Minute)},
+			"soon": {"m": now.Add(1 * time.Minute)},
+		},
+	}
+
+	acc := p.GetNextForModelExcluding("m", nil)
+	if acc == nil {
+		t.Fatal("expected soonest-unlocking account, got nil")
+	}
+	if acc.ID != "soon" {
+		t.Fatalf("expected 'soon' (unlocks first), got %q", acc.ID)
+	}
+}
+
+// TestGetNextForModelStillExcludesExplicitlyExcluded verifies the fallback does
+// not resurrect an account the caller explicitly excluded (already-tried this
+// request), even when it would otherwise be the soonest-unlocking candidate.
+func TestGetNextForModelStillExcludesExplicitlyExcluded(t *testing.T) {
+	now := time.Now()
+	p := &AccountPool{
+		accounts:    []config.Account{{ID: "only", Enabled: true}},
+		cooldowns:   make(map[string]time.Time),
+		errorCounts: make(map[string]int),
+		modelLists:  make(map[string]map[string]bool),
+		modelLocks:  map[string]map[string]time.Time{"only": {"m": now.Add(time.Minute)}},
+	}
+
+	if acc := p.GetNextForModelExcluding("m", map[string]bool{"only": true}); acc != nil {
+		t.Fatalf("expected nil when the only account is excluded, got %q", acc.ID)
+	}
+}

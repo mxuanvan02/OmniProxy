@@ -1193,6 +1193,31 @@ func mergeModelInfo(base ModelInfo, extra ModelInfo) ModelInfo {
 	return base
 }
 
+// contextWindowForModel returns the real per-model input-token window reported
+// by ListAvailableModels (maxInputTokens), used to convert the upstream
+// contextUsagePercentage into an absolute input-token count. Falls back to the
+// hard-coded getContextWindowSize heuristic when the model is not cached yet or
+// upstream omitted its token limits. The model name is normalized (thinking
+// suffix stripped) so "...-thinking" variants resolve to the base model.
+func (h *Handler) contextWindowForModel(model string) int {
+	base, _ := ParseModelAndThinking(model, "-thinking")
+	baseLower := strings.ToLower(strings.TrimSpace(base))
+
+	h.modelsCacheMu.RLock()
+	cached := h.cachedModels
+	h.modelsCacheMu.RUnlock()
+
+	for _, m := range cached {
+		if m.TokenLimits == nil || m.TokenLimits.MaxInputTokens <= 0 {
+			continue
+		}
+		if strings.ToLower(strings.TrimSpace(m.ModelId)) == baseLower {
+			return m.TokenLimits.MaxInputTokens
+		}
+	}
+	return getContextWindowSize(model)
+}
+
 func mergeStringLists(base []string, extra []string) []string {
 	if len(extra) == 0 {
 		return base
@@ -1685,11 +1710,11 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				credits = c
 			},
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(h.contextWindowForModel(model)) / 100.0)
 			},
 		}
 
-		h.usageTracker.TrackActive(account.ID, "claude", model)
+		h.usageTracker.TrackActive(account.ID, endpointClaude, model)
 		err := CallKiroAPI(account, payload, callback)
 		if err != nil {
 			lastErr = err
@@ -1720,10 +1745,15 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		}
 		closeActiveBlock()
 
-		if realInputTokens > 0 {
-			inputTokens = realInputTokens
-		} else if inputTokens <= 0 {
-			inputTokens = estimatedInputTokens
+		// Input precedence: exact upstream count (OnComplete) > contextUsage-derived
+		// (pct × real window) > pre-request estimate. inputTokens already holds the
+		// OnComplete value here; only fall back when upstream gave us nothing.
+		if inputTokens <= 0 {
+			if realInputTokens > 0 {
+				inputTokens = realInputTokens
+			} else {
+				inputTokens = estimatedInputTokens
+			}
 		}
 		outputContent, extractedReasoning := extractThinkingFromContent(rawContentBuilder.String())
 		thinkingOutput := rawThinkingBuilder.String()
@@ -1733,9 +1763,12 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		if !thinking {
 			thinkingOutput = ""
 		}
-		outputTokens = estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
+		// Output: prefer the exact upstream count; estimate only when absent.
+		if outputTokens <= 0 {
+			outputTokens = estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
+		}
 
-		h.recordUsage(apiKeyID, account.ID, model, "claude", inputTokens, outputTokens, credits)
+		h.recordUsage(apiKeyID, account.ID, model, endpointClaude, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID, model)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.promptCache.Update(account.ID, cacheProfile)
@@ -1842,9 +1875,15 @@ func (h *Handler) recordFailure() {
 	atomic.AddInt64(&h.failedRequests, 1)
 }
 
-// recordUsage records a successful request to the usage tracker.
-// Must be called after recordSuccessForApiKey with the same token/cost values.
+// recordUsage records a successful request. It updates BOTH accounting systems:
+// the global atomics + per-API-key counters (via recordSuccessForApiKey, surfaced
+// at /status and /stats and the By-API-key table) and the time-series usage
+// tracker (surfaced at /usage/stats). recordSuccessForApiKey runs first and
+// outside the tracker-nil guard so the global success/token/credit totals advance
+// on every real request — previously nothing called it, so only recordFailure ran
+// and totalRequests counted failures only while successRequests stayed frozen.
 func (h *Handler) recordUsage(apiKeyID, accountID, model, endpoint string, inputTokens, outputTokens int, credits float64) {
+	h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
 	if h.usageTracker == nil {
 		return
 	}
@@ -1935,11 +1974,11 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 				credits = c
 			},
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(h.contextWindowForModel(model)) / 100.0)
 			},
 		}
 
-		h.usageTracker.TrackActive(account.ID, "claude", model)
+		h.usageTracker.TrackActive(account.ID, endpointClaude, model)
 		err := CallKiroAPI(account, payload, callback)
 		if err != nil {
 			lastErr = err
@@ -1964,14 +2003,23 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			rawThinkingContent = ""
 		}
 
-		if realInputTokens > 0 {
-			inputTokens = realInputTokens
-		} else if inputTokens <= 0 {
-			inputTokens = estimatedInputTokens
+		// Input precedence: exact upstream count (OnComplete) > pct×window
+		// reconstruction > pre-request estimate. The upstream count, when the
+		// stream provides it, is exact; the pct×window value quantizes to ~1% of
+		// the window so it is only a fallback.
+		if inputTokens <= 0 {
+			if realInputTokens > 0 {
+				inputTokens = realInputTokens
+			} else {
+				inputTokens = estimatedInputTokens
+			}
 		}
-		outputTokens = estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
+		// Output: trust the upstream count when present; only estimate as fallback.
+		if outputTokens <= 0 {
+			outputTokens = estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
+		}
 
-		h.recordUsage(apiKeyID, account.ID, model, "claude", inputTokens, outputTokens, credits)
+		h.recordUsage(apiKeyID, account.ID, model, endpointClaude, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID, model)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 		h.promptCache.Update(account.ID, cacheProfile)
@@ -2389,11 +2437,11 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				credits = c
 			},
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(h.contextWindowForModel(model)) / 100.0)
 			},
 		}
 
-		h.usageTracker.TrackActive(account.ID, "openai", model)
+		h.usageTracker.TrackActive(account.ID, endpointOpenAI, model)
 		err := CallKiroAPI(account, payload, callback)
 			if err != nil {
 				lastErr = err
@@ -2427,10 +2475,15 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			sendChunk("", 3)
 		}
 
-		if realInputTokens > 0 {
-			inputTokens = realInputTokens
-		} else if inputTokens <= 0 {
-			inputTokens = estimatedInputTokens
+		// Input precedence: exact upstream count (OnComplete) > pct×real-window
+		// derivation > pre-request estimate. The percentage path quantizes to ~1%
+		// of the window (10k tokens at 1M), so it must not override an exact count.
+		if inputTokens <= 0 {
+			if realInputTokens > 0 {
+				inputTokens = realInputTokens
+			} else {
+				inputTokens = estimatedInputTokens
+			}
 		}
 		outputContent, extractedReasoning := extractThinkingFromContent(rawContentBuilder.String())
 		reasoningOutput := rawReasoningBuilder.String()
@@ -2440,13 +2493,16 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		if !thinking {
 			reasoningOutput = ""
 		}
-		outputTokens = estimateApproxTokens(outputContent) + estimateApproxTokens(reasoningOutput)
-		for _, tc := range toolCalls {
-			outputTokens += estimateApproxTokens(tc.Function.Name)
-			outputTokens += estimateApproxTokens(tc.Function.Arguments)
+		// Output: prefer the exact upstream count; estimate only when absent.
+		if outputTokens <= 0 {
+			outputTokens = estimateApproxTokens(outputContent) + estimateApproxTokens(reasoningOutput)
+			for _, tc := range toolCalls {
+				outputTokens += estimateApproxTokens(tc.Function.Name)
+				outputTokens += estimateApproxTokens(tc.Function.Arguments)
+			}
 		}
 
-		h.recordUsage(apiKeyID, account.ID, model, "claude", inputTokens, outputTokens, credits)
+		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID, model)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
@@ -2524,11 +2580,11 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
 			OnCredits:  func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(h.contextWindowForModel(model)) / 100.0)
 			},
 		}
 
-		h.usageTracker.TrackActive(account.ID, "openai", model)
+		h.usageTracker.TrackActive(account.ID, endpointOpenAI, model)
 		err := CallKiroAPI(account, payload, callback)
 		if err != nil {
 			lastErr = err
@@ -2550,14 +2606,21 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			reasoningContent = ""
 		}
 
-		if realInputTokens > 0 {
-			inputTokens = realInputTokens
-		} else if inputTokens <= 0 {
-			inputTokens = estimatedInputTokens
+		// Input precedence: exact upstream count (OnComplete) > pct×real-window
+		// derivation > pre-request estimate. Output: trust the upstream count when
+		// present, only estimate as a fallback.
+		if inputTokens <= 0 {
+			if realInputTokens > 0 {
+				inputTokens = realInputTokens
+			} else {
+				inputTokens = estimatedInputTokens
+			}
 		}
-		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
+		if outputTokens <= 0 {
+			outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
+		}
 
-		h.recordUsage(apiKeyID, account.ID, model, "claude", inputTokens, outputTokens, credits)
+		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID, model)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
@@ -5158,7 +5221,7 @@ func (h *Handler) apiKiroSsoExchange(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if profileArn != "" {
-		existing := config.FindAccountByProfileArn(profileArn)
+		existing := findDedupTarget(profileArn, email, authMethod)
 		if existing != nil {
 			existing.AccessToken = newAccessToken
 			existing.RefreshToken = newRefreshToken
@@ -5450,7 +5513,7 @@ func (h *Handler) apiImportKiroCli(w http.ResponseWriter, r *http.Request) {
 
 	// Dedup by profileArn: update existing account if found (OmniRoute parity).
 	if profileArn != "" {
-		existing := config.FindAccountByProfileArn(profileArn)
+		existing := findDedupTarget(profileArn, email, "idc")
 		if existing != nil {
 			existing.AccessToken = creds.AccessToken
 			existing.RefreshToken = creds.RefreshToken
@@ -5595,7 +5658,7 @@ func (h *Handler) apiAutoImportKiroCli(w http.ResponseWriter, r *http.Request) {
 
 	// Dedup by profileArn
 	if profileArn != "" {
-		existing := config.FindAccountByProfileArn(profileArn)
+		existing := findDedupTarget(profileArn, email, "idc")
 		if existing != nil {
 			existing.AccessToken = creds.AccessToken
 			existing.RefreshToken = creds.RefreshToken
@@ -5728,7 +5791,7 @@ func (h *Handler) apiImportKiroToken(w http.ResponseWriter, r *http.Request) {
 
 	// Dedup by profileArn
 	if profileArn != "" {
-		existing := config.FindAccountByProfileArn(profileArn)
+		existing := findDedupTarget(profileArn, email, "idc")
 		if existing != nil {
 			existing.AccessToken = newAccessToken
 			existing.RefreshToken = refreshToken
@@ -6107,16 +6170,36 @@ func regionFromArn(arn string) string {
 	return strings.TrimSpace(parts[3])
 }
 
+// findDedupTarget returns the existing account that a re-login/import should
+// update in place, or nil when the credential should be appended as a new
+// account. For external_idp (Azure AD) accounts every user in the same AWS org
+// shares one Q Developer profile ARN, so profileArn alone is NOT a unique
+// identity — require a matching per-user email too, and never dedup when email
+// is unresolved (append a fresh account instead of clobbering someone else's).
+// All other auth methods keep the original profileArn-only dedup behaviour.
+func findDedupTarget(profileArn, email, authMethod string) *config.Account {
+	if profileArn == "" {
+		return nil
+	}
+	if authMethod == "external_idp" {
+		return config.FindAccountByProfileArnAndEmail(profileArn, email)
+	}
+	return config.FindAccountByProfileArn(profileArn)
+}
+
 func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		AccessToken  string `json:"accessToken"`
-		RefreshToken string `json:"refreshToken"`
-		ClientID     string `json:"clientId"`
-		ClientSecret string `json:"clientSecret"`
-		AuthMethod   string `json:"authMethod"`
-		Provider     string `json:"provider"`
-		Region       string `json:"region"`
-			ProfileArn   string `json:"profileArn,omitempty"`
+		AccessToken   string `json:"accessToken"`
+		RefreshToken  string `json:"refreshToken"`
+		ClientID      string `json:"clientId"`
+		ClientSecret  string `json:"clientSecret"`
+		AuthMethod    string `json:"authMethod"`
+		Provider      string `json:"provider"`
+		Region        string `json:"region"`
+		ProfileArn    string `json:"profileArn,omitempty"`
+		TokenEndpoint string `json:"tokenEndpoint,omitempty"`
+		IssuerURL     string `json:"issuerUrl,omitempty"`
+		Scopes        string `json:"scopes,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -6135,7 +6218,9 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		req.Region = "us-east-1"
 	}
 	if req.AuthMethod == "" {
-		if req.ClientID != "" {
+		if req.TokenEndpoint != "" {
+			req.AuthMethod = "external_idp"
+		} else if req.ClientID != "" {
 			req.AuthMethod = "idc"
 		} else {
 			req.AuthMethod = "social"
@@ -6143,12 +6228,24 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	}
 	// normalize authMethod
 	switch strings.ToLower(req.AuthMethod) {
-	case "idc", "builderid", "enterprise":
+	case "external_idp", "externalidp":
+		req.AuthMethod = "external_idp"
+	case "idc", "builderid":
 		req.AuthMethod = "idc"
+	case "enterprise":
+		// Enterprise SSO is external_idp when an IdP token endpoint is present,
+		// otherwise a standard AWS IdC registration.
+		if req.TokenEndpoint != "" {
+			req.AuthMethod = "external_idp"
+		} else {
+			req.AuthMethod = "idc"
+		}
 	case "social", "google", "github":
 		req.AuthMethod = "social"
 	default:
-		if req.ClientID != "" && req.ClientSecret != "" {
+		if req.TokenEndpoint != "" {
+			req.AuthMethod = "external_idp"
+		} else if req.ClientID != "" && req.ClientSecret != "" {
 			req.AuthMethod = "idc"
 		} else {
 			req.AuthMethod = "social"
@@ -6159,11 +6256,14 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	// The locally cached accessToken has no trusted expiry. Guessing a short TTL would cause accounts
 	// to always be skipped, preventing background/on-demand refresh (see ensureValidToken & Pick expiry logic).
 	tempAccount := &config.Account{
-		RefreshToken: req.RefreshToken,
-		ClientID:     req.ClientID,
-		ClientSecret: req.ClientSecret,
-		AuthMethod:   req.AuthMethod,
-		Region:       req.Region,
+		RefreshToken:  req.RefreshToken,
+		ClientID:      req.ClientID,
+		ClientSecret:  req.ClientSecret,
+		AuthMethod:    req.AuthMethod,
+		Region:        req.Region,
+		TokenEndpoint: req.TokenEndpoint,
+		IssuerURL:     req.IssuerURL,
+		Scopes:        req.Scopes,
 	}
 	accessToken, newRefreshToken, expiresAt, newProfileArn, _, _, err := auth.RefreshAccountToken(tempAccount)
 	if err != nil {
@@ -6196,8 +6296,50 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 	// must stay the SSO region so future refreshes succeed; the runtime endpoint
 	// region is derived from the profile ARN at call time (see regionForAccount).
 
-	// get user info
-	email, _, _ := auth.GetUserInfo(accessToken)
+	// get user info. external_idp access tokens are IdP-issued JWTs (Azure AD),
+	// which CodeWhisperer's GetUserInfo rejects, so read the email from the JWT
+	// claims instead — same as the SSO-exchange path.
+	var email string
+	if req.AuthMethod == "external_idp" {
+		email = auth.ExtractEmailFromJWT(accessToken)
+	} else {
+		email, _, _ = auth.GetUserInfo(accessToken)
+	}
+
+	// Dedup with the same per-user rule as the SSO/CLI import paths: a re-import
+	// of the same identity updates the existing account in place instead of
+	// creating a duplicate that a later dedup pass would clobber.
+	if existing := findDedupTarget(newProfileArn, email, req.AuthMethod); existing != nil {
+		existing.AccessToken = accessToken
+		existing.RefreshToken = req.RefreshToken
+		existing.ExpiresAt = expiresAt
+		existing.Email = email
+		existing.ClientID = req.ClientID
+		existing.ClientSecret = req.ClientSecret
+		existing.AuthMethod = req.AuthMethod
+		existing.Region = req.Region
+		existing.Enabled = true
+		existing.BanStatus = "ACTIVE"
+		existing.BanReason = ""
+		existing.BanTime = 0
+		existing.TokenEndpoint = req.TokenEndpoint
+		existing.IssuerURL = req.IssuerURL
+		existing.Scopes = req.Scopes
+		if err := config.UpdateAccount(existing.ID, *existing); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		h.pool.Reload()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"account": map[string]interface{}{
+				"id":    existing.ID,
+				"email": email,
+			},
+		})
+		return
+	}
 
 	// create account
 	account := config.Account{
@@ -6214,6 +6356,9 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 		Enabled:      true,
 		MachineId:    config.GenerateMachineId(),
 		ProfileArn:   newProfileArn,
+		TokenEndpoint: req.TokenEndpoint,
+		IssuerURL:     req.IssuerURL,
+		Scopes:        req.Scopes,
 	}
 
 	if err := config.AddAccount(account); err != nil {
@@ -6236,11 +6381,11 @@ func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"accounts":        h.pool.Count(),
 		"available":       h.pool.AvailableCount(),
-		"totalRequests":   h.totalRequests,
-		"successRequests": h.successRequests,
-		"failedRequests":  h.failedRequests,
-		"totalTokens":     h.totalTokens,
-		"totalCredits":    h.totalCredits,
+		"totalRequests":   atomic.LoadInt64(&h.totalRequests),
+		"successRequests": atomic.LoadInt64(&h.successRequests),
+		"failedRequests":  atomic.LoadInt64(&h.failedRequests),
+		"totalTokens":     atomic.LoadInt64(&h.totalTokens),
+		"totalCredits":    h.getCredits(),
 		"uptime":          time.Now().Unix() - h.startTime,
 	})
 }

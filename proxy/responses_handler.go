@@ -171,11 +171,11 @@ func (h *Handler) handleResponsesNonStream(
 			OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
 			OnCredits:  func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(h.contextWindowForModel(model)) / 100.0)
 			},
 		}
 
-		h.usageTracker.TrackActive(account.ID, "openai-responses", model)
+		h.usageTracker.TrackActive(account.ID, endpointOpenAIResponses, model)
 		err := CallKiroAPI(account, payload, callback)
 		if err != nil {
 			lastErr = err
@@ -190,14 +190,21 @@ func (h *Handler) handleResponsesNonStream(
 			reasoningContent = ""
 		}
 
-		if realInputTokens > 0 {
-			inputTokens = realInputTokens
-		} else if inputTokens <= 0 {
-			inputTokens = estimatedInputTokens
+		// Input precedence: exact upstream count (OnComplete) > context-percentage
+		// derivation > pre-request estimate.
+		if inputTokens <= 0 {
+			if realInputTokens > 0 {
+				inputTokens = realInputTokens
+			} else {
+				inputTokens = estimatedInputTokens
+			}
 		}
-		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
+		// Only estimate output when upstream did not report a real count.
+		if outputTokens <= 0 {
+			outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
+		}
 
-		h.recordUsage(apiKeyID, account.ID, model, "openai-responses", inputTokens, outputTokens, credits)
+		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID, model)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
@@ -476,11 +483,11 @@ func (h *Handler) handleResponsesStream(
 			OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
 			OnCredits:  func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
-				realInputTokens = int(pct * float64(getContextWindowSize(model)) / 100.0)
+				realInputTokens = int(pct * float64(h.contextWindowForModel(model)) / 100.0)
 			},
 		}
 
-		h.usageTracker.TrackActive(account.ID, "openai-responses", model)
+		h.usageTracker.TrackActive(account.ID, endpointOpenAIResponses, model)
 		err := CallKiroAPI(account, payload, callback)
 		if err != nil {
 			if !responseStarted {
@@ -538,14 +545,22 @@ func (h *Handler) handleResponsesStream(
 			})
 		}
 
-		if realInputTokens > 0 {
-			inputTokens = realInputTokens
-		} else if inputTokens <= 0 {
-			inputTokens = estimatedInputTokens
+		// Input precedence: exact upstream count (OnComplete) > context-percentage
+		// derivation > pre-request estimate. realInputTokens is the pct×window
+		// fallback; prefer a real counted inputTokens when upstream provided one.
+		if inputTokens <= 0 {
+			if realInputTokens > 0 {
+				inputTokens = realInputTokens
+			} else {
+				inputTokens = estimatedInputTokens
+			}
 		}
-		outputTokens = estimateOpenAIOutputTokens(finalContent, reasoning, toolUses)
+		// Only estimate output when upstream did not report a real count.
+		if outputTokens <= 0 {
+			outputTokens = estimateOpenAIOutputTokens(finalContent, reasoning, toolUses)
+		}
 
-		h.recordUsage(apiKeyID, account.ID, model, "openai-responses", inputTokens, outputTokens, credits)
+		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits)
 		h.pool.RecordSuccess(account.ID, model)
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
