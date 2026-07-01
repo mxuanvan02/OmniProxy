@@ -145,7 +145,7 @@
 
   function claudeManualConfig(endpoint, apiKey, opus, sonnet, haiku) {
     endpoint = endpoint.replace(/\/v1$/, "");
-    var env = { ANTHROPIC_BASE_URL: endpoint, ANTHROPIC_AUTH_TOKEN: apiKey };
+    var env = { ANTHROPIC_BASE_URL: endpoint, ANTHROPIC_AUTH_TOKEN: apiKey, ANTHROPIC_API_KEY: apiKey };
     if (opus) env.ANTHROPIC_DEFAULT_OPUS_MODEL = opus;
     if (sonnet) env.ANTHROPIC_DEFAULT_SONNET_MODEL = sonnet;
     if (haiku) env.ANTHROPIC_DEFAULT_HAIKU_MODEL = haiku;
@@ -840,7 +840,7 @@
     var endpoint = getEndpointValue('hermes');
     var apiKey = await getCliApiKey('hermes_ak', 'hermes_akCustom');
     var model = window.__hermesState.model || 'provider/model-id';
-    var yamlContent = 'model:\n  default: "' + model + '"\n  provider: "custom"\n  base_url: "' + endpoint + '"\n';
+    var yamlContent = 'providers:\n  superkiro:\n    base_url: ' + endpoint + '\n    api_key: ' + (apiKey || 'sk-your-api-key') + '\n    api_mode: openai\n    discover_models: false\n    models:\n    - ' + model + '\n';
     showManualConfigModal([
       { filename: '~/.hermes/config.yaml', content: yamlContent },
       { filename: '~/.hermes/.env', content: 'OPENAI_API_KEY=' + (apiKey || 'sk-your-api-key') + '\n' }
@@ -991,10 +991,8 @@
     var apiKey = await getCliApiKey('openclaw_ak', 'openclaw_akCustom');
     var model = window.__openClawState.model || 'provider/model-id';
     var ocConfig = {
-      agents: { defaults: { model: { primary: '9router/' + model }, models: {} }, list: [{ id: 'default', model: '9router/' + model }] },
-      models: { providers: { '9router': { baseUrl: endpoint, apiKey: apiKey, api: 'openai-completions', models: [{ id: model, name: model }] } } }
+      models: { providers: { superkiro: { baseUrl: endpoint, apiKey: apiKey, api: 'openai-completions', models: [{ id: model, name: model }] } } }
     };
-    ocConfig.agents.defaults.models['9router/' + model] = {};
     showManualConfigModal([{ filename: '~/.openclaw/openclaw.json', content: JSON.stringify(ocConfig, null, 2) }]);
   };
   window.openClawReset = async function () {

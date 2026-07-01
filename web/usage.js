@@ -650,9 +650,14 @@ function renderRecentRequests() {
       '<thead><tr><th></th><th>' + (typeof t === 'function' ? t('usage.tabModel') : 'Model') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.inOut') : 'In / Out') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.when') : 'When') + '</th></tr></thead><tbody>';
 
     for (const r of requests) {
-      html += '<tr>' +
-        '<td><span class="usage-status-dot ' + (r.status === 'success' ? 'success' : 'error') + '"></span></td>' +
-        '<td class="usage-recent-model" title="' + escAttr(r.model) + '">' + escHtml(r.model || '-') + '</td>' +
+      const isError = r.status === 'error';
+      html += '<tr' + (isError ? ' class="usage-recent-error-row"' : '') + '>' +
+        '<td><span class="usage-status-dot ' + (isError ? 'error' : 'success') + '"></span></td>' +
+        '<td class="usage-recent-model" title="' + escAttr(r.model) + '">' + escHtml(r.model || '-');
+      if (isError && r.error) {
+        html += '<div class="usage-recent-error" title="' + escAttr(r.error) + '">' + escHtml(r.error) + '</div>';
+      }
+      html += '</td>' +
         '<td class="text-right whitespace-nowrap"><span class="text-primary">' + fmtNum(r.inputTokens) + '↑</span> <span class="text-success">' + fmtNum(r.outputTokens) + '↓</span></td>' +
         '<td class="text-right text-text-muted">';
       html += '<span class="usage-time-ago" data-ts="' + r.timestamp + '">' + timeAgo(r.timestamp) + '</span>';

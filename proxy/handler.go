@@ -5,16 +5,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"superkiro/auth"
 	"superkiro/config"
 	"superkiro/logger"
 	"superkiro/pool"
-	"net/http"
-	"net/url"
-	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -87,7 +87,6 @@ func getCliToolConfigured() map[string]bool {
 	return out
 }
 
-
 // isSuperKiroActiveProvider checks whether the ACTIVE (uncommented)
 // model_provider in a TOML config file is set to "superkiro".
 // A line starting with # is a comment and is ignored.
@@ -112,6 +111,56 @@ func isSuperKiroActiveProvider(data []byte) bool {
 		}
 	}
 	return false
+}
+
+func upsertYAMLProviderBlock(raw, providerName, providerBlock string) string {
+	lines := strings.Split(raw, "\n")
+	providersIdx := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "providers:" && len(line)-len(strings.TrimLeft(line, " ")) == 0 {
+			providersIdx = i
+			break
+		}
+	}
+	if providersIdx == -1 {
+		if strings.TrimSpace(raw) == "" {
+			return "providers:\n" + providerBlock
+		}
+		return strings.TrimRight(raw, "\n") + "\nproviders:\n" + providerBlock
+	}
+
+	start := -1
+	for i := providersIdx + 1; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if trimmed != "" && indent == 0 {
+			break
+		}
+		if indent == 2 && trimmed == providerName+":" {
+			start = i
+			break
+		}
+	}
+	if start != -1 {
+		end := len(lines)
+		for i := start + 1; i < len(lines); i++ {
+			line := lines[i]
+			trimmed := strings.TrimSpace(line)
+			indent := len(line) - len(strings.TrimLeft(line, " "))
+			if trimmed != "" && indent <= 2 {
+				end = i
+				break
+			}
+		}
+		lines = append(lines[:start], lines[end:]...)
+	}
+
+	insert := strings.Split(strings.TrimRight(providerBlock, "\n"), "\n")
+	out := append([]string{}, lines[:providersIdx+1]...)
+	out = append(out, insert...)
+	out = append(out, lines[providersIdx+1:]...)
+	return strings.TrimRight(strings.Join(out, "\n"), "\n") + "\n"
 }
 
 func backupToolConfig(toolID string) string {
@@ -363,7 +412,7 @@ func checkToolHasSuperKiro(toolID string) bool {
 			break
 		}
 		configExists = true
-		return strings.Contains(string(data), "base_url:")
+		return strings.Contains(string(data), "superkiro:")
 
 	case "droid":
 		path := filepath.Join(homeDir, ".factory", "settings.json")
@@ -394,7 +443,7 @@ func checkToolHasSuperKiro(toolID string) bool {
 			break
 		}
 		configExists = true
-		return strings.Contains(string(data), "\"9router\"")
+		return strings.Contains(string(data), "\"superkiro\"")
 
 	case "copilot":
 		path := filepath.Join(homeDir, ".config", "Code", "User", "chatLanguageModels.json")
@@ -669,7 +718,7 @@ func NewHandler() *Handler {
 		stopRefresh:     make(chan struct{}),
 		stopStatsSaver:  make(chan struct{}),
 		promptCache:     newPromptCacheTracker(defaultPromptCacheTTL),
-		usageTracker:     GetUsageTracker(),
+		usageTracker:    GetUsageTracker(),
 	}
 	// Resolve web assets dir relative to the binary so the server works
 	// regardless of the current working directory.
@@ -1737,7 +1786,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			})
 			return
 		}
-		skipAccountHandling:
+	skipAccountHandling:
 
 		processClaudeText("", false, true)
 		if eventThinkingOpen {
@@ -1798,7 +1847,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		return
 	}
 
-	h.recordFailure()
+	h.recordError(apiKeyID, "", model, endpointClaude, lastErr.Error())
 	h.sendClaudeError(w, 500, "api_error", lastErr.Error())
 }
 
@@ -1887,33 +1936,7 @@ func (h *Handler) recordUsage(apiKeyID, accountID, model, endpoint string, input
 	if h.usageTracker == nil {
 		return
 	}
-	provider := "unknown"
-	if accountID != "" {
-		// Try to find provider from account info
-		for _, a := range config.GetAccounts() {
-			if a.ID == accountID {
-				if a.Provider != "" {
-					provider = a.Provider
-				}
-				break
-			}
-		}
-	}
-	accountName := ""
-	if accountID != "" {
-		for _, a := range config.GetAccounts() {
-			if a.ID == accountID {
-				if a.Nickname != "" {
-					accountName = a.Nickname
-				} else if a.Email != "" {
-					accountName = a.Email
-				} else {
-					accountName = accountID[:8]
-				}
-				break
-			}
-		}
-	}
+	provider, accountName := resolveAccountMeta(accountID)
 	rec := RequestRecord{
 		Model:        model,
 		Provider:     provider,
@@ -1922,11 +1945,64 @@ func (h *Handler) recordUsage(apiKeyID, accountID, model, endpoint string, input
 		InputTokens:  inputTokens,
 		OutputTokens: outputTokens,
 		Cost:         credits,
-		Status:       "success",
+		Status:       statusSuccess,
 		Endpoint:     endpoint,
 		APIKeyID:     apiKeyID,
 	}
 	h.usageTracker.Append(rec)
+}
+
+// resolveAccountMeta looks up the upstream provider (BuilderId/ExternalIdp) and a
+// display name for an account ID, for tagging usage records. Returns "unknown"
+// provider and empty name when the account is not found or ID is empty.
+func resolveAccountMeta(accountID string) (provider, accountName string) {
+	provider = "unknown"
+	if accountID == "" {
+		return provider, ""
+	}
+	for _, a := range config.GetAccounts() {
+		if a.ID != accountID {
+			continue
+		}
+		if a.Provider != "" {
+			provider = a.Provider
+		}
+		if a.Nickname != "" {
+			accountName = a.Nickname
+		} else if a.Email != "" {
+			accountName = a.Email
+		} else if len(a.ID) >= 8 {
+			accountName = a.ID[:8]
+		} else {
+			accountName = a.ID
+		}
+		break
+	}
+	return provider, accountName
+}
+
+// recordError records a FAILED request: it bumps the global failure counters
+// (like the old recordFailure) AND appends a RequestRecord with Status=statusError
+// and the error message, so failed requests are visible in Usage → Recent Requests
+// and in the By-* breakdowns with their reason — previously recordFailure only bumped
+// a counter and the failed request vanished from every table.
+func (h *Handler) recordError(apiKeyID, accountID, model, endpoint, errMsg string) {
+	atomic.AddInt64(&h.totalRequests, 1)
+	atomic.AddInt64(&h.failedRequests, 1)
+	if h.usageTracker == nil {
+		return
+	}
+	provider, accountName := resolveAccountMeta(accountID)
+	h.usageTracker.Append(RequestRecord{
+		Model:       model,
+		Provider:    provider,
+		AccountID:   accountID,
+		AccountName: accountName,
+		Status:      statusError,
+		Endpoint:    endpoint,
+		APIKeyID:    apiKeyID,
+		Error:       errMsg,
+	})
 }
 
 // handleClaudeNonStream handles Claude non-streaming response
@@ -1991,7 +2067,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			h.handleAccountFailure(account, err, model)
 			continue
 		}
-		skipNonStreamHandling:
+	skipNonStreamHandling:
 
 		thinkingFormat := thinkingOpts.Format
 		finalContent, extractedReasoning := extractThinkingFromContent(content)
@@ -2062,7 +2138,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		return
 	}
 
-	h.recordFailure()
+	h.recordError(apiKeyID, "", model, endpointClaude, lastErr.Error())
 	h.sendClaudeError(w, 500, "api_error", lastErr.Error())
 }
 
@@ -2443,32 +2519,32 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 
 		h.usageTracker.TrackActive(account.ID, endpointOpenAI, model)
 		err := CallKiroAPI(account, payload, callback)
-			if err != nil {
-				lastErr = err
-				//  try refresh+retry before rotating accounts
-				if h.tryRefreshAndRetry(account, payload, callback, err) {
-					h.pool.RecordSuccess(account.ID, model)
-					goto skipOpenAIStreamHandling
-				}
-				h.usageTracker.RemoveActive(account.ID)
-				excluded[account.ID] = true
-				h.handleAccountFailure(account, err, model)
-				if !responseStarted {
-					continue
-				}
-				h.recordFailure()
-				errorData, _ := json.Marshal(map[string]interface{}{
-					"error": map[string]string{
-						"type":    "api_error",
-						"message": err.Error(),
-					},
-				})
-				fmt.Fprintf(w, "data: %s\n\n", string(errorData))
-				fmt.Fprintf(w, "data: [DONE]\n\n")
-				flusher.Flush()
-				return
+		if err != nil {
+			lastErr = err
+			//  try refresh+retry before rotating accounts
+			if h.tryRefreshAndRetry(account, payload, callback, err) {
+				h.pool.RecordSuccess(account.ID, model)
+				goto skipOpenAIStreamHandling
 			}
-		skipOpenAIStreamHandling:
+			h.usageTracker.RemoveActive(account.ID)
+			excluded[account.ID] = true
+			h.handleAccountFailure(account, err, model)
+			if !responseStarted {
+				continue
+			}
+			h.recordFailure()
+			errorData, _ := json.Marshal(map[string]interface{}{
+				"error": map[string]string{
+					"type":    "api_error",
+					"message": err.Error(),
+				},
+			})
+			fmt.Fprintf(w, "data: %s\n\n", string(errorData))
+			fmt.Fprintf(w, "data: [DONE]\n\n")
+			flusher.Flush()
+			return
+		}
+	skipOpenAIStreamHandling:
 
 		processText("", false, true)
 		if eventThinkingOpen {
@@ -2539,7 +2615,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		return
 	}
 
-	h.recordFailure()
+	h.recordError(apiKeyID, "", model, endpointOpenAI, lastErr.Error())
 	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
 }
 
@@ -2597,7 +2673,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			h.handleAccountFailure(account, err, model)
 			continue
 		}
-		skipOpenAINonStreamHandling:
+	skipOpenAINonStreamHandling:
 
 		finalContent, extractedReasoning := extractThinkingFromContent(content)
 		if thinking && reasoningContent == "" && extractedReasoning != "" {
@@ -2636,7 +2712,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		return
 	}
 
-	h.recordFailure()
+	h.recordError(apiKeyID, "", model, endpointOpenAI, lastErr.Error())
 	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
 }
 
@@ -2974,6 +3050,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetUsageRequestDetails(w, r)
 	case path == "/usage/providers" && r.Method == "GET":
 		h.apiGetUsageProviders(w, r)
+	case path == "/logs" && r.Method == "GET":
+		h.apiGetLogs(w, r)
+	case path == "/logs/stream" && r.Method == "GET":
+		h.apiLogsStream(w, r)
 	default:
 		w.WriteHeader(404)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Not Found"})
@@ -3041,6 +3121,9 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 					env[k] = v
 				}
 			}
+		}
+		if token := env["ANTHROPIC_AUTH_TOKEN"]; token != "" {
+			env["ANTHROPIC_API_KEY"] = token
 		}
 		current["hasCompletedOnboarding"] = true
 		current["env"] = env
@@ -3130,11 +3213,11 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 			model = "provider/model-id"
 		}
 		global := map[string]interface{}{
-			"actModeApiProvider":     "openai",
-			"planModeApiProvider":    "openai",
-			"openAiBaseUrl":          baseURL,
-			"openAiModelId":          model,
-			"planModeOpenAiModelId":  model,
+			"actModeApiProvider":    "openai",
+			"planModeApiProvider":   "openai",
+			"openAiBaseUrl":         baseURL,
+			"openAiModelId":         model,
+			"planModeOpenAiModelId": model,
 		}
 		globalData, _ := json.MarshalIndent(global, "", "  ")
 		if err := os.WriteFile(filepath.Join(secretsDir, "globalState.json"), globalData, 0644); err != nil {
@@ -3277,11 +3360,27 @@ requires_api_key = true
 		if hermesModel == "" {
 			hermesModel = "provider/model-id"
 		}
-		yamlContent := fmt.Sprintf(`model:
+		yamlContent := ""
+		configPath := filepath.Join(hermesDir, "config.yaml")
+		if data, err := os.ReadFile(configPath); err == nil {
+			yamlContent = string(data)
+		}
+		providerBlock := fmt.Sprintf(`  superkiro:
+    base_url: %s
+    api_key: %s
+    api_mode: openai
+    discover_models: false
+    models:
+    - %s
+`, hermesBPURL, req.APIKey, hermesModel)
+		if strings.TrimSpace(yamlContent) == "" {
+			yamlContent = fmt.Sprintf(`model:
   default: "%s"
-  provider: "custom"
+  provider: "superkiro"
   base_url: "%s"
 `, hermesModel, hermesBPURL)
+		}
+		yamlContent = upsertYAMLProviderBlock(yamlContent, "superkiro", providerBlock)
 		if err := os.WriteFile(filepath.Join(hermesDir, "config.yaml"), []byte(yamlContent), 0644); err != nil {
 			http.Error(w, `{"error":"failed to write config.yaml"}`, 500)
 			return
@@ -3330,15 +3429,15 @@ requires_api_key = true
 				continue
 			}
 			entry := map[string]interface{}{
-				"model":             m,
-				"id":                fmt.Sprintf("custom:9Router-%d", i),
-				"index":             i,
-				"baseUrl":           droidBPURL,
-				"apiKey":            req.APIKey,
-				"displayName":       m,
-				"maxOutputTokens":   131072,
-				"noImageSupport":    false,
-				"provider":          "openai",
+				"model":           m,
+				"id":              fmt.Sprintf("custom:9Router-%d", i),
+				"index":           i,
+				"baseUrl":         droidBPURL,
+				"apiKey":          req.APIKey,
+				"displayName":     m,
+				"maxOutputTokens": 131072,
+				"noImageSupport":  false,
+				"provider":        "openai",
 			}
 			if m == droidActiveM {
 				entry["index"] = droidIdx
@@ -3373,39 +3472,47 @@ requires_api_key = true
 		if data, err := os.ReadFile(filepath.Join(ocDir, "openclaw.json")); err == nil {
 			json.Unmarshal(data, &currentOC)
 		}
-		currentOC["models"] = map[string]interface{}{
-			"providers": map[string]interface{}{
-				"9router": map[string]interface{}{
-					"baseUrl": ocBPURL,
-					"apiKey":  req.APIKey,
-					"api":     "openai-completions",
-					"models": []map[string]string{
-						{"id": ocModel, "name": ocModel},
-					},
-				},
+		modelsSec, ok := currentOC["models"].(map[string]interface{})
+		if !ok {
+			modelsSec = map[string]interface{}{}
+		}
+		providers, ok := modelsSec["providers"].(map[string]interface{})
+		if !ok {
+			providers = map[string]interface{}{}
+		}
+		providers["superkiro"] = map[string]interface{}{
+			"baseUrl": ocBPURL,
+			"apiKey":  req.APIKey,
+			"api":     "openai-completions",
+			"models": []map[string]string{
+				{"id": ocModel, "name": ocModel},
 			},
 		}
+		modelsSec["providers"] = providers
+		currentOC["models"] = modelsSec
 		agentModels := map[string]string{}
 		if req.AgentModels != nil {
 			agentModels = req.AgentModels
 		}
-		agentsList := []map[string]interface{}{
-			{"id": "default", "model": "9router/" + ocModel, "primary": true},
-		}
-		for agID, agModel := range agentModels {
-			agentsList = append(agentsList, map[string]interface{}{
-				"id":    agID,
-				"model": "9router/" + agModel,
-			})
-		}
-		currentOC["agents"] = map[string]interface{}{
-			"defaults": map[string]interface{}{
-				"model": map[string]string{"primary": "9router/" + ocModel},
-				"models": map[string]interface{}{
-					"9router/" + ocModel: map[string]interface{}{},
+		if _, ok := currentOC["agents"].(map[string]interface{}); !ok {
+			agentsList := []map[string]interface{}{
+				{"id": "default", "model": "superkiro/" + ocModel, "primary": true},
+			}
+			for agID, agModel := range agentModels {
+				agentsList = append(agentsList, map[string]interface{}{
+					"id":    agID,
+					"model": "superkiro/" + agModel,
+				})
+			}
+			currentOC["agents"] = map[string]interface{}{
+				"defaults": map[string]interface{}{
+					"model": map[string]string{"primary": "superkiro/" + ocModel},
+					"models": map[string]interface{}{
+						"superkiro/" + ocModel: map[string]interface{}{},
+					},
 				},
-			},
-			"list": agentsList,
+				"list": agentsList,
+			}
 		}
 		ocData, _ := json.MarshalIndent(currentOC, "", "  ")
 		if err := os.WriteFile(filepath.Join(ocDir, "openclaw.json"), ocData, 0644); err != nil {
@@ -3414,16 +3521,16 @@ requires_api_key = true
 		}
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
-	setCliToolSettings(toolID, &CliToolSettings{
-		BaseURL:       req.BaseURL,
-		APIKey:        req.APIKey,
-		Model:         req.Model,
-		Models:        req.Models,
-		ActiveModel:   req.ActiveModel,
-		SubagentModel: req.SubagentModel,
-		Env:           req.Env,
-		AgentModels:   req.AgentModels,
-	})
+		setCliToolSettings(toolID, &CliToolSettings{
+			BaseURL:       req.BaseURL,
+			APIKey:        req.APIKey,
+			Model:         req.Model,
+			Models:        req.Models,
+			ActiveModel:   req.ActiveModel,
+			SubagentModel: req.SubagentModel,
+			Env:           req.Env,
+			AgentModels:   req.AgentModels,
+		})
 	default:
 		http.Error(w, `{"error":"unknown tool"}`, 404)
 	}
@@ -3890,12 +3997,23 @@ func readCliToolSettingsFromFile(toolID string) *CliToolSettings {
 		var agentModels map[string]string
 		if modelsSec != nil {
 			if providers, _ := modelsSec["providers"].(map[string]interface{}); providers != nil {
-				if p, _ := providers["9router"].(map[string]interface{}); p != nil {
+				if p, _ := providers["superkiro"].(map[string]interface{}); p != nil {
 					baseUrl, _ = p["baseUrl"].(string)
 					apiKey, _ = p["apiKey"].(string)
 					if ms, _ := p["models"].([]interface{}); len(ms) > 0 {
 						if m, _ := ms[0].(map[string]interface{}); m != nil {
 							model, _ = m["id"].(string)
+						}
+					}
+				}
+				if model == "" {
+					if p, _ := providers["9router"].(map[string]interface{}); p != nil {
+						baseUrl, _ = p["baseUrl"].(string)
+						apiKey, _ = p["apiKey"].(string)
+						if ms, _ := p["models"].([]interface{}); len(ms) > 0 {
+							if m, _ := ms[0].(map[string]interface{}); m != nil {
+								model, _ = m["id"].(string)
+							}
 						}
 					}
 				}
@@ -3908,6 +4026,7 @@ func readCliToolSettingsFromFile(toolID string) *CliToolSettings {
 					if am, _ := a.(map[string]interface{}); am != nil {
 						if id, _ := am["id"].(string); id != "" {
 							if m, _ := am["model"].(string); m != "" {
+								m = strings.TrimPrefix(m, "superkiro/")
 								agentModels[id] = strings.TrimPrefix(m, "9router/")
 							}
 						}
@@ -4072,9 +4191,9 @@ var (
 )
 
 type mitmStatusResp struct {
-	Running  bool              `json:"running"`
-	Cert     bool              `json:"cert"`
-	DNS      map[string]bool   `json:"dns"`
+	Running bool            `json:"running"`
+	Cert    bool            `json:"cert"`
+	DNS     map[string]bool `json:"dns"`
 }
 
 func (h *Handler) apiMitmStatus(w http.ResponseWriter, r *http.Request) {
@@ -4111,8 +4230,8 @@ func (h *Handler) apiMitmStatus(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiMitmStart(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		APIKey      string `json:"apiKey"`
-		SudoPass    string `json:"sudoPassword"`
+		APIKey   string `json:"apiKey"`
+		SudoPass string `json:"sudoPassword"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid request"}`, 400)
@@ -4143,9 +4262,9 @@ func (h *Handler) apiMitmStop(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiMitmToggleDns(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Tool        string `json:"tool"`
-		Action      string `json:"action"` // "enable" or "disable"
-		SudoPass    string `json:"sudoPassword"`
+		Tool     string `json:"tool"`
+		Action   string `json:"action"` // "enable" or "disable"
+		SudoPass string `json:"sudoPassword"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid request"}`, 400)
@@ -4269,9 +4388,9 @@ func (h *Handler) apiCopilotSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "GET":
 		var cfg struct {
-			Installed bool                   `json:"installed"`
-			Models    []map[string]interface{} `json:"models"`
-			Has9Router bool                  `json:"has9Router"`
+			Installed  bool                     `json:"installed"`
+			Models     []map[string]interface{} `json:"models"`
+			Has9Router bool                     `json:"has9Router"`
 		}
 		if data, err := os.ReadFile(modelsPath); err == nil {
 			var models []map[string]interface{}
@@ -4325,11 +4444,11 @@ func (h *Handler) apiCopilotSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, m := range modelsList {
 			kept = append(kept, map[string]interface{}{
-				"title":         "SuperKiro",
-				"provider":      "openai",
-				"model":         m,
-				"apiKey":        req.APIKey,
-				"baseUrl":       req.BaseURL,
+				"title":    "SuperKiro",
+				"provider": "openai",
+				"model":    m,
+				"apiKey":   req.APIKey,
+				"baseUrl":  req.BaseURL,
 			})
 		}
 
@@ -4736,9 +4855,9 @@ func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		StartUrl string `json:"startUrl"`
-		Region   string `json:"region"`
-			ProfileArn   string `json:"profileArn,omitempty"`
+		StartUrl   string `json:"startUrl"`
+		Region     string `json:"region"`
+		ProfileArn string `json:"profileArn,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -4821,8 +4940,8 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiStartBuilderIdLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Region string `json:"region"`
-			ProfileArn   string `json:"profileArn,omitempty"`
+		Region     string `json:"region"`
+		ProfileArn string `json:"profileArn,omitempty"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
 
@@ -4920,7 +5039,7 @@ func (h *Handler) apiImportSsoToken(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		BearerToken string `json:"bearerToken"`
 		Region      string `json:"region"`
-			ProfileArn   string `json:"profileArn,omitempty"`
+		ProfileArn  string `json:"profileArn,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -6343,19 +6462,19 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 
 	// create account
 	account := config.Account{
-		ID:           auth.GenerateAccountID(),
-		Email:        email,
-		AccessToken:  accessToken,
-		RefreshToken: req.RefreshToken,
-		ClientID:     req.ClientID,
-		ClientSecret: req.ClientSecret,
-		AuthMethod:   req.AuthMethod,
-		Provider:     req.Provider,
-		Region:       req.Region,
-		ExpiresAt:    expiresAt,
-		Enabled:      true,
-		MachineId:    config.GenerateMachineId(),
-		ProfileArn:   newProfileArn,
+		ID:            auth.GenerateAccountID(),
+		Email:         email,
+		AccessToken:   accessToken,
+		RefreshToken:  req.RefreshToken,
+		ClientID:      req.ClientID,
+		ClientSecret:  req.ClientSecret,
+		AuthMethod:    req.AuthMethod,
+		Provider:      req.Provider,
+		Region:        req.Region,
+		ExpiresAt:     expiresAt,
+		Enabled:       true,
+		MachineId:     config.GenerateMachineId(),
+		ProfileArn:    newProfileArn,
 		TokenEndpoint: req.TokenEndpoint,
 		IssuerURL:     req.IssuerURL,
 		Scopes:        req.Scopes,
@@ -6496,6 +6615,8 @@ func (h *Handler) apiResetStats(w http.ResponseWriter, r *http.Request) {
 	h.totalCredits = 0
 	h.creditsMu.Unlock()
 	config.UpdateStats(0, 0, 0, 0, 0)
+	config.ResetAllAccountStats()
+	h.pool.ResetStats()
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
 
@@ -6989,7 +7110,7 @@ func (h *Handler) apiExportAccounts(w http.ResponseWriter, r *http.Request) {
 		ClientID     string `json:"clientId,omitempty"`
 		ClientSecret string `json:"clientSecret,omitempty"`
 		Region       string `json:"region,omitempty"`
-			ProfileArn   string `json:"profileArn,omitempty"`
+		ProfileArn   string `json:"profileArn,omitempty"`
 		ExpiresAt    int64  `json:"expiresAt"`
 		AuthMethod   string `json:"authMethod,omitempty"`
 		Provider     string `json:"provider,omitempty"`
@@ -7189,6 +7310,67 @@ func (h *Handler) apiUsageStream(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// apiGetLogs returns the current contents of the in-memory log ring buffer.
+func (h *Handler) apiGetLogs(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"lines": logger.LogBuf.Lines(),
+	})
+}
+
+// apiLogsStream live-tails the logger via SSE. It subscribes to logger.Subscribe
+// (which invokes the callback synchronously from the logging goroutine), pushing
+// each line into a buffered channel so the logging path never blocks; lines are
+// dropped for this client if it falls behind rather than stalling the logger.
+func (h *Handler) apiLogsStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Buffered so a slow client never blocks the logging goroutine.
+	lineCh := make(chan string, 256)
+	unsub := logger.Subscribe(func(line string) {
+		select {
+		case lineCh <- line:
+		default: // drop for this client when its buffer is full
+		}
+	})
+	defer unsub()
+
+	// Send the existing buffered lines as the initial snapshot.
+	for _, line := range logger.LogBuf.Lines() {
+		if data, err := json.Marshal(map[string]string{"line": line}); err == nil {
+			fmt.Fprintf(w, "data: %s\n\n", data)
+		}
+	}
+	flusher.Flush()
+
+	notify := r.Context().Done()
+	keepalive := time.NewTicker(25 * time.Second)
+	defer keepalive.Stop()
+
+	for {
+		select {
+		case <-notify:
+			return
+		case <-keepalive.C:
+			fmt.Fprintf(w, ": ping\n\n")
+			flusher.Flush()
+		case line := <-lineCh:
+			if data, err := json.Marshal(map[string]string{"line": line}); err == nil {
+				fmt.Fprintf(w, "data: %s\n\n", data)
+				flusher.Flush()
+			}
+		}
+	}
+}
+
 // apiGetUsageRequestDetails returns paginated request details.
 func (h *Handler) apiGetUsageRequestDetails(w http.ResponseWriter, r *http.Request) {
 	page := 1
@@ -7244,13 +7426,13 @@ func (h *Handler) apiGetUsageRequestDetails(w http.ResponseWriter, r *http.Reque
 
 	// Convert to detail format
 	type DetailItem struct {
-		Timestamp  string `json:"timestamp"`
-		Model      string `json:"model"`
-		Provider   string `json:"provider"`
-		AccountID  string `json:"accountId"`
-		Status     string `json:"status"`
-		Tokens     map[string]int `json:"tokens"`
-		Latency    map[string]int `json:"latency"`
+		Timestamp string         `json:"timestamp"`
+		Model     string         `json:"model"`
+		Provider  string         `json:"provider"`
+		AccountID string         `json:"accountId"`
+		Status    string         `json:"status"`
+		Tokens    map[string]int `json:"tokens"`
+		Latency   map[string]int `json:"latency"`
 	}
 	details := make([]DetailItem, 0, len(pageData))
 	for _, rec := range pageData {

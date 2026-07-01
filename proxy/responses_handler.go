@@ -227,7 +227,7 @@ func (h *Handler) handleResponsesNonStream(
 		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
 		return
 	}
-	h.recordFailure()
+	h.recordError(apiKeyID, "", model, endpointOpenAIResponses, lastErr.Error())
 	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
 }
 
@@ -598,7 +598,7 @@ func (h *Handler) handleResponsesStream(
 		})
 		return
 	}
-	h.recordFailure()
+	h.recordError(apiKeyID, "", model, endpointOpenAIResponses, lastErr.Error())
 	send("response.failed", map[string]interface{}{
 		"type": "response.failed",
 		"response": map[string]interface{}{

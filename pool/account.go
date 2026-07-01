@@ -12,6 +12,20 @@ import (
 
 const tokenRefreshSkewSeconds int64 = 120
 
+// accountStats holds the cumulative runtime counters for a single account.
+// It lives in AccountPool.stats keyed by accountID, deliberately separate from
+// the accounts[] routing slice: Reload() rebuilds accounts[] from config on
+// every account mutation (40+ call sites), so counters stored on the slice were
+// silently reset by racing reloads. Keeping them here means routing rebuilds no
+// longer clobber usage totals.
+type accountStats struct {
+	RequestCount int
+	ErrorCount   int
+	TotalTokens  int
+	TotalCredits float64
+	LastUsed     int64
+}
+
 // AccountPool manages the account pool
 type AccountPool struct {
 	mu            sync.RWMutex
@@ -22,6 +36,7 @@ type AccountPool struct {
 	errorCounts   map[string]int             // consecutive error count
 	modelLists    map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
 	modelLocks    map[string]map[string]time.Time // accountID → modelName → cooldown until
+	stats         map[string]*accountStats   // accountID → cumulative runtime stats (survives Reload)
 }
 
 var (
@@ -37,6 +52,7 @@ func GetPool() *AccountPool {
 			errorCounts: make(map[string]int),
 			modelLists:  make(map[string]map[string]bool),
 			modelLocks:  make(map[string]map[string]time.Time),
+			stats:       make(map[string]*accountStats),
 		}
 		pool.Reload()
 	})
@@ -65,6 +81,28 @@ func (p *AccountPool) Reload() {
 	}
 	p.accounts = weighted
 	p.totalAccounts = len(enabled)
+
+	// Seed runtime stats from the persisted config counters, but only for
+	// accounts we are not already tracking in memory. The in-memory map is the
+	// source of truth once the process is running (it accumulates every request
+	// and is flushed to config asynchronously); overwriting it here would undo
+	// increments that raced ahead of the last flush — the original under-count
+	// bug. New accounts (or a fresh process) legitimately start from config.
+	if p.stats == nil {
+		p.stats = make(map[string]*accountStats)
+	}
+	for _, a := range enabled {
+		if _, ok := p.stats[a.ID]; ok {
+			continue
+		}
+		p.stats[a.ID] = &accountStats{
+			RequestCount: a.RequestCount,
+			ErrorCount:   a.ErrorCount,
+			TotalTokens:  a.TotalTokens,
+			TotalCredits: a.TotalCredits,
+			LastUsed:     a.LastUsed,
+		}
+	}
 }
 
 // GetNext returns the next available account (weighted round-robin)
@@ -489,48 +527,55 @@ func (p *AccountPool) AvailableCount() int {
 	return count
 }
 
-// UpdateStats updates account statistics
+// UpdateStats updates account statistics. Counters live in p.stats keyed by
+// accountID (not on the accounts[] routing slice), so Reload() rebuilding
+// accounts[] no longer clobbers them. The updated totals are flushed to config
+// asynchronously; the in-memory map remains the source of truth while running.
 func (p *AccountPool) UpdateStats(id string, tokens int, credits float64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	var updated bool
-	var requestCount, errorCount, totalTokens int
-	var totalCredits float64
-	var lastUsed int64
-	for i := range p.accounts {
-		if p.accounts[i].ID == id {
-			if !updated {
-				p.accounts[i].RequestCount++
-				p.accounts[i].TotalTokens += tokens
-				p.accounts[i].TotalCredits += credits
-				p.accounts[i].LastUsed = time.Now().Unix()
 
-				requestCount = p.accounts[i].RequestCount
-				errorCount = p.accounts[i].ErrorCount
-				totalTokens = p.accounts[i].TotalTokens
-				totalCredits = p.accounts[i].TotalCredits
-				lastUsed = p.accounts[i].LastUsed
-				updated = true
-				continue
-			}
-			p.accounts[i].RequestCount = requestCount
-			p.accounts[i].ErrorCount = errorCount
-			p.accounts[i].TotalTokens = totalTokens
-			p.accounts[i].TotalCredits = totalCredits
-			p.accounts[i].LastUsed = lastUsed
-		}
+	s, ok := p.stats[id]
+	if !ok {
+		s = &accountStats{}
+		p.stats[id] = s
 	}
-	if updated {
-		go config.UpdateAccountStats(id, requestCount, errorCount, totalTokens, totalCredits, lastUsed)
-	}
+	s.RequestCount++
+	s.TotalTokens += tokens
+	s.TotalCredits += credits
+	s.LastUsed = time.Now().Unix()
+
+	go config.UpdateAccountStats(id, s.RequestCount, s.ErrorCount, s.TotalTokens, s.TotalCredits, s.LastUsed)
 }
 
-// GetAllAccounts returns a copy of all accounts
+// ResetStats zeroes the in-memory per-account counters. Callers that also want
+// the reset persisted must clear the config side separately
+// (config.ResetAllAccountStats); this only clears the running source of truth so
+// GetAllAccounts stops overlaying the old totals.
+func (p *AccountPool) ResetStats() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.stats = make(map[string]*accountStats)
+}
+
+// GetAllAccounts returns a copy of all accounts with runtime stats overlaid
+// from p.stats. The counters are read from the map (the running source of
+// truth), not from the accounts[] copy, so callers see live totals even though
+// Reload() rebuilds accounts[] from the (staler) persisted config.
 func (p *AccountPool) GetAllAccounts() []config.Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	result := make([]config.Account, len(p.accounts))
 	copy(result, p.accounts)
+	for i := range result {
+		if s, ok := p.stats[result[i].ID]; ok {
+			result[i].RequestCount = s.RequestCount
+			result[i].ErrorCount = s.ErrorCount
+			result[i].TotalTokens = s.TotalTokens
+			result[i].TotalCredits = s.TotalCredits
+			result[i].LastUsed = s.LastUsed
+		}
+	}
 	return result
 }
 

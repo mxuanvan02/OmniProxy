@@ -814,6 +814,8 @@ let customSelectRefreshQueued = false;
     $('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.remove('hidden');
     if (tab === 'usage') { if (typeof initUsagePage === 'function') initUsagePage(); }
     else { if (typeof destroyUsagePage === 'function') destroyUsagePage(); }
+    if (tab === 'logs') { if (typeof initLogsPage === 'function') initLogsPage(); }
+    else { if (typeof destroyLogsPage === 'function') destroyLogsPage(); }
     if (tab === 'accounts') { if (typeof loadCombos === 'function') loadCombos(); }
     if (tab === 'api') { renderCliTools(); if (apiKeysCache.length === 0) loadApiKeys(); loadCliToolStatus(); }
   }

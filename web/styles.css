@@ -4386,3 +4386,61 @@ img.brand-icon {
   border-radius: 4px;
   letter-spacing: 0.3px;
 }
+
+/* ── Logs viewer ─────────────────────────────────────── */
+.logs-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+.logs-viewer {
+  margin-top: 0.75rem;
+  height: 60vh;
+  overflow-y: auto;
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.logs-line {
+  padding: 0 2px;
+}
+.logs-line-error {
+  color: var(--destructive);
+}
+.logs-line-warn {
+  color: var(--warning);
+}
+.logs-line-info {
+  color: var(--foreground);
+}
+.logs-line-debug {
+  color: var(--muted-foreground);
+}
+.logs-empty {
+  color: var(--muted-foreground);
+  text-align: center;
+  padding: 2rem 0;
+}
+
+/* ── Recent Requests error row ───────────────────────── */
+.usage-recent-error-row {
+  background: color-mix(in srgb, var(--destructive) 8%, transparent);
+}
+.usage-recent-error {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--destructive);
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}

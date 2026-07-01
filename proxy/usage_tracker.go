@@ -22,6 +22,12 @@ const (
 	endpointOpenAIResponses = "openai-responses"
 )
 
+// Request status values stored on RequestRecord.Status.
+const (
+	statusSuccess = "success"
+	statusError   = "error"
+)
+
 // RequestRecord is a single usage event captured during a proxy request.
 type RequestRecord struct {
 	Timestamp       string  `json:"timestamp"`
@@ -35,6 +41,7 @@ type RequestRecord struct {
 	Status          string  `json:"status"`
 	Endpoint        string  `json:"endpoint"`
 	APIKeyID        string  `json:"apiKeyId,omitempty"`
+	Error           string  `json:"error,omitempty"`
 }
 
 // PeriodSummary holds aggregated stats for a single time bucket.

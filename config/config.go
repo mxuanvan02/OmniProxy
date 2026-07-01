@@ -700,6 +700,22 @@ func UpdateAccountStats(id string, requestCount, errorCount, totalTokens int, to
 	return nil
 }
 
+// ResetAllAccountStats zeroes the cumulative per-account counters for every
+// account. Used by the stats-reset endpoint so per-account totals restart from
+// zero alongside the global counters (which UpdateStats(0,...) clears).
+func ResetAllAccountStats() error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i := range cfg.Accounts {
+		cfg.Accounts[i].RequestCount = 0
+		cfg.Accounts[i].ErrorCount = 0
+		cfg.Accounts[i].TotalTokens = 0
+		cfg.Accounts[i].TotalCredits = 0
+		cfg.Accounts[i].LastUsed = 0
+	}
+	return Save()
+}
+
 // UpdateAccountInfo updates an account's subscription and usage information.
 // Called after refreshing account data from Kiro API.
 func UpdateAccountInfo(id string, info AccountInfo) error {

@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"superkiro/config"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -240,5 +242,52 @@ func TestSumDailyBreakdownsNotCappedByRing(t *testing.T) {
 	}
 	if got := day.ByModel["opus"].Requests; got != 3000 {
 		t.Fatalf("today opus requests: got %d, want 3000", got)
+	}
+}
+
+// TestRecordErrorAppendsFailedRecord verifies a failed request is no longer
+// invisible: recordError must bump the global failure counters AND append a
+// RequestRecord with Status=statusError plus the reason, so the failure shows up
+// in Usage → Recent Requests with its error message (previously recordFailure
+// only bumped a counter and the failed request vanished from every table).
+func TestRecordErrorAppendsFailedRecord(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+
+	tr := &UsageTracker{
+		ringCap:    500,
+		ring:       make([]RequestRecord, 500),
+		activeReqs: make(map[string]ActiveRequest),
+		dailyData:  make(map[string]*PeriodSummary),
+	}
+	h := &Handler{usageTracker: tr}
+
+	h.recordError("key-1", "", "claude-opus-4.8", endpointOpenAI, "upstream 500: boom")
+
+	if got := atomic.LoadInt64(&h.failedRequests); got != 1 {
+		t.Fatalf("failedRequests: got %d, want 1", got)
+	}
+	if got := atomic.LoadInt64(&h.totalRequests); got != 1 {
+		t.Fatalf("totalRequests: got %d, want 1", got)
+	}
+
+	stats := tr.GetStats("all")
+	if len(stats.RecentRequests) != 1 {
+		t.Fatalf("expected one recent request, got %d", len(stats.RecentRequests))
+	}
+	rec := stats.RecentRequests[0]
+	if rec.Status != statusError {
+		t.Fatalf("status: got %q, want %q", rec.Status, statusError)
+	}
+	if rec.Error != "upstream 500: boom" {
+		t.Fatalf("error message not recorded, got %q", rec.Error)
+	}
+	if rec.Endpoint != endpointOpenAI {
+		t.Fatalf("endpoint: got %q, want %q", rec.Endpoint, endpointOpenAI)
+	}
+	if rec.Model != "claude-opus-4.8" {
+		t.Fatalf("model: got %q, want claude-opus-4.8", rec.Model)
 	}
 }

@@ -110,6 +110,8 @@
                 data-i18n="tabs.api"></span></button>
             <button type="button" class="tab" data-tab="usage"><i class="fa-solid fa-chart-line tab-icon"></i><span
                 data-i18n="tabs.usage"></span></button>
+            <button type="button" class="tab" data-tab="logs"><i class="fa-solid fa-terminal tab-icon"></i><span
+                data-i18n="tabs.logs"></span></button>
           </div>
         </nav>
         <div class="topbar-actions flex-wrap justify-end">
@@ -232,6 +234,30 @@
           <div id="detailsDrawerOverlay" class="usage-drawer-overlay hidden">
             <div id="detailsDrawer" class="usage-drawer"></div>
           </div>
+        </div>
+      </div>
+
+      <!-- Logs tab -->
+      <div id="tabLogs" class="tab-content hidden">
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title" data-i18n="logs.title"></span>
+            <div class="card-actions logs-toolbar">
+              <select id="logsLevelFilter" class="w-32!" data-i18n-aria-label="logs.levelFilter">
+                <option value="all" data-i18n="logs.levelAll"></option>
+                <option value="error" data-i18n="logs.levelError"></option>
+                <option value="warn" data-i18n="logs.levelWarn"></option>
+                <option value="info" data-i18n="logs.levelInfo"></option>
+                <option value="debug" data-i18n="logs.levelDebug"></option>
+              </select>
+              <input type="text" id="logsSearch" class="w-56!" data-i18n-placeholder="logs.search" />
+              <button class="btn btn-outline btn-sm" id="logsPauseBtn"><i class="fa-solid fa-pause"
+                  aria-hidden="true"></i><span class="btn-text" data-i18n="logs.pause"></span></button>
+              <button class="btn btn-outline btn-sm" id="logsClearBtn"><i class="fa-solid fa-trash-can"
+                  aria-hidden="true"></i><span class="btn-text" data-i18n="logs.clear"></span></button>
+            </div>
+          </div>
+          <div id="logsViewer" class="logs-viewer"></div>
         </div>
       </div>
 
@@ -783,7 +809,7 @@
   <script>
     (function () {
       var v = window.__v || Date.now();
-      var scripts = ['/admin/toast.js', '/admin/app.js', '/admin/settings.js', '/admin/accounts.js', '/admin/combos.js', '/admin/apiCli.js', '/admin/usage.js'];
+      var scripts = ['/admin/toast.js', '/admin/app.js', '/admin/settings.js', '/admin/accounts.js', '/admin/combos.js', '/admin/apiCli.js', '/admin/usage.js', '/admin/logs.js'];
       scripts.forEach(function (src) {
         var el = document.createElement('script');
         el.src = src + '?v=' + v;

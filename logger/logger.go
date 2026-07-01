@@ -82,7 +82,48 @@ var (
 
 	// LogBuf stores the last 2048 log lines for the verbose log viewer.
 	LogBuf = NewRingBuffer(2048)
+
+	// logSubscribers receives every formatted log line as it is written, so the
+	// web log viewer can live-tail. Kept in the logger package (not proxy) to
+	// avoid an import cycle: proxy imports logger, so logger must not import proxy.
+	logSubMu      sync.RWMutex
+	logSubs       = map[int]func(string){}
+	logSubNextID  int
 )
+
+// Subscribe registers fn to receive every log line written from now on. fn is
+// invoked synchronously under a read lock from the logging goroutine, so it MUST
+// be non-blocking (push to a buffered channel and return; never block or log).
+// The returned function unregisters the subscriber and must be called to avoid
+// a leak.
+func Subscribe(fn func(string)) func() {
+	logSubMu.Lock()
+	id := logSubNextID
+	logSubNextID++
+	logSubs[id] = fn
+	logSubMu.Unlock()
+	return func() {
+		logSubMu.Lock()
+		delete(logSubs, id)
+		logSubMu.Unlock()
+	}
+}
+
+// notifyLog fans a formatted line out to all subscribers. Non-blocking is the
+// subscriber's responsibility (see Subscribe).
+func notifyLog(line string) {
+	logSubMu.RLock()
+	for _, fn := range logSubs {
+		fn(line)
+	}
+	logSubMu.RUnlock()
+}
+
+// emit writes a formatted line to both the ring buffer and any live subscribers.
+func emit(line string) {
+	LogBuf.Write([]byte(line))
+	notifyLog(line)
+}
 
 // logLine formats a message the same way the standard loggers do: prefix + date + message.
 func logLine(prefix, format string, v ...interface{}) string {
@@ -166,7 +207,7 @@ func enabled(l Level) bool {
 func Debugf(format string, v ...interface{}) {
 	if enabled(LevelDebug) {
 		debugLog.Printf(format, v...)
-		LogBuf.Write([]byte(logLine("DEBUG ", format, v...)))
+		emit(logLine("DEBUG ", format, v...))
 	}
 }
 
@@ -174,7 +215,7 @@ func Debugf(format string, v ...interface{}) {
 func Infof(format string, v ...interface{}) {
 	if enabled(LevelInfo) {
 		infoLog.Printf(format, v...)
-		LogBuf.Write([]byte(logLine("INFO  ", format, v...)))
+		emit(logLine("INFO  ", format, v...))
 	}
 }
 
@@ -182,7 +223,7 @@ func Infof(format string, v ...interface{}) {
 func Warnf(format string, v ...interface{}) {
 	if enabled(LevelWarn) {
 		warnLog.Printf(format, v...)
-		LogBuf.Write([]byte(logLine("WARN  ", format, v...)))
+		emit(logLine("WARN  ", format, v...))
 	}
 }
 
@@ -190,13 +231,13 @@ func Warnf(format string, v ...interface{}) {
 func Errorf(format string, v ...interface{}) {
 	if enabled(LevelError) {
 		errorLog.Printf(format, v...)
-		LogBuf.Write([]byte(logLine("ERROR ", format, v...)))
+		emit(logLine("ERROR ", format, v...))
 	}
 }
 
 // Fatalf logs a formatted message at ERROR level and terminates the process.
 func Fatalf(format string, v ...interface{}) {
 	errorLog.Printf(format, v...)
-	LogBuf.Write([]byte(logLine("ERROR ", format, v...)))
+	emit(logLine("ERROR ", format, v...))
 	os.Exit(1)
 }
