@@ -145,7 +145,106 @@ Ba cơ chế **độc lập**, bật/tắt riêng, không phụ thuộc lẫn nh
 
 ---
 
-## 9. Rủi ro & giới hạn (nói thẳng)
+## 9. Đánh đổi thiết kế (mỗi quyết định: chọn gì, bỏ gì, giá phải trả)
+
+Mỗi hàng nêu rõ phương án được chọn, phương án bị loại, và **giá phải trả** của lựa chọn.
+
+### 9.1 Match kiểu gì: exact-match vs semantic (embedding)
+
+| Tiêu chí | **Exact-match (CHỌN)** | Semantic/embedding (LOẠI) |
+|---|---|---|
+| Đúng đắn | Hit ⇒ byte-for-byte giống ⇒ response **luôn hợp lệ** | Similarity ≥ ngưỡng ⇒ có **false positive** (trả sai ngữ cảnh) |
+| Chi phí | 1 lần SHA-256, 0 phụ thuộc ngoài | Cần embedding model + vector store (FAISS/Milvus) + tra similarity mỗi request |
+| Hit rate | Thấp (chỉ retry/refresh trùng khít) | Cao hơn nhưng **rủi ro trả nhầm** |
+
+**Đánh đổi:** hy sinh hit rate để đổi lấy **đảm bảo đúng tuyệt đối** (không bao giờ trả nhầm câu trả lời). GPTCache README xác nhận semantic dính false positive/negative — với proxy tính tiền, trả nhầm còn tệ hơn miss. Không đưa embedding/vector store vào vì phá vỡ nguyên tắc "một mục đích, ít phụ thuộc".
+
+### 9.2 Phạm vi chia sẻ cache: tách theo apiKey vs global
+
+| | **Tách theo apiKey (CHỌN)** | Global (LOẠI) |
+|---|---|---|
+| Riêng tư | Không rò rỉ nội dung giữa user | Response user A có thể lộ cho user B |
+| Hit rate | Thấp hơn (không chia sẻ chéo) | Cao hơn |
+
+**Đánh đổi:** hy sinh hit rate chéo-user để **không bao giờ rò rỉ dữ liệu**. Với hệ nhiều tenant, an toàn > tiết kiệm. Đây là ràng buộc cứng, không đánh đổi ngược lại.
+
+### 9.3 Cấp cache: response (đầu ra) vs prefix (đầu vào KV)
+
+- **Prefix cache (P2)** là nơi tiết kiệm lớn nhất (cache read 0.1x, hưởng lợi mọi lượt multi-turn) **nhưng** thuộc upstream — proxy chỉ *gợi ý* qua `cache_control`, không tự quản KV được.
+- **Response cache (P3)** proxy toàn quyền **nhưng** hit thấp.
+
+**Đánh đổi & hệ quả ưu tiên:** vì phần ăn tiền nhất nằm ngoài tầm kiểm soát trực tiếp, ta đặt P2 (đo + gợi ý prefix) trên P3 (tự cache đầu ra). Không dồn công vào P3 như thể nó là nguồn tiết kiệm chính.
+
+### 9.4 Streaming khi HIT: replay-buffered vs không cache stream
+
+**Chọn:** buffer full text + tool calls trong lúc stream lần đầu, HIT thì replay SSE.
+**Giá phải trả:** tốn RAM = tổng kích thước response trong TTL; thêm rủi ro lệch định dạng SSE khi replay. Giảm thiểu bằng cap `MaxEntries` + test khớp byte. **Loại** phương án "chỉ cache non-stream" vì phần lớn traffic là stream — bỏ stream thì P3 gần như vô dụng.
+
+### 9.5 TTL: ngắn (5m) vs dài (1h)
+
+**Chọn mặc định 5 phút.** Đánh đổi: TTL dài → hit cao hơn nhưng **nguy cơ trả nội dung cũ** cao hơn và giữ RAM lâu hơn. 5 phút khớp cửa sổ retry/refresh thực tế (nguồn hit chính) mà vẫn tươi. Chỉnh được qua config cho ai chấp nhận đánh đổi khác.
+
+### 9.6 P1 khi thiếu số thật: fallback simulator vs bỏ trống
+
+**Chọn:** giữ `promptCacheTracker` làm fallback, gắn cờ `estimated=true`.
+**Đánh đổi:** phức tạp hơn (2 nhánh) so với "không có số thật thì trả 0". Đổi lại: client cũ vẫn thấy trường cache quen thuộc, và cờ `estimated` phân biệt rõ đo-thật vs ước-lượng nên **không lừa** người đọc. Bỏ trống sẽ gãy client đang dựa vào field đó.
+
+---
+
+## 10. Chứng minh thuật toán (bất biến · độ phức tạp · biên lỗi)
+
+### 10.1 Cache key canonicalization — tính xác định & chống trùng sai
+
+**Thuật toán:** `key = SHA256( apiKeyID ∥ model ∥ canonicalJSON(system, messages, tools, inferenceConfig) )`, dùng `canonicalizeCacheValue` sẵn có (sort key map, loại `cache_control`).
+
+**Bổ đề (xác định):** hai request giống nhau về ngữ nghĩa ⇒ cùng key.
+*Chứng minh.* `writeCanonicalJSON` (cache_tracker.go:536) duyệt map theo **key đã sort** (`sort.Strings`, dòng 570), nên thứ tự trường trong JSON gốc không ảnh hưởng chuỗi canonical. Số/bool/string mã hoá bằng `json.Marshal` cố định. Do đó cùng nội dung ⇒ cùng chuỗi canonical ⇒ cùng đầu vào SHA-256 ⇒ cùng digest. ∎
+
+**Bổ đề (chống trùng sai — collision):** xác suất hai request khác nội dung cùng key ≈ 2⁻²⁵⁶ (kháng va chạm SHA-256). Đủ để coi HIT ⇒ nội dung giống. Kèm framing chống nhập nhằng nối chuỗi: `writeHashChunk` (cache_tracker.go:596) ghi `len(chunk) ∥ 0x00 ∥ chunk ∥ 0x00` nên `("ab","c")` ≠ `("a","bc")` — chặn va chạm do ghép biên.
+
+**Vì sao gồm `apiKeyID` trong key:** biến bất biến "không rò rỉ chéo-user" thành **bất biến toán học** — khác apiKey ⇒ khác đầu vào hash ⇒ khác không gian key, không thể HIT chéo. Không dựa vào kiểm tra runtime nào.
+
+**Độ phức tạp:** O(n) theo kích thước request (một lượt canonical + một lượt hash). Không phụ thuộc số entry trong cache.
+
+### 10.2 Dedupe in-flight — đảm bảo "gọi Kiro đúng một lần"
+
+**Cấu trúc:** `inflight map[key]*call`, mỗi `call` có `sync.WaitGroup wg` (Add(1) trước khi thả lock) + slot `result`. Bảo vệ bằng `mu sync.Mutex`.
+
+**Giao thức (một critical section quyết định leader):**
+```
+mu.Lock()
+if c, ok := inflight[key]; ok { mu.Unlock(); c.wg.Wait(); return c.result }  // follower
+c := &call{}; c.wg.Add(1); inflight[key] = c; mu.Unlock()                    // leader
+c.result = callKiro(...)                                                     // chỉ leader gọi
+mu.Lock(); delete(inflight, key); mu.Unlock(); c.wg.Done()
+```
+
+**Bất biến 1 (exactly-once):** với một key, tại mọi thời điểm có **tối đa một** `call` trong map. Việc kiểm-tra-và-đặt `inflight[key]` nằm **trọn trong một** vùng khoá `mu`, nên hai goroutine không thể cùng thấy `ok==false` rồi cùng tạo leader. ⇒ chỉ leader gọi `callKiro`. ∎
+
+**Bất biến 2 (không lost-wakeup):** `wg.Add(1)` xảy ra **trước** khi leader thả `mu`; follower chỉ đọc được `c` **sau** khi lấy `mu`, tức sau khi `Add(1)` đã chạy. Vậy không có follower nào `Wait()` trên WaitGroup có counter 0 sớm. Follower luôn được đánh thức bởi `wg.Done()`. ∎
+
+**Bất biến 3 (không giữ khoá khi chờ):** `c.wg.Wait()` gọi **sau** `mu.Unlock()`. Leader hoàn tất không bị chẹn bởi follower đang chờ ⇒ **không deadlock**.
+
+**Biên lỗi:** leader lỗi/panic ⇒ vẫn `delete(inflight,key)` + `wg.Done()` trong `defer`, và `result` mang lỗi. Follower nhận cùng lỗi (không cache lỗi theo 6.4) rồi tự thử lại ở lần sau — không kẹt vĩnh viễn.
+
+### 10.3 Response cache lookup + expiry — không bao giờ trả entry hết hạn
+
+**Bất biến:** `Get(key)` trả HIT **chỉ khi** `now < entry.ExpiresAt`.
+*Chứng minh.* Lookup kiểm `entry.ExpiresAt.After(now)` dưới khoá; sai ⇒ coi như MISS và xoá. `pruneExpiredLocked` (mẫu cache_tracker.go:225) là lớp phòng thủ thứ hai chạy định kỳ. Hai lớp đều so cùng mốc `now` lấy một lần ⇒ không có khe "đọc được rồi mới hết hạn". ∎
+
+**Chặn phình RAM (bất biến dung lượng):** sau mỗi `Set`, nếu `len(store) > MaxEntries` thì evict cho tới khi `≤ MaxEntries`. ⇒ bộ nhớ chặn trên bởi `MaxEntries × max_response_size`. Không có đường nào tăng `len(store)` mà bỏ qua kiểm tra này (mọi ghi đi qua `Set`).
+
+**Độ phức tạp:** Get/Set O(1) trung bình (hash map). Prune O(số entry) nhưng nhiếp biên (amortized) vì chỉ chạy theo chu kỳ/khi vượt cap.
+
+### 10.4 Prefix breakpoint (P2) — không vượt giới hạn & không đổi ngữ nghĩa
+
+**Bất biến số breakpoint:** số `cache_control` gắn vào payload ≤ 4 (giới hạn Anthropic). Thuật toán chỉ đặt breakpoint ở các ranh giới cố định `{tools, system, cuối-history}` và đếm, dừng ở 4.
+
+**Bất biến bảo toàn ngữ nghĩa:** `cache_control` là **metadata**; `canonicalizeCacheValue` đã **loại** key `cache_control` (cache_tracker.go:565) khỏi fingerprint. ⇒ thêm/bớt breakpoint **không đổi** cache key P3 và không đổi nội dung ngữ nghĩa gửi model. Bật/tắt P2 do đó trực giao với P1 và P3. ∎
+
+---
+
+## 11. Rủi ro & giới hạn (nói thẳng)
 
 - **P3 hit rate thấp** với hội thoại thật (bằng chứng GPTCache). Chỉ ăn retry/refresh/script lặp. Không kỳ vọng cắt chi phí hội thoại thường.
 - **P2 phụ thuộc Kiro** honor cache_control — chưa xác nhận, phải đo trước.
@@ -154,7 +253,7 @@ Ba cơ chế **độc lập**, bật/tắt riêng, không phụ thuộc lẫn nh
 
 ---
 
-## 10. Thứ tự triển khai
+## 12. Thứ tự triển khai
 
 1. **P1** — đọc số thật + fallback simulator (rủi ro thấp, luôn có giá trị, là cảm biến cho P2).
 2. **P2 giai đoạn đo** — bật debug, thu log, quyết định honor hay không.
