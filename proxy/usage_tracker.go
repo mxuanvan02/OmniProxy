@@ -30,18 +30,18 @@ const (
 
 // RequestRecord is a single usage event captured during a proxy request.
 type RequestRecord struct {
-	Timestamp       string  `json:"timestamp"`
-	Model           string  `json:"model"`
-	Provider        string  `json:"provider"`
-	AccountID       string  `json:"accountId"`
-	AccountName     string  `json:"accountName"`
-	InputTokens     int     `json:"inputTokens"`
-	OutputTokens    int     `json:"outputTokens"`
-	Cost            float64 `json:"cost"`
-	Status          string  `json:"status"`
-	Endpoint        string  `json:"endpoint"`
-	APIKeyID        string  `json:"apiKeyId,omitempty"`
-	Error           string  `json:"error,omitempty"`
+	Timestamp    string  `json:"timestamp"`
+	Model        string  `json:"model"`
+	Provider     string  `json:"provider"`
+	AccountID    string  `json:"accountId"`
+	AccountName  string  `json:"accountName"`
+	InputTokens  int     `json:"inputTokens"`
+	OutputTokens int     `json:"outputTokens"`
+	Cost         float64 `json:"cost"`
+	Status       string  `json:"status"`
+	Endpoint     string  `json:"endpoint"`
+	APIKeyID     string  `json:"apiKeyId,omitempty"`
+	Error        string  `json:"error,omitempty"`
 }
 
 // PeriodSummary holds aggregated stats for a single time bucket.
@@ -51,10 +51,10 @@ type RequestRecord struct {
 // omitempty + nil on legacy daily files and on the nested per-dimension
 // summaries (which never carry their own sub-breakdowns).
 type PeriodSummary struct {
-	Requests          int     `json:"requests"`
-	PromptTokens      int     `json:"promptTokens"`
-	CompletionTokens  int     `json:"completionTokens"`
-	Cost              float64 `json:"cost"`
+	Requests         int     `json:"requests"`
+	PromptTokens     int     `json:"promptTokens"`
+	CompletionTokens int     `json:"completionTokens"`
+	Cost             float64 `json:"cost"`
 
 	ByModel    map[string]*PeriodSummary `json:"byModel,omitempty"`
 	ByAccount  map[string]*PeriodSummary `json:"byAccount,omitempty"`
@@ -64,18 +64,18 @@ type PeriodSummary struct {
 
 // UsageStats holds the full response for the usage stats endpoint.
 type UsageStats struct {
-	TotalRequests         int                      `json:"totalRequests"`
-	TotalPromptTokens     int                      `json:"totalPromptTokens"`
-	TotalCompletionTokens int                      `json:"totalCompletionTokens"`
-	TotalCost             float64                  `json:"totalCost"`
-	ActiveRequests        []ActiveRequest          `json:"activeRequests"`
-	RecentRequests        []RequestRecord          `json:"recentRequests"`
+	TotalRequests         int                       `json:"totalRequests"`
+	TotalPromptTokens     int                       `json:"totalPromptTokens"`
+	TotalCompletionTokens int                       `json:"totalCompletionTokens"`
+	TotalCost             float64                   `json:"totalCost"`
+	ActiveRequests        []ActiveRequest           `json:"activeRequests"`
+	RecentRequests        []RequestRecord           `json:"recentRequests"`
 	ByModel               map[string]*PeriodSummary `json:"byModel"`
 	ByAccount             map[string]*PeriodSummary `json:"byAccount"`
 	ByAPIKey              map[string]*PeriodSummary `json:"byApiKey"`
 	ByEndpoint            map[string]*PeriodSummary `json:"byEndpoint"`
-	ErrorProvider         string                   `json:"errorProvider"`
-	AccountNames          map[string]string        `json:"accountNames"`
+	ErrorProvider         string                    `json:"errorProvider"`
+	AccountNames          map[string]string         `json:"accountNames"`
 }
 
 // ActiveRequest represents an in-flight request for the topology.
@@ -94,16 +94,16 @@ type ChartDataPoint struct {
 
 // UsageTracker collects per-request usage data in memory.
 type UsageTracker struct {
-	mu           sync.RWMutex
-	ring         []RequestRecord
-	ringCap      int
-	ringIdx      int
-	ringFull     bool
-	activeReqs   map[string]ActiveRequest // accountID → request
-	dailyData    map[string]*PeriodSummary
-	dirty        bool
-	historyPath  string
-	dailyPath    string
+	mu          sync.RWMutex
+	ring        []RequestRecord
+	ringCap     int
+	ringIdx     int
+	ringFull    bool
+	activeReqs  map[string]ActiveRequest // accountID → request
+	dailyData   map[string]*PeriodSummary
+	dirty       bool
+	historyPath string
+	dailyPath   string
 }
 
 var globalTracker *UsageTracker
@@ -113,10 +113,10 @@ func GetUsageTracker() *UsageTracker {
 	trackerOnce.Do(func() {
 		dataDir := config.GetConfigDir()
 		globalTracker = &UsageTracker{
-			ringCap:    500,
-			ring:       make([]RequestRecord, 500),
-			activeReqs: make(map[string]ActiveRequest),
-			dailyData:  make(map[string]*PeriodSummary),
+			ringCap:     500,
+			ring:        make([]RequestRecord, 500),
+			activeReqs:  make(map[string]ActiveRequest),
+			dailyData:   make(map[string]*PeriodSummary),
 			historyPath: filepath.Join(dataDir, "usage_history.json"),
 			dailyPath:   filepath.Join(dataDir, "usage_daily.json"),
 		}
@@ -213,8 +213,14 @@ func (t *UsageTracker) Append(r RequestRecord) {
 	// Per-day breakdowns so the By* tables survive past the ring buffer cap.
 	if day.ByModel == nil {
 		day.ByModel = make(map[string]*PeriodSummary)
+	}
+	if day.ByAccount == nil {
 		day.ByAccount = make(map[string]*PeriodSummary)
+	}
+	if day.ByAPIKey == nil {
 		day.ByAPIKey = make(map[string]*PeriodSummary)
+	}
+	if day.ByEndpoint == nil {
 		day.ByEndpoint = make(map[string]*PeriodSummary)
 	}
 	addToSummaryMap(day.ByModel, r.Model, r.InputTokens, r.OutputTokens, r.Cost)
