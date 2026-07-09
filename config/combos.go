@@ -168,6 +168,31 @@ func DeleteCombo(id string) error {
 	return nil
 }
 
+// GetExtraModels returns a snapshot of user-declared model IDs that should
+// be advertised in /v1/models even when the upstream Kiro account doesn't
+// list them. See Config.ExtraModels for the rationale.
+func GetExtraModels() []string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return nil
+	}
+	out := make([]string, len(cfg.ExtraModels))
+	copy(out, cfg.ExtraModels)
+	return out
+}
+
+// SetExtraModels replaces the user-declared extra model list and persists it.
+func SetExtraModels(ids []string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return errors.New("config not initialized")
+	}
+	cfg.ExtraModels = ids
+	return saveLocked()
+}
+
 // GetComboStrategy returns the global default combo strategy ("fallback" or "round-robin").
 func GetComboStrategy() string {
 	cfgLock.RLock()

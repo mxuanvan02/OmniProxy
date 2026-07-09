@@ -991,6 +991,20 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		models = append(models, buildModelInfo(combo.Name, "combo", true))
 	}
 
+	// Append user-declared extra models (e.g. claude-sonnet-5, claude-opus-4.8)
+	// that the proxy routes via passthrough but the upstream account doesn't
+	// advertise. Emit a thinking variant too so discovery matches the pattern
+	// used for the upstream-cached anthropic models.
+	for _, id := range config.GetExtraModels() {
+		supportsImage := true
+		if strings.HasPrefix(strings.ToLower(id), "claude-") {
+			models = append(models, buildModelInfo(id, "anthropic", supportsImage))
+			models = append(models, buildModelInfo(id+thinkingSuffix, "anthropic", supportsImage))
+		} else {
+			models = append(models, buildModelInfo(id, "kiro-proxy", supportsImage))
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"object": "list",

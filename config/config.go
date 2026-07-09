@@ -213,6 +213,15 @@ type Config struct {
 	// Combos is the list of user-defined sequential model fallback chains.
 	Combos []ComboEntry `json:"combos,omitempty"`
 
+	// ExtraModels are model IDs advertised in /v1/models even when the
+	// upstream Kiro account doesn't list them. The proxy's chat-completions
+	// path passes any "claude-*" name through to upstream, so models like
+	// "claude-sonnet-5" or "claude-opus-4.8" may be routable without
+	// appearing in the upstream model cache. Listing them here keeps
+	// /v1/models consistent with what the proxy actually accepts, so
+	// downstream agents (e.g. Hermes) don't auto-correct them away.
+	ExtraModels []string `json:"extraModels,omitempty"`
+
 	// ComboStrategy is the global default strategy: "fallback" or "round-robin".
 	ComboStrategy string `json:"comboStrategy,omitempty"`
 
