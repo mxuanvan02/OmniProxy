@@ -9,7 +9,8 @@ let logsState = {
   search: '',
   paused: false,
   bound: false,
-  maxLines: 2048,     // mirror logger.LogBuf capacity
+  maxLines: 500,      // reduced from 2048 — fewer DOM nodes = less lag
+  renderPending: false,  // throttle: coalesce rapid SSE bursts into one render
 };
 
 // Map a raw log line's 6-char prefix to a level. Lines are formatted by the Go
@@ -53,19 +54,28 @@ function renderLogs() {
     frag.appendChild(div);
     shown++;
   }
-  viewer.innerHTML = '';
+  viewer.replaceChildren(frag);
   if (shown === 0) {
     const empty = document.createElement('div');
     empty.className = 'logs-empty';
     empty.textContent = (typeof t === 'function' ? t('logs.empty') : 'No log lines');
-    viewer.appendChild(empty);
-  } else {
-    viewer.appendChild(frag);
+    viewer.replaceChildren(empty);
   }
   // Keep pinned to the newest line unless the user scrolled up.
   if (!logsState.paused && atBottom) {
     viewer.scrollTop = viewer.scrollHeight;
   }
+}
+
+// Throttled render: coalesce rapid SSE bursts into a single render frame so
+// the page doesn't freeze when hundreds of log lines arrive in quick succession.
+function scheduleRender() {
+  if (logsState.renderPending) return;
+  logsState.renderPending = true;
+  requestAnimationFrame(() => {
+    logsState.renderPending = false;
+    renderLogs();
+  });
 }
 
 async function fetchLogsSnapshot() {
@@ -94,7 +104,7 @@ function connectLogsSSE() {
         const data = JSON.parse(e.data);
         if (data.line) {
           pushLogLine(data.line);
-          renderLogs();
+          scheduleRender();
         }
       } catch (err) { /* ignore parse errors (e.g. keepalive) */ }
     };
