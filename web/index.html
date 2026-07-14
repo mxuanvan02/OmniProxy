@@ -146,6 +146,8 @@
               <div class="stat-sub">
                 <span class="stat-sub-sec"><span class="stat-value-sm" id="statCredits">0</span> <span
                     class="stat-label" data-i18n="stats.credits"></span></span>
+                <span class="stat-sub-sec"><span class="stat-value-sm" id="statKiroQuota">0 / 0</span> <span
+                    class="stat-label" data-i18n="stats.kiroQuota"></span></span>
               </div>
             </div>
             <i class="fa-solid fa-users stat-icon" aria-hidden="true"></i>
@@ -186,6 +188,27 @@
             <i class="fa-solid fa-circle-xmark stat-icon stat-icon--danger" aria-hidden="true"></i>
           </div>
         </div>
+        <div class="stat-card stat-card--models" id="statModelsCard">
+          <div class="stat-card-title" data-i18n="stats.models"></div>
+          <div class="stat-body">
+            <div class="stat-main">
+              <div class="stat-value" id="statModels">0</div>
+              <div class="stat-sub">
+                <span class="stat-sub-sec"><span class="stat-value-sm" id="statModelsPreview"></span></span>
+              </div>
+            </div>
+            <i class="fa-solid fa-layer-group stat-icon" aria-hidden="true"></i>
+          </div>
+        </div>
+      </div>
+
+      <!-- Available models panel (collapsible) -->
+      <div id="modelsPanel" class="models-panel hidden">
+        <div class="models-panel-header">
+          <span class="models-panel-title" data-i18n="stats.modelsList"></span>
+          <button class="btn btn-ghost btn-sm" id="modelsPanelClose" type="button" aria-label="Close">&times;</button>
+        </div>
+        <div id="modelsPanelList" class="models-panel-list"></div>
       </div>
 
       <!-- Usage tab -->

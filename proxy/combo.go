@@ -204,14 +204,18 @@ func (h *Handler) handleComboRequest(
 
 		buf := newBufferingResponseWriter()
 
+		// Mark this as a combo sub-request so the dispatched handler skips
+		// combo resolution (prevents infinite recursion when a combo model
+		// shares the combo name).
+		ctx := context.WithValue(newReq.Context(), comboBypassKey, true)
+		newReq = newReq.WithContext(ctx)
+
 		switch format {
 		case "claude":
 			h.handleClaudeMessages(buf, newReq)
 		case "openai":
 			h.handleOpenAIChat(buf, newReq)
 		case "responses":
-			ctx := context.WithValue(newReq.Context(), comboBypassKey, true)
-			newReq = newReq.WithContext(ctx)
 			h.handleOpenAIResponses(buf, newReq)
 		}
 

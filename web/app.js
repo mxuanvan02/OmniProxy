@@ -661,6 +661,25 @@ let customSelectRefreshQueued = false;
     clearActivePassword();
     location.reload();
   }
+  function toggleModelsPanel() {
+    const panel = $('modelsPanel');
+    if (!panel) return;
+    if (panel.classList.contains('hidden')) {
+      const list = $('modelsPanelList');
+      const models = window.__availableModels || [];
+      if (list) {
+        list.innerHTML = models.length === 0
+          ? '<span class="empty-state">No models</span>'
+          : models.map(function (id) {
+              const cls = id === 'auto' ? ' models-panel-chip models-panel-chip--auto' : ' models-panel-chip';
+              return '<span class="' + cls.trim() + '">' + escapeHtml(id) + '</span>';
+            }).join('');
+      }
+      panel.classList.remove('hidden');
+    } else {
+      panel.classList.add('hidden');
+    }
+  }
   function showMain() {
     $('loginPage').classList.add('hidden');
     $('mainPage').classList.remove('hidden');
@@ -686,6 +705,29 @@ let customSelectRefreshQueued = false;
     $('statFailed').textContent = d.failedRequests || 0;
     $('statTokens').textContent = formatNum(d.totalTokens || 0);
     $('statCredits').textContent = (d.totalCredits || 0).toFixed(1);
+    // Kiro-side quota aggregation (sum across all accounts)
+    const kiroCur = d.kiroUsageCurrent || 0;
+    const kiroLim = d.kiroUsageLimit || 0;
+    const kiroEl = $('statKiroQuota');
+    if (kiroEl) {
+      kiroEl.textContent = kiroCur.toFixed(0) + ' / ' + kiroLim.toFixed(0);
+    }
+    const kiroPctEl = $('statKiroQuotaPct');
+    if (kiroPctEl && kiroLim > 0) {
+      kiroPctEl.textContent = (kiroCur / kiroLim * 100).toFixed(1) + '%';
+    }
+    // Available models
+    const modelIds = d.modelIds || [];
+    const modelCount = d.availableModels != null ? d.availableModels : modelIds.length;
+    const statModelsEl = $('statModels');
+    if (statModelsEl) statModelsEl.textContent = modelCount;
+    const previewEl = $('statModelsPreview');
+    if (previewEl) {
+      const preview = modelIds.slice(0, 3).join(', ');
+      previewEl.textContent = preview + (modelIds.length > 3 ? ' +' + (modelIds.length - 3) : '');
+    }
+    // Store for panel toggle
+    window.__availableModels = modelIds;
   }
   // Version and update
   function renderVersionBadge() {
@@ -907,6 +949,14 @@ let customSelectRefreshQueued = false;
     $('exportBtn').addEventListener('click', showExportModal);
     $('refreshAllModelsBtn').addEventListener('click', refreshAllModels);
     $('addAccountBtn').addEventListener('click', () => showModal('add'));
+
+    // Available models card → toggle panel
+    const statModelsCard = $('statModelsCard');
+    if (statModelsCard) statModelsCard.addEventListener('click', toggleModelsPanel);
+    const modelsPanelClose = $('modelsPanelClose');
+    if (modelsPanelClose) modelsPanelClose.addEventListener('click', () => {
+      const p = $('modelsPanel'); if (p) p.classList.add('hidden');
+    });
 
     $('selectAllCheckbox').addEventListener('change', e => toggleSelectAll(e.target.checked));
     qsa('[data-batch]').forEach(b => b.addEventListener('click', () => {

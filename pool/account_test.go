@@ -163,6 +163,51 @@ func TestIsSuspensionErrorNilError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// IsTransientError
+// ---------------------------------------------------------------------------
+
+func TestIsTransientErrorDetectsKnownMessages(t *testing.T) {
+	positives := []string{
+		"HTTP 503 from bddevlab: {\"error\":{\"message\":\"system cpu overloaded (current: 100.0%, threshold: 90%)\"}}",
+		"HTTP 502 Bad Gateway",
+		"HTTP 504 Gateway Timeout",
+		"context deadline exceeded",
+		"connection reset by peer",
+		"rate_limit exceeded",
+		"too many requests",
+		"service unavailable",
+		"EOF",
+		"no such host",
+	}
+	for _, msg := range positives {
+		if !IsTransientError(errors.New(msg)) {
+			t.Errorf("IsTransientError(%q) = false, want true", msg)
+		}
+	}
+}
+
+func TestIsTransientErrorIgnoresNonTransient(t *testing.T) {
+	negatives := []string{
+		"HTTP 401 Unauthorized",
+		"HTTP 403 Forbidden",
+		"invalid_grant",
+		"some unrelated error",
+		"model_not_found",
+	}
+	for _, msg := range negatives {
+		if IsTransientError(errors.New(msg)) {
+			t.Errorf("IsTransientError(%q) = true, want false", msg)
+		}
+	}
+}
+
+func TestIsTransientErrorNilError(t *testing.T) {
+	if IsTransientError(nil) {
+		t.Fatal("IsTransientError(nil) = true, want false")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // GetNextForModelExcluding
 // ---------------------------------------------------------------------------
 

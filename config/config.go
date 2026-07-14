@@ -62,6 +62,12 @@ type Account struct {
 	// Per-account outbound proxy (falls back to global ProxyURL if empty)
 	ProxyURL string `json:"proxyURL,omitempty"`
 
+	// BaseURL is the upstream endpoint for external OpenAI-compatible providers
+	// (AuthMethod == "external_openai"). The proxy forwards chat-completion
+	// requests to {BaseURL}/v1/chat/completions using AccessToken as the
+	// Bearer key. Empty for native Kiro/AWS accounts.
+	BaseURL string `json:"baseUrl,omitempty"`
+
 	// Priority weight for load balancing (higher = more requests)
 	Weight int `json:"weight,omitempty"` // 0 or 1 = normal, 2+ = higher priority
 

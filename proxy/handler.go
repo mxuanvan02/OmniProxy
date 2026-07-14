@@ -767,6 +767,11 @@ func (h *Handler) refreshAllAccounts() {
 		if account.AccessToken == "" {
 			continue
 		}
+		// External OpenAI-compatible providers have no Kiro token to refresh
+		// and no CodeWhisperer usage API to poll — skip them entirely.
+		if isExternalAccount(account) {
+			continue
+		}
 
 		// check if token needs refresh
 		if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-tokenRefreshSkewSeconds {
@@ -944,18 +949,40 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // handleStats returns stats (requires API Key auth)
 func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
+	var kiroUsageCurrent, kiroUsageLimit, trialUsageCurrent, trialUsageLimit float64
+	for _, a := range h.pool.GetAllAccounts() {
+		kiroUsageCurrent += a.UsageCurrent
+		kiroUsageLimit += a.UsageLimit
+		trialUsageCurrent += a.TrialUsageCurrent
+		trialUsageLimit += a.TrialUsageLimit
+	}
+	h.modelsCacheMu.RLock()
+	cachedModels := h.cachedModels
+	h.modelsCacheMu.RUnlock()
+	modelIds := make([]string, 0, len(cachedModels))
+	for _, m := range cachedModels {
+		if m.ModelId != "" && m.ModelId != "auto" {
+			modelIds = append(modelIds, m.ModelId)
+		}
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"status":          "ok",
-		"version":         config.Version,
-		"accounts":        h.pool.Count(),
-		"available":       h.pool.AvailableCount(),
-		"totalRequests":   atomic.LoadInt64(&h.totalRequests),
-		"successRequests": atomic.LoadInt64(&h.successRequests),
-		"failedRequests":  atomic.LoadInt64(&h.failedRequests),
-		"totalTokens":     atomic.LoadInt64(&h.totalTokens),
-		"totalCredits":    h.getCredits(),
-		"uptime":          time.Now().Unix() - h.startTime,
+		"status":            "ok",
+		"version":           config.Version,
+		"accounts":          h.pool.Count(),
+		"available":         h.pool.AvailableCount(),
+		"totalRequests":     atomic.LoadInt64(&h.totalRequests),
+		"successRequests":   atomic.LoadInt64(&h.successRequests),
+		"failedRequests":    atomic.LoadInt64(&h.failedRequests),
+		"totalTokens":       atomic.LoadInt64(&h.totalTokens),
+		"totalCredits":      h.getCredits(),
+		"kiroUsageCurrent":  kiroUsageCurrent,
+		"kiroUsageLimit":    kiroUsageLimit,
+		"trialUsageCurrent": trialUsageCurrent,
+		"trialUsageLimit":   trialUsageLimit,
+		"availableModels":   len(modelIds),
+		"modelIds":          modelIds,
+		"uptime":            time.Now().Unix() - h.startTime,
 	})
 }
 
@@ -1140,6 +1167,26 @@ func (h *Handler) refreshModelsCache() {
 // fetchAndCacheAccountModels fetches and writes model cache for a single account.
 // Also updates the pool routing cache and global aggregated model list.
 func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
+	// External OpenAI-compatible providers expose /v1/models, not Kiro's
+	// ListAvailableModels. Use the dedicated fetcher so their model list is
+	// real (and routing picks them correctly for requested model IDs).
+	if isExternalAccount(account) {
+		models, err := fetchExternalProviderModels(account)
+		if err != nil {
+			return err
+		}
+		modelIDs := make([]string, 0, len(models))
+		for _, m := range models {
+			modelIDs = append(modelIDs, m.ModelId)
+		}
+		h.pool.SetModelList(account.ID, modelIDs)
+		h.modelsCacheMu.Lock()
+		h.cachedModels = mergeUniqueModels(h.cachedModels, models)
+		h.modelsCacheTime = time.Now().Unix()
+		h.modelsCacheMu.Unlock()
+		logger.Infof("[ModelsCache] Refreshed %d models for external provider %s", len(models), account.Email)
+		return nil
+	}
 	if err := h.ensureValidToken(account); err != nil {
 		return fmt.Errorf("token refresh failed: %w", err)
 	}
@@ -1374,14 +1421,19 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	// Check if model is a combo name FIRST, before thinking/alias resolution.
 	// This prevents alias mappings (e.g. "gpt-4o" → "claude-sonnet-4.5") from
 	// defeating combo detection when a combo shares an alias name.
-	if comboName, comboModels, ok := resolveComboModels(req.Model); ok {
-		body, _ := json.Marshal(req)
-		h.handleComboRequest(w, r, comboName, comboModels, body, "claude")
-		return
+	// Skip combo resolution for sub-requests dispatched by the combo handler itself
+	// (prevents infinite recursion when a combo model shares the combo name).
+	if r.Context().Value(comboBypassKey) == nil {
+		if comboName, comboModels, ok := resolveComboModels(req.Model); ok {
+			body, _ := json.Marshal(req)
+			h.handleComboRequest(w, r, comboName, comboModels, body, "claude")
+			return
+		}
 	}
 
 	// parse model and thinking mode
 	thinkingCfg := config.GetThinkingConfig()
+	originalModel := stripThinkingSuffix(req.Model, thinkingCfg.Suffix)
 	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
 	req.Model = actualModel
 	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
@@ -1391,6 +1443,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 
 	// transform request
 	kiroPayload := ClaudeToKiro(&req, thinking)
+	kiroPayload.OriginalModel = originalModel
 
 	// Stream or non-stream
 	apiKeyID := apiKeyIDFromContext(r.Context())
@@ -1524,6 +1577,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		var thinkingSource thinkingStreamSource
 		var thinkingStarted bool
 		var eventThinkingOpen bool
+		var visibleTextStarted bool
 
 		sendText := func(text string, thinkingState int) {
 			if thinkingState == 0 {
@@ -1536,6 +1590,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					"index": activeBlockIndex,
 					"delta": map[string]string{"type": "text_delta", "text": text},
 				})
+				visibleTextStarted = true
 				return
 			}
 
@@ -1613,6 +1668,9 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			}
 
 			if isThinking {
+				if visibleTextStarted {
+					return
+				}
 				if !allowReasoningSource(&thinkingSource) {
 					return
 				}
@@ -1778,9 +1836,15 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointClaude, model)
-		err := CallKiroAPI(account, payload, callback)
+		err := dispatchChat(account, payload, callback)
 		if err != nil {
 			lastErr = err
+			// Transient upstream errors (5xx, overload, timeout) are retried
+			// in-place with backoff before rotating to a different account.
+			if h.tryTransientRetry(account, payload, callback, err) {
+				h.pool.RecordSuccess(account.ID, model)
+				goto skipAccountHandling
+			}
 			//  try refresh+retry before rotating accounts
 			if h.tryRefreshAndRetry(account, payload, callback, err) {
 				h.pool.RecordSuccess(account.ID, model)
@@ -1862,7 +1926,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	h.recordError(apiKeyID, "", model, endpointClaude, lastErr.Error())
-	h.sendClaudeError(w, 500, "api_error", lastErr.Error())
+	h.sendClaudeError(w, upstreamErrorStatus(lastErr), "api_error", lastErr.Error())
 }
 
 func (h *Handler) sendSSE(w http.ResponseWriter, flusher http.Flusher, event string, data interface{}) {
@@ -2069,9 +2133,15 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointClaude, model)
-		err := CallKiroAPI(account, payload, callback)
+		err := dispatchChat(account, payload, callback)
 		if err != nil {
 			lastErr = err
+			// Transient upstream errors (5xx, overload, timeout) are retried
+			// in-place with backoff before rotating to a different account.
+			if h.tryTransientRetry(account, payload, callback, err) {
+				h.pool.RecordSuccess(account.ID, model)
+				goto skipNonStreamHandling
+			}
 			//  try refresh+retry before rotating accounts
 			if h.tryRefreshAndRetry(account, payload, callback, err) {
 				goto skipNonStreamHandling
@@ -2153,7 +2223,37 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 	}
 
 	h.recordError(apiKeyID, "", model, endpointClaude, lastErr.Error())
-	h.sendClaudeError(w, 500, "api_error", lastErr.Error())
+	h.sendClaudeError(w, upstreamErrorStatus(lastErr), "api_error", lastErr.Error())
+}
+
+// upstreamErrorStatus maps a final upstream error to the HTTP status the proxy
+// should surface to downstream clients. Transient/overload-class failures
+// (upstream 502/503/504, "overloaded", "temporarily", rate-limit/quota) return
+// 503 so downstream failover layers (e.g. OpenClaw) classify them as
+// retryable/overloaded and advance to the next fallback model instead of
+// treating the wrapped 500 as a hard timeout. Non-transient errors stay 500.
+func upstreamErrorStatus(err error) int {
+	if err == nil {
+		return 500
+	}
+	lower := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(lower, "http 502"),
+		strings.Contains(lower, "http 503"),
+		strings.Contains(lower, "http 504"),
+		strings.Contains(lower, "overloaded"),
+		strings.Contains(lower, "system cpu"),
+		strings.Contains(lower, "temporarily"),
+		strings.Contains(lower, "rate limit"),
+		strings.Contains(lower, "quota"),
+		strings.Contains(lower, "too many requests"),
+		strings.Contains(lower, "service unavailable"),
+		strings.Contains(lower, "bad gateway"),
+		strings.Contains(lower, "gateway timeout"):
+		return 503
+	default:
+		return 500
+	}
 }
 
 func (h *Handler) sendClaudeError(w http.ResponseWriter, status int, errType, message string) {
@@ -2192,19 +2292,25 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Check if model is a combo name FIRST, before thinking/alias resolution.
-	if comboName, comboModels, ok := resolveComboModels(req.Model); ok {
-		body, _ := json.Marshal(req)
-		h.handleComboRequest(w, r, comboName, comboModels, body, "openai")
-		return
+	// Skip combo resolution for sub-requests dispatched by the combo handler itself
+	// (prevents infinite recursion when a combo model shares the combo name).
+	if r.Context().Value(comboBypassKey) == nil {
+		if comboName, comboModels, ok := resolveComboModels(req.Model); ok {
+			body, _ := json.Marshal(req)
+			h.handleComboRequest(w, r, comboName, comboModels, body, "openai")
+			return
+		}
 	}
 
 	// parse model and thinking mode
 	thinkingCfg := config.GetThinkingConfig()
+	originalModel := stripThinkingSuffix(req.Model, thinkingCfg.Suffix)
 	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
 	req.Model = actualModel
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
 
 	kiroPayload := OpenAIToKiro(&req, thinking)
+	kiroPayload.OriginalModel = originalModel
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	if req.Stream {
@@ -2532,9 +2638,15 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointOpenAI, model)
-		err := CallKiroAPI(account, payload, callback)
+		err := dispatchChat(account, payload, callback)
 		if err != nil {
 			lastErr = err
+			// Transient upstream errors (5xx, overload, timeout) are retried
+			// in-place with backoff before rotating to a different account.
+			if h.tryTransientRetry(account, payload, callback, err) {
+				h.pool.RecordSuccess(account.ID, model)
+				goto skipOpenAIStreamHandling
+			}
 			//  try refresh+retry before rotating accounts
 			if h.tryRefreshAndRetry(account, payload, callback, err) {
 				h.pool.RecordSuccess(account.ID, model)
@@ -2630,7 +2742,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	h.recordError(apiKeyID, "", model, endpointOpenAI, lastErr.Error())
-	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
+	h.sendOpenAIError(w, upstreamErrorStatus(lastErr), "server_error", lastErr.Error())
 }
 
 // handleOpenAINonStream handles OpenAI non-streaming response
@@ -2675,9 +2787,15 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointOpenAI, model)
-		err := CallKiroAPI(account, payload, callback)
+		err := dispatchChat(account, payload, callback)
 		if err != nil {
 			lastErr = err
+			// Transient upstream errors (5xx, overload, timeout) are retried
+			// in-place with backoff before rotating to a different account.
+			if h.tryTransientRetry(account, payload, callback, err) {
+				h.pool.RecordSuccess(account.ID, model)
+				goto skipOpenAINonStreamHandling
+			}
 			// try refresh+retry before rotating accounts
 			if h.tryRefreshAndRetry(account, payload, callback, err) {
 				goto skipOpenAINonStreamHandling
@@ -2727,7 +2845,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 	}
 
 	h.recordError(apiKeyID, "", model, endpointOpenAI, lastErr.Error())
-	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
+	h.sendOpenAIError(w, upstreamErrorStatus(lastErr), "server_error", lastErr.Error())
 }
 
 func (h *Handler) sendOpenAIError(w http.ResponseWriter, status int, errType, message string) {
@@ -2746,6 +2864,11 @@ func (h *Handler) sendOpenAIError(w http.ResponseWriter, status int, errType, me
 // Call this from the retry loops BEFORE marking the account as failed.
 func (h *Handler) tryRefreshAndRetry(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback, err error) bool {
 	if err == nil {
+		return false
+	}
+	// External OpenAI-compatible providers have no refresh token; a 401 means
+	// the configured API key is invalid. Don't attempt Kiro-style refresh.
+	if isExternalAccount(account) {
 		return false
 	}
 	if !pool.IsAuthFailure(err) {
@@ -2767,13 +2890,66 @@ func (h *Handler) tryRefreshAndRetry(account *config.Account, payload *KiroPaylo
 		account.ProfileArn = profileArn
 		config.UpdateAccountProfileArn(account.ID, profileArn)
 	}
-	retryErr := CallKiroAPI(account, payload, callback)
+	retryErr := dispatchChat(account, payload, callback)
 	if retryErr != nil {
 		logger.Warnf("[AuthRetry] Retry after refresh failed for %s: %v", account.Email, retryErr)
 		return false
 	}
 	logger.Infof("[AuthRetry] Token refresh + retry succeeded for %s", account.Email)
 	return true
+}
+
+// transientRetryMaxAttempts is the maximum number of same-account retries
+// attempted for transient upstream errors (5xx, overload, timeout) before
+// rotating to a different account. Each attempt sleeps transientRetryBaseDelay
+// multiplied by the attempt index (linear backoff).
+const transientRetryMaxAttempts = 3
+
+// transientRetryBaseDelay is the base delay for transient-error backoff.
+// Attempt N sleeps (N * baseDelay) before retrying — so 500ms, 1s, 1.5s.
+const transientRetryBaseDelay = 500 * time.Millisecond
+
+// tryTransientRetry retries the same account after a short backoff when the
+// upstream returns a transient error (5xx, overload, timeout, network blip).
+// Returns true if a retry succeeded, false if all retries failed or the error
+// is not transient. The account stays enabled (no rotation) on transient errs.
+//
+// This is called BEFORE tryRefreshAndRetry in the retry loops so transient
+// upstream issues are retried in-place without churning through accounts.
+func (h *Handler) tryTransientRetry(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback, err error) bool {
+	if err == nil || !pool.IsTransientError(err) {
+		return false
+	}
+	for attempt := 1; attempt <= transientRetryMaxAttempts; attempt++ {
+		delay := time.Duration(attempt) * transientRetryBaseDelay
+		logger.Warnf("[TransientRetry] %s: attempt %d/%d after %v (err: %s)",
+			account.Email, attempt, transientRetryMaxAttempts, delay, truncateForLog(err.Error()))
+		time.Sleep(delay)
+		retryErr := dispatchChat(account, payload, callback)
+		if retryErr == nil {
+			logger.Infof("[TransientRetry] %s: succeeded on attempt %d", account.Email, attempt)
+			return true
+		}
+		if !pool.IsTransientError(retryErr) {
+			// Error changed to non-transient (e.g. 401) — let the caller's
+			// normal failure path handle it (refresh / rotate / disable).
+			logger.Warnf("[TransientRetry] %s: error became non-transient on attempt %d: %s",
+				account.Email, attempt, truncateForLog(retryErr.Error()))
+			return false
+		}
+	}
+	logger.Warnf("[TransientRetry] %s: exhausted %d attempts, rotating to next account",
+		account.Email, transientRetryMaxAttempts)
+	return false
+}
+
+// truncateForLog clips an error message to a reasonable length for log lines.
+func truncateForLog(s string) string {
+	const max = 200
+	if len(s) > max {
+		return s[:max] + "..."
+	}
+	return s
 }
 
 // ensureValidToken ensures token is valid
@@ -2945,6 +3121,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiImportKiroToken(w, r)
 	case path == "/auth/kiro-api-key" && r.Method == "POST":
 		h.apiImportKiroApiKey(w, r)
+	case path == "/auth/external-provider" && r.Method == "POST":
+		h.apiImportExternalProvider(w, r)
 	case path == "/auth/kiro-cli-register" && r.Method == "POST":
 		h.apiRegisterKiroCli(w, r)
 	case path == "/auth/sso-cache" && r.Method == "POST":
@@ -4652,6 +4830,13 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	if v, ok := updates["proxyURL"].(string); ok {
 		existing.ProxyURL = v
 	}
+	// External OpenAI-compatible provider editable fields.
+	if v, ok := updates["baseUrl"].(string); ok {
+		existing.BaseURL = strings.TrimSpace(v)
+	}
+	if v, ok := updates["accessToken"].(string); ok {
+		existing.AccessToken = strings.TrimSpace(v)
+	}
 
 	if err := config.UpdateAccount(id, *existing); err != nil {
 		w.WriteHeader(500)
@@ -6011,9 +6196,13 @@ func (h *Handler) apiImportKiroApiKey(w http.ResponseWriter, r *http.Request) {
 	email := extractEmailFromJWT(body.ApiKey)
 
 	now := time.Now()
-	// ksk_ keys operate in eu-central-1 region
-	if strings.HasPrefix(body.ApiKey, "ksk_") && region == "us-east-1" {
-		region = "eu-central-1"
+	// ksk_ keys: respect user-selected region. Both us-east-1 and eu-central-1
+	// host management./runtime. endpoints; the key's home region is determined
+	// at import time, not hardcoded. Default to us-east-1 (Kiro API key primary).
+	if strings.HasPrefix(body.ApiKey, "ksk_") {
+		if region == "" {
+			region = "us-east-1"
+		}
 	}
 	account := config.Account{
 		ID:           uuid.New().String(),
@@ -6043,6 +6232,112 @@ func (h *Handler) apiImportKiroApiKey(w http.ResponseWriter, r *http.Request) {
 			"provider": "kiro",
 		},
 	})
+}
+
+// apiImportExternalProvider adds an external OpenAI-compatible provider as a
+// pool account. The provider is optionally validated with a tiny ping request
+// before being persisted; a validation failure is surfaced but not fatal — the
+// account is still saved (disabled) so the operator can fix the URL/key later.
+func (h *Handler) apiImportExternalProvider(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		BaseURL  string `json:"baseUrl"`
+		ApiKey   string `json:"apiKey"`
+		Name     string `json:"name"`
+		Nickname string `json:"nickname"`
+		Weight   int    `json:"weight"`
+		ProxyURL string `json:"proxyURL"`
+		Test     bool   `json:"test"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	baseURL := strings.TrimSpace(body.BaseURL)
+	apiKey := strings.TrimSpace(body.ApiKey)
+	if baseURL == "" || apiKey == "" {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "baseUrl and apiKey are required"})
+		return
+	}
+	// Normalize: ensure a scheme so the upstream HTTP client doesn't reject.
+	if !strings.Contains(baseURL, "://") {
+		baseURL = "https://" + baseURL
+	}
+
+	name := strings.TrimSpace(body.Name)
+	if name == "" {
+		name = strings.TrimSpace(body.Nickname)
+	}
+	if name == "" {
+		// Derive a friendly label from the base URL host.
+		if u, err := url.Parse(baseURL); err == nil && u.Host != "" {
+			name = u.Host
+		} else {
+			name = "external-provider"
+		}
+	}
+
+	account := config.Account{
+		ID:          uuid.New().String(),
+		Email:       name,
+		Nickname:    name,
+		AuthMethod:  externalAuthMethod,
+		Provider:    "External OpenAI",
+		AccessToken: apiKey,
+		BaseURL:     baseURL,
+		Region:      "external",
+		Enabled:     true,
+		MachineId:   config.GenerateMachineId(),
+		Weight:      body.Weight,
+		ProxyURL:    strings.TrimSpace(body.ProxyURL),
+		// No ExpiresAt — external API keys don't auto-refresh; ensureValidToken
+		// treats ExpiresAt==0 as "always valid".
+	}
+
+	// Optional live validation: a tiny ping lets the UI confirm the pair works
+	// before the operator relies on it. Failure is reported but the account is
+	// still saved so the operator can edit it later.
+	var testLatencyMs int64
+	var testErr string
+	if body.Test {
+		lat, err := testExternalProvider(&account)
+		if err != nil {
+			testErr = err.Error()
+		} else {
+			testLatencyMs = lat.Milliseconds()
+		}
+	}
+
+	if err := config.AddAccount(account); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("Failed to save provider: %v", err)})
+		return
+	}
+	h.pool.Reload()
+	// Fetch & cache the provider's model list so routing picks it correctly.
+	go func(acc config.Account) {
+		if err := h.fetchAndCacheAccountModels(&acc); err != nil {
+			logger.Warnf("[ExternalProvider] Auto model-list fetch failed for %s: %v", acc.Email, err)
+		}
+	}(account)
+
+	resp := map[string]interface{}{
+		"success": true,
+		"account": map[string]string{
+			"id":       account.ID,
+			"email":    account.Email,
+			"provider": "external_openai",
+			"baseUrl":  account.BaseURL,
+		},
+	}
+	if body.Test {
+		resp["test"] = map[string]interface{}{
+			"latencyMs": testLatencyMs,
+			"error":     testErr,
+		}
+	}
+	json.NewEncoder(w).Encode(resp)
 }
 
 func resolveApiKeyProfile(apiKey, region string) (string, error) {
@@ -6092,10 +6387,14 @@ func resolveApiKeyProfile(apiKey, region string) (string, error) {
 
 func resolveKskProfile(apiKey, region string) (string, error) {
 	// ksk_ keys use Smithy protocol: POST to root path with X-Amz-Target header.
-	// GetProfile succeeds at eu-central-1 (fallback region for ksk_ keys).
-	regions := []string{"eu-central-1", "us-east-1"}
-	if region != "" && region != "eu-central-1" && region != "us-east-1" {
+	// GetProfile succeeds in the key's home region. Try user-selected region
+	// first, then fall back to the two known-working Kiro management regions.
+	regions := []string{"us-east-1", "eu-central-1"}
+	if region != "" && region != "us-east-1" && region != "eu-central-1" {
 		regions = append([]string{region}, regions...)
+	} else if region == "eu-central-1" {
+		// user explicitly chose eu-central-1 — try it first
+		regions = []string{"eu-central-1", "us-east-1"}
 	}
 	for _, r := range regions {
 		endpoint := fmt.Sprintf("https://management.%s.kiro.dev/", r)
@@ -6511,15 +6810,41 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
+	// Aggregate Kiro-side quota (usageCurrent/usageLimit) across all pool accounts.
+	// These reflect the real per-account credit quotas reported by Kiro, distinct
+	// from totalCredits which only counts credits consumed through SuperKiro.
+	var kiroUsageCurrent, kiroUsageLimit, trialUsageCurrent, trialUsageLimit float64
+	for _, a := range h.pool.GetAllAccounts() {
+		kiroUsageCurrent += a.UsageCurrent
+		kiroUsageLimit += a.UsageLimit
+		trialUsageCurrent += a.TrialUsageCurrent
+		trialUsageLimit += a.TrialUsageLimit
+	}
+	// Available models from cache (same source as /v1/models, minus aliases/combos)
+	h.modelsCacheMu.RLock()
+	cachedModels := h.cachedModels
+	h.modelsCacheMu.RUnlock()
+	modelIds := make([]string, 0, len(cachedModels))
+	for _, m := range cachedModels {
+		if m.ModelId != "" && m.ModelId != "auto" {
+			modelIds = append(modelIds, m.ModelId)
+		}
+	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"accounts":        h.pool.Count(),
-		"available":       h.pool.AvailableCount(),
-		"totalRequests":   atomic.LoadInt64(&h.totalRequests),
-		"successRequests": atomic.LoadInt64(&h.successRequests),
-		"failedRequests":  atomic.LoadInt64(&h.failedRequests),
-		"totalTokens":     atomic.LoadInt64(&h.totalTokens),
-		"totalCredits":    h.getCredits(),
-		"uptime":          time.Now().Unix() - h.startTime,
+		"accounts":          h.pool.Count(),
+		"available":         h.pool.AvailableCount(),
+		"totalRequests":     atomic.LoadInt64(&h.totalRequests),
+		"successRequests":   atomic.LoadInt64(&h.successRequests),
+		"failedRequests":    atomic.LoadInt64(&h.failedRequests),
+		"totalTokens":       atomic.LoadInt64(&h.totalTokens),
+		"totalCredits":      h.getCredits(),
+		"kiroUsageCurrent":  kiroUsageCurrent,
+		"kiroUsageLimit":    kiroUsageLimit,
+		"trialUsageCurrent": trialUsageCurrent,
+		"trialUsageLimit":   trialUsageLimit,
+		"availableModels":   len(modelIds),
+		"modelIds":          modelIds,
+		"uptime":            time.Now().Unix() - h.startTime,
 	})
 }
 
@@ -6693,7 +7018,7 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		OnContextUsage: func(pct float64) {},
 	}
 
-	err := CallKiroAPI(account, kiroPayload, callback)
+	err := dispatchChat(account, kiroPayload, callback)
 	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -6721,6 +7046,21 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 	if account == nil {
 		w.WriteHeader(404)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+
+	// External OpenAI-compatible providers have no Kiro usage/subscription to
+	// refresh. Refresh their model list instead so the admin UI shows real data.
+	if isExternalAccount(account) {
+		if err := h.fetchAndCacheAccountModels(account); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": "External provider refresh failed: " + err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": "External provider models refreshed",
+		})
 		return
 	}
 

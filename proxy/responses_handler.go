@@ -113,11 +113,13 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	}
 
 	thinkingCfg := config.GetThinkingConfig()
+	originalModel := stripThinkingSuffix(req.Model, thinkingCfg.Suffix)
 	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
 	openaiReq.Model = actualModel
 
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(openaiReq)
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
+	kiroPayload.OriginalModel = originalModel
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	respID := generateResponseID()
@@ -176,14 +178,21 @@ func (h *Handler) handleResponsesNonStream(
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointOpenAIResponses, model)
-		err := CallKiroAPI(account, payload, callback)
+		err := dispatchChat(account, payload, callback)
 		if err != nil {
 			lastErr = err
+			// Transient upstream errors (5xx, overload, timeout) are retried
+			// in-place with backoff before rotating to a different account.
+			if h.tryTransientRetry(account, payload, callback, err) {
+				h.pool.RecordSuccess(account.ID, model)
+				goto responsesNonStreamSuccess
+			}
 			h.usageTracker.RemoveActive(account.ID)
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err, model)
 			continue
 		}
+	responsesNonStreamSuccess:
 
 		finalContent, _ := extractThinkingFromContent(content)
 		if !thinking {
@@ -228,7 +237,7 @@ func (h *Handler) handleResponsesNonStream(
 		return
 	}
 	h.recordError(apiKeyID, "", model, endpointOpenAIResponses, lastErr.Error())
-	h.sendOpenAIError(w, 500, "server_error", lastErr.Error())
+	h.sendOpenAIError(w, upstreamErrorStatus(lastErr), "server_error", lastErr.Error())
 }
 
 func buildResponsesObject(
@@ -487,9 +496,19 @@ func (h *Handler) handleResponsesStream(
 			},
 		}
 
-		h.usageTracker.TrackActive(account.ID, endpointOpenAIResponses, model)
-		err := CallKiroAPI(account, payload, callback)
+	h.usageTracker.TrackActive(account.ID, endpointOpenAIResponses, model)
+		err := dispatchChat(account, payload, callback)
+		var finalContent string
+		var reasoning string
 		if err != nil {
+			// Transient upstream errors (5xx, overload, timeout) are retried
+			// in-place with backoff before rotating. Only safe if we haven't
+			// started streaming the response yet (otherwise we'd duplicate
+			// the response.created event).
+			if !responseStarted && h.tryTransientRetry(account, payload, callback, err) {
+				h.pool.RecordSuccess(account.ID, model)
+				goto responsesStreamSuccess
+			}
 			if !responseStarted {
 				lastErr = err
 				h.usageTracker.RemoveActive(account.ID)
@@ -512,11 +531,12 @@ func (h *Handler) handleResponsesStream(
 			return
 		}
 
-		finalContent, _ := extractThinkingFromContent(fullText.String())
-		reasoning := reasoningText.String()
+		finalContent, _ = extractThinkingFromContent(fullText.String())
+		reasoning = reasoningText.String()
 		if !thinking {
 			reasoning = ""
 		}
+	responsesStreamSuccess:
 
 		if messageStarted {
 			send("response.content_part.done", map[string]interface{}{

@@ -169,6 +169,14 @@ type KiroPayload struct {
 	// in tool_use responses so the client can match them to its tool registry.
 	// Not serialized to the Kiro API request body.
 	ToolNameMap map[string]string `json:"-"`
+
+	// OriginalModel preserves the client-supplied model name (after thinking
+	// suffix stripping, but BEFORE Kiro alias mapping). External OpenAI-compatible
+	// providers receive this so they route to the model the client actually
+	// requested (e.g. "gpt-4o") rather than the Kiro-aliased equivalent
+	// (e.g. "claude-sonnet-4.5"). Empty for native Kiro routing, which uses
+	// ConversationState.CurrentMessage.UserInputMessage.ModelID.
+	OriginalModel string `json:"-"`
 }
 
 type KiroUserInputMessage struct {
@@ -335,15 +343,20 @@ func getSortedEndpoints(preferred, region string) []kiroEndpoint {
 // when the account uses API-key auth. The Kiro IDE gateway (kiro.dev) rejects
 // tokentype: API_KEY tokens, so the raw CodeWhisperer endpoint must come first.
 // Mirrors 9router's getOrderedBaseUrls().
-func sortEndpointsForAuth(endpoints []kiroEndpoint, authMethod string, accessToken string) []kiroEndpoint {
+func sortEndpointsForAuth(endpoints []kiroEndpoint, authMethod string, accessToken string, accountRegion string) []kiroEndpoint {
 	if authMethod != "api_key" {
 		return endpoints
 	}
 	// ksk_ API keys use Smithy protocol via runtime.kiro.dev with root path.
-	// X-Amz-Target header selects the operation. Region is eu-central-1 (fallback).
+	// X-Amz-Target header selects the operation. Region is taken from the
+	// account (set at import time); default us-east-1 — Kiro API key primary.
 	if strings.HasPrefix(accessToken, "ksk_") {
+		region := strings.TrimSpace(accountRegion)
+		if region == "" {
+			region = "us-east-1"
+		}
 		return []kiroEndpoint{{
-			URL:       "https://runtime.eu-central-1.kiro.dev/",
+			URL:       fmt.Sprintf("https://runtime.%s.kiro.dev/", region),
 			Origin:    "KIRO_CLI",
 			AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
 			Name:      "Kiro Runtime (ksk)",
@@ -426,7 +439,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		authMethod = account.AuthMethod
 		accessToken = account.AccessToken
 	}
-	endpoints = sortEndpointsForAuth(endpoints, authMethod, accessToken)
+	endpoints = sortEndpointsForAuth(endpoints, authMethod, accessToken, account.Region)
 
 	var lastErr error
 	for _, ep := range endpoints {

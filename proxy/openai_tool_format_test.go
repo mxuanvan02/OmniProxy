@@ -47,7 +47,7 @@ func TestConvertOpenAIToolsEmitsNonEmptyNames(t *testing.T) {
 		mustTool(t, `{"type":"function","name":"exec_command","parameters":{"type":"object"}}`),
 		mustTool(t, `{"type":"function","function":{"name":"update_plan","parameters":{"type":"object"}}}`),
 	}
-	wrappers := convertOpenAITools(tools)
+	wrappers, _ := convertOpenAITools(tools)
 	if len(wrappers) != 2 {
 		t.Fatalf("expected 2 tool wrappers, got %d", len(wrappers))
 	}

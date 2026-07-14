@@ -2,14 +2,42 @@ package proxy
 
 import (
 	"encoding/json"
-	"superkiro/config"
-	accountpool "superkiro/pool"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"superkiro/config"
+	accountpool "superkiro/pool"
 	"testing"
 	"time"
 )
+
+type claudeSSEEvent struct {
+	name string
+	data map[string]interface{}
+}
+
+func parseClaudeSSEEvents(t *testing.T, body string) []claudeSSEEvent {
+	t.Helper()
+	var events []claudeSSEEvent
+	for _, block := range strings.Split(strings.TrimSpace(body), "\n\n") {
+		var event claudeSSEEvent
+		for _, line := range strings.Split(block, "\n") {
+			switch {
+			case strings.HasPrefix(line, "event: "):
+				event.name = strings.TrimPrefix(line, "event: ")
+			case strings.HasPrefix(line, "data: "):
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &event.data); err != nil {
+					t.Fatalf("decode SSE data: %v", err)
+				}
+			}
+		}
+		if event.name != "" {
+			events = append(events, event)
+		}
+	}
+	return events
+}
 
 func TestThinkingSourceReasoningFirst(t *testing.T) {
 	var source thinkingStreamSource
@@ -22,6 +50,259 @@ func TestThinkingSourceReasoningFirst(t *testing.T) {
 	}
 	if allowTagSource(&source) {
 		t.Fatalf("expected tag source to be rejected after reasoning source selected")
+	}
+}
+
+func TestClaudeStreamSuppressesLateThinkingAfterVisibleText(t *testing.T) {
+	initConfigForTests(t)
+	firstText := strings.Repeat("x", 60) + " trên mạn"
+	secondText := "g. Không commit hoặc push thay đổi."
+	sse := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":` + string(mustJSON(t, firstText)) + `}}]}`,
+		``,
+		`data: {"choices":[{"delta":{"reasoning_content":"late reasoning"}}]}`,
+		``,
+		`data: {"choices":[{"delta":{"content":` + string(mustJSON(t, secondText)) + `}}]}`,
+		``,
+		`data: {"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.6-sol"}]}`))
+			return
+		}
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected upstream path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer server.Close()
+
+	account := config.Account{
+		ID:          "late-thinking-external",
+		Email:       "late-thinking-external",
+		AuthMethod:  externalAuthMethod,
+		AccessToken: "test-key",
+		BaseURL:     server.URL,
+		Enabled:     true,
+	}
+	if err := config.AddAccount(account); err != nil {
+		t.Fatalf("add external account: %v", err)
+	}
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL)}
+	payload := &KiroPayload{OriginalModel: "gpt-5.6-sol"}
+	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
+		Content: "test late reasoning",
+		ModelID: "gpt-5.6-sol",
+		Origin:  "AI_EDITOR",
+	}
+
+	recorder := httptest.NewRecorder()
+	h.handleClaudeStream(recorder, payload, "gpt-5.6-sol", true, claudeThinkingResponseOptions{Format: "thinking"}, 1, nil, "")
+
+	events := parseClaudeSSEEvents(t, recorder.Body.String())
+	blockTypes := make(map[int]string)
+	var visibleText strings.Builder
+	textBlockStarts := 0
+	seenTextDelta := false
+	lateThinkingBlock := false
+	messageDeltaCount := 0
+	messageStopCount := 0
+	for _, event := range events {
+		switch event.name {
+		case "content_block_start":
+			index := int(event.data["index"].(float64))
+			block := event.data["content_block"].(map[string]interface{})
+			blockType := block["type"].(string)
+			blockTypes[index] = blockType
+			if blockType == "text" {
+				textBlockStarts++
+			}
+			if blockType == "thinking" && seenTextDelta {
+				lateThinkingBlock = true
+			}
+		case "content_block_delta":
+			index := int(event.data["index"].(float64))
+			delta := event.data["delta"].(map[string]interface{})
+			if blockTypes[index] == "text" && delta["type"] == "text_delta" {
+				visibleText.WriteString(delta["text"].(string))
+				seenTextDelta = true
+			}
+		case "message_delta":
+			messageDeltaCount++
+			delta := event.data["delta"].(map[string]interface{})
+			if delta["stop_reason"] != "end_turn" {
+				t.Errorf("stop_reason = %v, want end_turn", delta["stop_reason"])
+			}
+		case "message_stop":
+			messageStopCount++
+		}
+	}
+
+	if got, want := visibleText.String(), firstText+secondText; got != want {
+		t.Errorf("visible text = %q, want %q", got, want)
+	}
+	if lateThinkingBlock {
+		t.Errorf("late reasoning created a thinking block after visible text started")
+	}
+	if textBlockStarts != 1 {
+		t.Errorf("text block starts = %d, want 1 continuous block", textBlockStarts)
+	}
+	if messageDeltaCount != 1 || messageStopCount != 1 {
+		t.Errorf("terminal events: message_delta=%d message_stop=%d, want 1 each", messageDeltaCount, messageStopCount)
+	}
+}
+
+func mustJSON(t *testing.T, value interface{}) []byte {
+	t.Helper()
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	return data
+}
+
+func runClaudeExternalSSE(t *testing.T, accountID, sse string, thinking bool) []claudeSSEEvent {
+	t.Helper()
+	initConfigForTests(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.6-sol"}]}`))
+			return
+		}
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("unexpected upstream path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(sse))
+	}))
+	defer server.Close()
+
+	if err := config.AddAccount(config.Account{
+		ID:          accountID,
+		Email:       accountID,
+		AuthMethod:  externalAuthMethod,
+		AccessToken: "test-key",
+		BaseURL:     server.URL,
+		Enabled:     true,
+	}); err != nil {
+		t.Fatalf("add external account: %v", err)
+	}
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL)}
+	payload := &KiroPayload{OriginalModel: "gpt-5.6-sol"}
+	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
+		Content: "test stream ordering",
+		ModelID: "gpt-5.6-sol",
+		Origin:  "AI_EDITOR",
+	}
+
+	recorder := httptest.NewRecorder()
+	h.handleClaudeStream(recorder, payload, "gpt-5.6-sol", thinking, claudeThinkingResponseOptions{Format: "thinking"}, 1, nil, "")
+	return parseClaudeSSEEvents(t, recorder.Body.String())
+}
+
+func TestClaudeStreamPreservesThinkingBeforeVisibleText(t *testing.T) {
+	sse := strings.Join([]string{
+		`data: {"choices":[{"delta":{"reasoning_content":"thinking first"}}]}`,
+		``,
+		`data: {"choices":[{"delta":{"content":"Visible answer."}}]}`,
+		``,
+		`data: {"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	events := runClaudeExternalSSE(t, "thinking-first-external", sse, true)
+	var blockTypes []string
+	var thinkingText, visibleText strings.Builder
+	blockTypeByIndex := make(map[int]string)
+	for _, event := range events {
+		switch event.name {
+		case "content_block_start":
+			index := int(event.data["index"].(float64))
+			block := event.data["content_block"].(map[string]interface{})
+			blockType := block["type"].(string)
+			blockTypeByIndex[index] = blockType
+			blockTypes = append(blockTypes, blockType)
+		case "content_block_delta":
+			index := int(event.data["index"].(float64))
+			delta := event.data["delta"].(map[string]interface{})
+			switch blockTypeByIndex[index] {
+			case "thinking":
+				thinkingText.WriteString(delta["thinking"].(string))
+			case "text":
+				visibleText.WriteString(delta["text"].(string))
+			}
+		}
+	}
+
+	if got, want := strings.Join(blockTypes, ","), "thinking,text"; got != want {
+		t.Errorf("content block order = %q, want %q", got, want)
+	}
+	if got := thinkingText.String(); got != "thinking first" {
+		t.Errorf("thinking text = %q, want %q", got, "thinking first")
+	}
+	if got := visibleText.String(); got != "Visible answer." {
+		t.Errorf("visible text = %q, want %q", got, "Visible answer.")
+	}
+}
+
+func TestClaudeStreamFlushesTextBeforeToolUse(t *testing.T) {
+	sse := strings.Join([]string{
+		`data: {"choices":[{"delta":{"content":"Use this tool."}}]}`,
+		``,
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"search","arguments":"{\"q\":\"kiro\"}"}}]}}]}`,
+		``,
+		`data: {"choices":[{"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":12,"completion_tokens":7,"total_tokens":19}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	events := runClaudeExternalSSE(t, "text-tool-external", sse, true)
+	var blockTypes []string
+	var visibleText strings.Builder
+	blockTypeByIndex := make(map[int]string)
+	stopReason := ""
+	for _, event := range events {
+		switch event.name {
+		case "content_block_start":
+			index := int(event.data["index"].(float64))
+			block := event.data["content_block"].(map[string]interface{})
+			blockType := block["type"].(string)
+			blockTypeByIndex[index] = blockType
+			blockTypes = append(blockTypes, blockType)
+		case "content_block_delta":
+			index := int(event.data["index"].(float64))
+			delta := event.data["delta"].(map[string]interface{})
+			if blockTypeByIndex[index] == "text" && delta["type"] == "text_delta" {
+				visibleText.WriteString(delta["text"].(string))
+			}
+		case "message_delta":
+			delta := event.data["delta"].(map[string]interface{})
+			stopReason = delta["stop_reason"].(string)
+		}
+	}
+
+	if got, want := strings.Join(blockTypes, ","), "text,tool_use"; got != want {
+		t.Errorf("content block order = %q, want %q", got, want)
+	}
+	if got := visibleText.String(); got != "Use this tool." {
+		t.Errorf("visible text = %q, want %q", got, "Use this tool.")
+	}
+	if stopReason != "tool_use" {
+		t.Errorf("stop_reason = %q, want tool_use", stopReason)
 	}
 }
 
@@ -539,5 +820,33 @@ func TestFindDedupTargetIdcMatchesByProfileArnOnly(t *testing.T) {
 	// idc dedups on ARN alone — a differing/empty email still matches.
 	if got := findDedupTarget(arn, "", "idc"); got == nil || got.ID != "idc1" {
 		t.Fatalf("expected idc dedup to match by ARN regardless of email, got %#v", got)
+	}
+}
+
+func TestUpstreamErrorStatus(t *testing.T) {
+	cases := []struct {
+		err  string
+		want int
+	}{
+		{"HTTP 503 from claude-opus-4.8: {\"error\":{\"message\":\"system cpu overloaded (current: 100.0%, threshold: 90%)\"}}", 503},
+		{"HTTP 502 from upstream: bad gateway", 503},
+		{"HTTP 504 from upstream: gateway timeout", 503},
+		{"The AI service is temporarily overloaded. Please try again in a moment.", 503},
+		{"service unavailable", 503},
+		{"rate limit exceeded", 503},
+		{"quota exhausted", 503},
+		{"too many requests", 503},
+		{"dial tcp: lookup q.profile: no such host", 500},
+		{"invalid model id", 500},
+		{"unexpected end of JSON", 500},
+	}
+	for _, c := range cases {
+		got := upstreamErrorStatus(errors.New(c.err))
+		if got != c.want {
+			t.Fatalf("upstreamErrorStatus(%q) = %d, want %d", c.err, got, c.want)
+		}
+	}
+	if upstreamErrorStatus(nil) != 500 {
+		t.Fatalf("upstreamErrorStatus(nil) = %d, want 500", upstreamErrorStatus(nil))
 	}
 }

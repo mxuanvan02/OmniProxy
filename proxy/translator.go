@@ -117,6 +117,19 @@ func MapModel(model string) string {
 	return mapped
 }
 
+// stripThinkingSuffix removes the configured thinking suffix (e.g. "-thinking")
+// from the model name WITHOUT applying Kiro alias mapping. Used to preserve the
+// client's original model name for external OpenAI-compatible providers, which
+// route by their own model registry (e.g. "gpt-4o") rather than Kiro aliases.
+func stripThinkingSuffix(model, thinkingSuffix string) string {
+	lower := strings.ToLower(model)
+	suffixLower := strings.ToLower(thinkingSuffix)
+	if suffixLower != "" && strings.HasSuffix(lower, suffixLower) {
+		return model[:len(model)-len(thinkingSuffix)]
+	}
+	return model
+}
+
 // ==================== Claude API types ====================
 
 type ClaudeRequest struct {
@@ -1249,7 +1262,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	}
 
 	// convert tools
-	kiroTools := convertOpenAITools(req.Tools)
+	kiroTools, toolNameMap := convertOpenAITools(req.Tools)
 
 	// build payload
 	payload := &KiroPayload{}
@@ -1286,6 +1299,8 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	}
 
 	truncatePayloadToLimit(payload, systemPrompt != "")
+
+	payload.ToolNameMap = toolNameMap
 
 	return payload
 }
@@ -1997,12 +2012,13 @@ func parseBase64Image(data, format string) *KiroImage {
 	}
 }
 
-func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
+func convertOpenAITools(tools []OpenAITool) ([]KiroToolWrapper, map[string]string) {
 	if len(tools) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	result := make([]KiroToolWrapper, 0, len(tools))
+	nameMap := make(map[string]string)
 	for _, tool := range tools {
 		if tool.Type != "function" {
 			continue
@@ -2016,13 +2032,18 @@ func convertOpenAITools(tools []OpenAITool) []KiroToolWrapper {
 			// Kiro rejects tools with empty names; skip unusable specs.
 			continue
 		}
+		// Record the sanitized→original mapping so external OpenAI-compatible
+		// providers can be sent the original (un-sanitized) tool name.
+		if name != tool.Function.Name {
+			nameMap[name] = tool.Function.Name
+		}
 		wrapper := KiroToolWrapper{}
 		wrapper.ToolSpecification.Name = name
 		wrapper.ToolSpecification.Description = normalizeToolDesc(desc, name)
 		wrapper.ToolSpecification.InputSchema = InputSchema{JSON: ensureObjectSchema(tool.Function.Parameters)}
 		result = append(result, wrapper)
 	}
-	return result
+	return result, nameMap
 }
 
 // ==================== Kiro -> OpenAI conversion ====================

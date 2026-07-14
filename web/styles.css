@@ -1181,7 +1181,7 @@ img.brand-icon {
 /* Stats grid */
 .stats-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 0.625rem;
   margin-bottom: 1.125rem;
 }
@@ -1275,6 +1275,56 @@ img.brand-icon {
 .stat-icon--danger {
   color: var(--destructive);
   opacity: 0.6;
+}
+.stat-card--models {
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.stat-card--models:hover {
+  border-color: var(--primary);
+}
+
+/* Available models panel */
+.models-panel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 0.875rem 1rem;
+  margin-bottom: 1.125rem;
+}
+.models-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.625rem;
+}
+.models-panel-title {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--foreground);
+}
+.models-panel-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.375rem;
+}
+.models-panel-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.625rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  font-family: var(--font-mono, monospace);
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--foreground);
+  white-space: nowrap;
+}
+.models-panel-chip--auto {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: var(--primary);
 }
 @media (max-width: 640px) {
   .stat-card {

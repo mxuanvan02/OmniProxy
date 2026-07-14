@@ -362,7 +362,7 @@ func TestConvertOpenAIToolsSanitizesSchemaAndDescription(t *testing.T) {
 		"additionalProperties": false,
 	}
 
-	tools := convertOpenAITools([]OpenAITool{tool})
+	tools, _ := convertOpenAITools([]OpenAITool{tool})
 	if len(tools) != 1 {
 		t.Fatalf("expected one converted tool, got %d", len(tools))
 	}

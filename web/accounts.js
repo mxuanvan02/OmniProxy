@@ -108,6 +108,7 @@ let testModalRunning = false;
     if (normalized === 'idc') return t('auth.enterprise');
     if (normalized === 'external_idp') return t('auth.enterpriseSso');
     if (normalized === 'social') return t('auth.social');
+    if (normalized === 'external_openai') return t('auth.externalOpenai');
     if (normalized === 'builderid') return 'BuilderID';
     if (normalized === 'github') return t('local.providerGithub');
     if (normalized === 'google') return t('local.providerGoogle');
@@ -420,6 +421,7 @@ let testModalRunning = false;
       detailItem(t('detail.userId'), a.userId || '-') +
       detailItem(t('detail.authMethod'), formatAuthMethod(a.provider || a.authMethod)) +
       detailItem(t('detail.region'), a.region || 'us-east-1') +
+      (a.baseUrl ? detailItem(t('external.baseUrlLabel'), a.baseUrl) : '') +
       '</div></div>' +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.nickname')) + '</h4><div class="machine-id-row">' +
@@ -809,6 +811,7 @@ let testModalRunning = false;
     else if (type === 'local') modalLocal(title, body);
     else if (type === 'credentials') modalCredentials(title, body);
     else if (type === 'apikey') modalApiKey(title, body);
+    else if (type === 'external') modalExternal(title, body);
     else if (type === 'cookie') modalCookie(title, body);
     if (!modal.classList.contains('active')) openDialog('addModal');
     enhanceCustomSelects(body);
@@ -837,6 +840,7 @@ let testModalRunning = false;
       methodCard('local', t('modal.localTitle'), t('modal.localDesc')) +
       methodCard('credentials', t('modal.credentialsTitle'), t('modal.credentialsDesc')) +
       methodCard('apikey', t('modal.apikeyTitle'), t('modal.apikeyDesc')) +
+      methodCard('external', t('modal.externalTitle'), t('modal.externalDesc')) +
       methodCard('cookie', t('modal.cookieTitle'), t('modal.cookieDesc')) +
       '</div>' +
       '<div class="modal-footer"><button class="btn btn-secondary" data-close-add="1" type="button">' + escapeHtml(t('common.cancel')) + '</button></div>';
@@ -1244,12 +1248,58 @@ let testModalRunning = false;
       '<div class="form-group"><label>' + escapeHtml(t('apikey.keyLabel')) + '</label>' +
       '<textarea id="apikeyValue" class="font-mono" placeholder="' + escapeAttr(t('apikey.keyPlaceholder')) + '"></textarea></div>' +
       '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + '</label>' +
-      '<input type="text" id="apikeyRegion" value="us-east-1" /></div>' +
+      '<select id="apikeyRegion"><option value="us-east-1">us-east-1</option><option value="eu-central-1">eu-central-1</option></select></div>' +
       '<div class="modal-footer">' +
       '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
       '<button class="btn btn-primary" id="importApiKeyBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
       '</div>';
     $('importApiKeyBtn').addEventListener('click', importApiKey);
+  }
+  function modalExternal(title, body) {
+    title.textContent = t('modal.externalTitle');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('modal.externalDesc')) + '</p>' +
+      '<div class="form-group"><label>' + escapeHtml(t('external.baseUrlLabel')) + '</label>' +
+      '<input type="text" id="externalBaseUrl" class="font-mono" placeholder="' + escapeAttr(t('external.baseUrlPlaceholder')) + '" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('external.apiKeyLabel')) + '</label>' +
+      '<input type="password" id="externalApiKey" class="font-mono" placeholder="' + escapeAttr(t('external.apiKeyPlaceholder')) + '" autocomplete="off" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('external.nameLabel')) + '</label>' +
+      '<input type="text" id="externalName" placeholder="' + escapeAttr(t('external.namePlaceholder')) + '" /></div>' +
+      '<div class="form-group"><label class="flex items-center gap-2"><input type="checkbox" id="externalTest" checked /> ' + escapeHtml(t('external.testNow')) + '</label>' +
+      '<span class="help-block text-xs">' + escapeHtml(t('external.testHelp')) + '</span></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="importExternalBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
+      '</div>';
+    $('importExternalBtn').addEventListener('click', importExternal);
+  }
+  async function importExternal() {
+    const baseUrl = $('externalBaseUrl').value.trim();
+    const apiKey = $('externalApiKey').value.trim();
+    if (!baseUrl) return toastWarning(t('external.baseUrlLabel') + ' is required');
+    if (!apiKey) return toastWarning(t('external.apiKeyLabel') + ' is required');
+    const name = $('externalName').value.trim();
+    const test = $('externalTest').checked;
+    const btn = $('importExternalBtn');
+    btn.disabled = true; btn.textContent = t('common.loading') || '...';
+    try {
+      const res = await api('/auth/external-provider', { method: 'POST', body: JSON.stringify({ baseUrl, apiKey, name, test }) });
+      const d = await res.json();
+      if (d.success) {
+        closeModal(); loadAccounts(); loadStats();
+        let msg = t('external.importSuccess') + ': ' + (d.account?.email || d.account?.id);
+        if (test && d.test) {
+          if (d.test.error) msg += ' ⚠️ ' + t('external.testFailed') + ': ' + d.test.error;
+          else if (d.test.latencyMs) msg += ' (' + d.test.latencyMs + 'ms)';
+        }
+        toastPrimary(msg, { duration: 6000 });
+        autoRefreshNewAccount(d.account?.id);
+      } else toastError(t('common.failed') + ': ' + (d.error || ''));
+    } catch (e) {
+      toastError(t('common.failed') + ': ' + (e.message || e));
+    } finally {
+      btn.disabled = false; btn.textContent = t('common.add');
+    }
   }
   function updateLocalFields() {
     const p = $('localProvider').value;

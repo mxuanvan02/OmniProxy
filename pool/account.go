@@ -205,11 +205,34 @@ func (p *AccountPool) GetModelList(accountID string) []string {
 // accountHasModel checks if the account supports the given model.
 // If the account has no model list (cold start), assume all models supported.
 func (p *AccountPool) accountHasModel(accountID, model string) bool {
+	// External OpenAI-compatible providers route model selection to the
+	// upstream provider, which owns its own model registry. Always allow so
+	// external accounts are never skipped because of a stale/empty cache.
+	if p.isExternalAccountID(accountID) {
+		return true
+	}
 	list, ok := p.modelLists[accountID]
 	if !ok || len(list) == 0 {
 		return true // cold start: list not ready, optimistically allow
 	}
 	return list[strings.ToLower(strings.TrimSpace(model))]
+}
+
+// isExternalAccountID reports whether the account with the given ID is an
+// external OpenAI-compatible provider. It looks up the auth method from the
+// pool's own routing slice (already populated from config during Reload) so it
+// never depends on the global config singleton being initialized — tests
+// construct pools directly without calling config.Init.
+func (p *AccountPool) isExternalAccountID(accountID string) bool {
+	if accountID == "" {
+		return false
+	}
+	for i := range p.accounts {
+		if p.accounts[i].ID == accountID {
+			return p.accounts[i].AuthMethod == "external_openai"
+		}
+	}
+	return false
 }
 
 // GetNextForModel returns the next available account supporting the given model.
@@ -449,6 +472,56 @@ func IsSuspensionError(err error) bool {
 	return strings.Contains(lower, "temporarily_suspended") ||
 		strings.Contains(lower, "temporarily suspended") ||
 		strings.Contains(lower, "no available kiro profile")
+}
+
+// IsTransientError reports whether the error is a transient upstream condition
+// (provider overload, 5xx, timeout) that may succeed on a same-account retry
+// after a short backoff. Unlike auth failures, the account stays enabled.
+//
+// Recognised markers:
+//   - HTTP 502/503/504 (bad gateway / service unavailable / gateway timeout)
+//   - "system cpu overloaded" / "system_*_overloaded" (bddevlab-style)
+//   - "overloaded" / "rate_limit" / "rate limit" / "too many requests"
+//   - "timeout" / "deadline exceeded" / "context deadline exceeded"
+//   - "connection reset" / "EOF" / "broken pipe"
+//   - "temporarily unavailable" / "service unavailable"
+func IsTransientError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+
+	// HTTP 5xx status tokens (502/503/504) — bounded by non-digit boundaries
+	// so we don't match arbitrary digits in error bodies.
+	if hasStatusToken(msg, "502") || hasStatusToken(msg, "503") || hasStatusToken(msg, "504") {
+		return true
+	}
+
+	// Upstream overload / rate-limit markers (covers bddevlab's
+	// "system cpu overloaded", "system_cpu_overloaded", OpenAI's "overloaded",
+	// and generic "rate limit" / "too many requests" patterns).
+	if strings.Contains(lower, "overloaded") ||
+		strings.Contains(lower, "rate_limit") ||
+		strings.Contains(lower, "rate limit") ||
+		strings.Contains(lower, "too many requests") ||
+		strings.Contains(lower, "temporarily unavailable") ||
+		strings.Contains(lower, "service unavailable") {
+		return true
+	}
+
+	// Network / timeout markers.
+	if strings.Contains(lower, "timeout") ||
+		strings.Contains(lower, "deadline exceeded") ||
+		strings.Contains(lower, "context deadline exceeded") ||
+		strings.Contains(lower, "connection reset") ||
+		strings.Contains(lower, "broken pipe") ||
+		strings.Contains(lower, "eof") ||
+		strings.Contains(lower, "no such host") {
+		return true
+	}
+
+	return false
 }
 
 // DisableAccount marks an account as disabled (auth revoked / unrecoverable),

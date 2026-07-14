@@ -26,9 +26,15 @@ const (
 // effective runtime region (see regionForAccount). The legacy codewhisperer.<region>
 // host only exists in us-east-1; other regions are served by q.<region>.
 func kiroRestBase(account *config.Account) string {
-	// ksk_ API keys use management.kiro.dev Smithy endpoints
+	// ksk_ API keys use management.kiro.dev Smithy endpoints. The key's home
+	// region is stored on the account at import time (us-east-1 or eu-central-1).
+	// Default to us-east-1 — the primary region for Kiro API keys.
 	if account != nil && strings.HasPrefix(account.AccessToken, "ksk_") {
-		return "https://management.eu-central-1.kiro.dev"
+		region := strings.TrimSpace(account.Region)
+		if region == "" {
+			region = "us-east-1"
+		}
+		return fmt.Sprintf("https://management.%s.kiro.dev", region)
 	}
 	region := regionForAccount(account)
 	if region == "us-east-1" {
@@ -122,7 +128,7 @@ func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 
 	// ksk_ keys use Smithy protocol: POST / with X-Amz-Target
 	if account != nil && strings.HasPrefix(account.AccessToken, "ksk_") {
-		req, err = http.NewRequest("POST", "https://management.eu-central-1.kiro.dev/?origin=KIRO_CLI",
+		req, err = http.NewRequest("POST", kiroRestBase(account)+"/?origin=KIRO_CLI",
 			strings.NewReader(`{"origin":"KIRO_CLI"}`))
 		if err != nil {
 			return nil, err
