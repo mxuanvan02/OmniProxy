@@ -42,6 +42,15 @@ func TestParseTomlLine(t *testing.T) {
 			expectedActive: false,
 		},
 		{
+			name:           "commented key-value with inline comment",
+			line:           "# model = \"gpt-4o\" # old model",
+			section:        "",
+			expectedType:   LineComment,
+			expectedKey:    "model",
+			expectedValue:  "gpt-4o",
+			expectedActive: false,
+		},
+		{
 			name:           "section header",
 			line:           "[model_providers.superkiro]",
 			section:        "",
@@ -67,12 +76,39 @@ func TestParseTomlLine(t *testing.T) {
 			expectedValue:  "http://localhost:8080/v1",
 			expectedActive: true,
 		},
+		{
+			name:           "hash inside basic string",
+			line:           `model = "vendor/model#tag" # pinned`,
+			section:        "",
+			expectedType:   LineKeyValue,
+			expectedKey:    "model",
+			expectedValue:  "vendor/model#tag",
+			expectedActive: true,
+		},
+		{
+			name:           "hash inside escaped basic string",
+			line:           `model = "vendor/\"model#tag\"" # pinned`,
+			section:        "",
+			expectedType:   LineKeyValue,
+			expectedKey:    "model",
+			expectedValue:  `vendor/\"model#tag\"`,
+			expectedActive: true,
+		},
+		{
+			name:           "hash inside literal string",
+			line:           `model = 'vendor/model#tag' # pinned`,
+			section:        "",
+			expectedType:   LineKeyValue,
+			expectedKey:    "model",
+			expectedValue:  "vendor/model#tag",
+			expectedActive: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := parseTomlLine(tt.line, tt.section)
-			
+
 			if result.Type != tt.expectedType {
 				t.Errorf("Type mismatch: got %v, want %v", result.Type, tt.expectedType)
 			}
@@ -131,7 +167,7 @@ func TestMergeCodexConfigEmpty(t *testing.T) {
 	}
 
 	content := string(data)
-	
+
 	// Check required sections exist
 	if !strings.Contains(content, `model = "claude-sonnet-4.5"`) {
 		t.Error("Missing model setting")

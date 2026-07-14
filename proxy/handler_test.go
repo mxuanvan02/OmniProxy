@@ -53,7 +53,7 @@ func TestThinkingSourceReasoningFirst(t *testing.T) {
 	}
 }
 
-func TestClaudeStreamSuppressesLateThinkingAfterVisibleText(t *testing.T) {
+func TestClaudeStreamConvertsLateThinkingToVisibleText(t *testing.T) {
 	initConfigForTests(t)
 	firstText := strings.Repeat("x", 60) + " trên mạn"
 	secondText := "g. Không commit hoặc push thay đổi."
@@ -146,8 +146,12 @@ func TestClaudeStreamSuppressesLateThinkingAfterVisibleText(t *testing.T) {
 		}
 	}
 
-	if got, want := visibleText.String(), firstText+secondText; got != want {
-		t.Errorf("visible text = %q, want %q", got, want)
+	gotVisible := visibleText.String()
+	if count := strings.Count(gotVisible, "late reasoning"); count != 1 {
+		t.Errorf("late reasoning count = %d, want 1 in %q", count, gotVisible)
+	}
+	if got, want := strings.Replace(gotVisible, "late reasoning", "", 1), firstText+secondText; got != want {
+		t.Errorf("visible answer after removing late reasoning = %q, want %q", got, want)
 	}
 	if lateThinkingBlock {
 		t.Errorf("late reasoning created a thinking block after visible text started")
@@ -226,6 +230,7 @@ func TestClaudeStreamPreservesThinkingBeforeVisibleText(t *testing.T) {
 	events := runClaudeExternalSSE(t, "thinking-first-external", sse, true)
 	var blockTypes []string
 	var thinkingText, visibleText strings.Builder
+	var signatureSeen bool
 	blockTypeByIndex := make(map[int]string)
 	for _, event := range events {
 		switch event.name {
@@ -238,11 +243,18 @@ func TestClaudeStreamPreservesThinkingBeforeVisibleText(t *testing.T) {
 		case "content_block_delta":
 			index := int(event.data["index"].(float64))
 			delta := event.data["delta"].(map[string]interface{})
-			switch blockTypeByIndex[index] {
-			case "thinking":
-				thinkingText.WriteString(delta["thinking"].(string))
-			case "text":
-				visibleText.WriteString(delta["text"].(string))
+			switch delta["type"] {
+			case "thinking_delta":
+				if blockTypeByIndex[index] == "thinking" {
+					thinkingText.WriteString(delta["thinking"].(string))
+				}
+			case "signature_delta":
+				signature, _ := delta["signature"].(string)
+				signatureSeen = signature != ""
+			case "text_delta":
+				if blockTypeByIndex[index] == "text" {
+					visibleText.WriteString(delta["text"].(string))
+				}
 			}
 		}
 	}
@@ -252,6 +264,9 @@ func TestClaudeStreamPreservesThinkingBeforeVisibleText(t *testing.T) {
 	}
 	if got := thinkingText.String(); got != "thinking first" {
 		t.Errorf("thinking text = %q, want %q", got, "thinking first")
+	}
+	if !signatureSeen {
+		t.Errorf("expected signature delta before closing thinking block")
 	}
 	if got := visibleText.String(); got != "Visible answer." {
 		t.Errorf("visible text = %q, want %q", got, "Visible answer.")

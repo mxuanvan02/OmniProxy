@@ -4,9 +4,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"superkiro/config"
 	"regexp"
 	"strings"
+	"superkiro/config"
 	"time"
 
 	"github.com/google/uuid"
@@ -230,7 +230,10 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 
 		if msg.Role == "user" {
 			content, images, toolResults := extractClaudeUserContent(msg.Content)
-			content = normalizeUserContent(content, len(images) > 0)
+			// Tool-result images are represented separately from their textual result.
+			// Delay the image-only placeholder until after deciding whether the result
+			// can remain structured; otherwise it can hide orphaned tool-result text.
+			content = normalizeUserContent(content, len(images) > 0 && len(toolResults) == 0)
 
 			if isLast {
 				currentContent = content
@@ -302,16 +305,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	}
 
 	// build final content
-	finalContent := ""
-	if currentContent != "" {
-		finalContent = currentContent
-	} else if len(currentImages) > 0 {
-		finalContent = normalizeUserContent("", true)
-	} else if len(currentToolResults) > 0 {
-		finalContent = buildToolResultsContinuation(currentToolResults)
-	} else {
-		finalContent = minimalFallbackUserContent
-	}
+	finalContent := buildCurrentMessageContent(currentContent, currentImages, currentToolResults, keepCurrentToolResults)
 
 	// convert tools
 	kiroTools, toolNameMap := convertClaudeTools(req.Tools)
@@ -952,6 +946,10 @@ func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingB
 		blocks = append(blocks, ClaudeContentBlock{
 			Type:     "thinking",
 			Thinking: thinkingContent,
+			// Non-Claude models can't produce real signatures; emit a stable
+			// placeholder so claude-cli accepts the thinking block instead of
+			// dropping it (and subsequent tool_use blocks).
+			Signature: "EqoBCkgIARABGAIiIL2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d",
 		})
 	}
 
@@ -1250,16 +1248,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	}
 
 	// build final content
-	finalContent := currentContent
-	if finalContent == "" {
-		if len(currentImages) > 0 {
-			finalContent = normalizeUserContent("", true)
-		} else if len(currentToolResults) > 0 {
-			finalContent = buildToolResultsContinuation(currentToolResults)
-		} else {
-			finalContent = minimalFallbackUserContent
-		}
-	}
+	finalContent := buildCurrentMessageContent(currentContent, currentImages, currentToolResults, keepCurrentToolResults)
 
 	// convert tools
 	kiroTools, toolNameMap := convertOpenAITools(req.Tools)
@@ -1761,6 +1750,22 @@ func truncateCurrentMessage(payload *KiroPayload) {
 		}
 		cur.Content = cur.Content[:budget]
 	}
+}
+
+func buildCurrentMessageContent(content string, images []KiroImage, toolResults []KiroToolResult, keepToolResults bool) string {
+	if len(toolResults) > 0 && !keepToolResults {
+		return joinHistoryText(content, buildToolResultsContinuation(toolResults))
+	}
+	if content != "" {
+		return content
+	}
+	if len(images) > 0 {
+		return normalizeUserContent("", true)
+	}
+	if len(toolResults) > 0 {
+		return buildToolResultsContinuation(toolResults)
+	}
+	return minimalFallbackUserContent
 }
 
 func buildToolResultsContinuation(toolResults []KiroToolResult) string {

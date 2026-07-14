@@ -1529,6 +1529,22 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			if activeBlockIndex < 0 {
 				return
 			}
+			// Thinking blocks require a signature_delta before content_block_stop.
+			// Without it, claude-cli rejects the thinking block and drops subsequent
+			// tool_use blocks (root cause of 40% tool_use mismatch with gpt-5.6-sol).
+			// Non-Claude models can't produce real signatures, so we emit a stable
+			// placeholder — claude-cli only needs the field present, it does not
+			// verify the signature client-side.
+			if activeBlockType == "thinking" {
+				h.sendSSE(w, flusher, "content_block_delta", map[string]interface{}{
+					"type":  "content_block_delta",
+					"index": activeBlockIndex,
+					"delta": map[string]string{
+						"type":      "signature_delta",
+						"signature": "EqoBCkgIARABGAIiIL2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d",
+					},
+				})
+			}
 			h.sendSSE(w, flusher, "content_block_stop", map[string]interface{}{
 				"type":  "content_block_stop",
 				"index": activeBlockIndex,
@@ -1669,6 +1685,13 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 
 			if isThinking {
 				if visibleTextStarted {
+					// For non-Claude models (e.g. gpt-5.6-sol), reasoning often
+					// arrives AFTER visible text in the OpenAI stream. Dropping it
+					// loses context. Convert late reasoning to text instead.
+					// Claude-native models enforce thinking-before-text ordering.
+					if !strings.HasPrefix(strings.ToLower(model), "claude-") {
+						sendText(text, 0)
+					}
 					return
 				}
 				if !allowReasoningSource(&thinkingSource) {

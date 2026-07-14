@@ -4,12 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"superkiro/config"
-	accountpool "superkiro/pool"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"superkiro/config"
+	accountpool "superkiro/pool"
 	"testing"
 	"time"
 )
@@ -267,7 +267,7 @@ func setupResponsesTestHandler(t *testing.T) (*Handler, func()) {
 		ID:          "test-account",
 		Enabled:     true,
 		AccessToken: "token-test",
-		ProfileArn:  "arn:aws:codewhisperer:profile/test",
+		ProfileArn:  "arn:aws:codewhisperer:us-east-1:123456789012:profile/test",
 	}); err != nil {
 		t.Fatalf("add account: %v", err)
 	}

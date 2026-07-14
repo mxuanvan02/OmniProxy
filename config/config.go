@@ -279,8 +279,10 @@ var (
 // Init initializes the configuration system with the specified file path.
 // If the file doesn't exist, a default configuration is created.
 func Init(path string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
 	cfgPath = path
-	return Load()
+	return loadLocked()
 }
 
 // init auto-loads version from version.json in the working directory.
@@ -303,7 +305,11 @@ func init() {
 func Load() error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
+	return loadLocked()
+}
 
+// loadLocked loads cfg from cfgPath. Caller must hold cfgLock.
+func loadLocked() error {
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1039,4 +1045,3 @@ func defaultSystemVersion() string {
 		return "linux#6.6.87"
 	}
 }
-

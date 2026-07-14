@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"encoding/binary"
 	"encoding/json"
-	"superkiro/config"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
+	"strings"
+	"superkiro/config"
 	"testing"
 	"time"
 )
@@ -178,29 +181,52 @@ func TestBuildKiroTransportUsesExplicitProxyURL(t *testing.T) {
 }
 
 func TestBuildKiroTransportFallsBackToEnvironmentProxy(t *testing.T) {
-	t.Setenv("HTTPS_PROXY", "http://env-proxy.local:2323")
-	t.Setenv("NO_PROXY", "")
-	t.Setenv("no_proxy", "")
-
-	transport := buildKiroTransport("")
-	req := &http.Request{URL: mustParseURL(t, "https://q.us-east-1.amazonaws.com")}
-
-	got, err := transport.Proxy(req)
-	if err != nil {
-		t.Fatalf("unexpected proxy error: %v", err)
+	const helperEnv = "SUPERKIRO_PROXY_ENV_HELPER"
+	if os.Getenv(helperEnv) == "1" {
+		transport := buildKiroTransport("")
+		req := &http.Request{URL: mustParseURL(t, "https://q.us-east-1.amazonaws.com")}
+		got, err := transport.Proxy(req)
+		if err != nil {
+			t.Fatalf("unexpected proxy error: %v", err)
+		}
+		assertProxyURL(t, got, "http://env-proxy.local:2323")
+		return
 	}
-	assertProxyURL(t, got, "http://env-proxy.local:2323")
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestBuildKiroTransportFallsBackToEnvironmentProxy$")
+	cmd.Env = make([]string, 0, len(os.Environ())+2)
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		switch strings.ToUpper(key) {
+		case "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY":
+			continue
+		}
+		cmd.Env = append(cmd.Env, entry)
+	}
+	cmd.Env = append(cmd.Env,
+		helperEnv+"=1",
+		"HTTPS_PROXY=http://env-proxy.local:2323",
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("proxy environment helper failed: %v\n%s", err, output)
+	}
 }
 
 func TestInitKiroHttpClientKeepsShortRestTimeout(t *testing.T) {
+	oldStreamClient := kiroHttpStore.Load()
+	oldRestClient := kiroRestHttpStore.Load()
+	t.Cleanup(func() {
+		kiroHttpStore.Store(oldStreamClient)
+		kiroRestHttpStore.Store(oldRestClient)
+	})
+	t.Setenv("API_TIMEOUT_MS", "300000")
 	InitKiroHttpClient("")
-	t.Cleanup(func() { InitKiroHttpClient("") })
 
 	streamClient := kiroHttpStore.Load()
 	restClient := kiroRestHttpStore.Load()
 
 	if streamClient.Timeout != 5*time.Minute {
-		t.Fatalf("expected streaming timeout to be 5m, got %s", streamClient.Timeout)
+		t.Fatalf("expected configured streaming timeout to be 5m, got %s", streamClient.Timeout)
 	}
 	if restClient.Timeout != 30*time.Second {
 		t.Fatalf("expected REST timeout to stay 30s, got %s", restClient.Timeout)

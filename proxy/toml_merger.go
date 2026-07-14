@@ -29,14 +29,59 @@ type ConfigLine struct {
 
 // MergeState tracks the configuration state during merging
 type MergeState struct {
-	ActiveModel          string
-	ActiveProvider       string
-	SubagentModel        string
-	HasSuperKiroSection  bool
-	HasSubagentSection   bool
-	SuperKiroSectionEnd  int
-	SubagentSectionEnd   int
-	Lines                []ConfigLine
+	ActiveModel         string
+	ActiveProvider      string
+	SubagentModel       string
+	HasSuperKiroSection bool
+	HasSubagentSection  bool
+	SuperKiroSectionEnd int
+	SubagentSectionEnd  int
+	Lines               []ConfigLine
+}
+
+// parseTomlValue strips an inline comment and matching surrounding quotes from
+// a TOML value. A # inside a basic or literal string is data, not a comment.
+func parseTomlValue(valuePart string) string {
+	valuePart = strings.TrimSpace(valuePart)
+	quote := byte(0)
+	escaped := false
+	for i := 0; i < len(valuePart); i++ {
+		ch := valuePart[i]
+		if quote == '"' {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if ch == '\\' {
+				escaped = true
+				continue
+			}
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		if quote == '\'' {
+			if ch == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch ch {
+		case '"', '\'':
+			quote = ch
+		case '#':
+			valuePart = strings.TrimSpace(valuePart[:i])
+			i = len(valuePart)
+		}
+	}
+	if len(valuePart) >= 2 {
+		first, last := valuePart[0], valuePart[len(valuePart)-1]
+		if (first == '"' || first == '\'') && last == first {
+			valuePart = valuePart[1 : len(valuePart)-1]
+		}
+	}
+	return valuePart
 }
 
 // parseTomlLine parses a single TOML line
@@ -64,7 +109,7 @@ func parseTomlLine(line string, currentSection string) ConfigLine {
 		content = strings.TrimSpace(content)
 		if idx := strings.Index(content, "="); idx > 0 {
 			cl.Key = strings.TrimSpace(content[:idx])
-			cl.Value = strings.TrimSpace(content[idx+1:])
+			cl.Value = parseTomlValue(content[idx+1:])
 		}
 		return cl
 	}
@@ -82,23 +127,8 @@ func parseTomlLine(line string, currentSection string) ConfigLine {
 		cl.Type = LineKeyValue
 		cl.IsActive = true
 		cl.Key = strings.TrimSpace(trimmed[:idx])
-		
-		// Extract value, handling inline comments
-		valueStart := idx + 1
-		valuePart := trimmed[valueStart:]
-		
-		// Find inline comment (# preceded by space)
-		if commentIdx := strings.Index(valuePart, "#"); commentIdx > 0 {
-			before := valuePart[:commentIdx]
-			if strings.HasSuffix(strings.TrimSpace(before), `"`) || 
-			   !strings.Contains(before, `"`) {
-				valuePart = strings.TrimSpace(before)
-			}
-		}
-		
-		cl.Value = strings.TrimSpace(valuePart)
-		// Remove quotes from value for comparison
-		cl.Value = strings.Trim(cl.Value, `"`)
+
+		cl.Value = parseTomlValue(trimmed[idx+1:])
 		return cl
 	}
 
@@ -113,17 +143,17 @@ func scanConfig(lines []string) MergeState {
 	state := MergeState{
 		Lines: make([]ConfigLine, 0, len(lines)),
 	}
-	
+
 	currentSection := ""
 	inSuperKiro := false
 	inSubagent := false
-	
+
 	for i, line := range lines {
 		cl := parseTomlLine(line, currentSection)
-		
+
 		if cl.Type == LineSection {
 			currentSection = cl.Key
-			
+
 			if cl.Key == "model_providers.superkiro" {
 				state.HasSuperKiroSection = true
 				inSuperKiro = true
@@ -156,10 +186,10 @@ func scanConfig(lines []string) MergeState {
 				}
 			}
 		}
-		
+
 		state.Lines = append(state.Lines, cl)
 	}
-	
+
 	// Handle case where section extends to EOF
 	if inSuperKiro {
 		state.SuperKiroSectionEnd = len(lines)
@@ -167,14 +197,14 @@ func scanConfig(lines []string) MergeState {
 	if inSubagent {
 		state.SubagentSectionEnd = len(lines)
 	}
-	
+
 	return state
 }
 
 // MergeCodexConfig merges SuperKiro configuration into existing Codex config.toml
 func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 	configPath := filepath.Join(homeDir, ".codex", "config.toml")
-	
+
 	// Read existing config or create empty
 	var existingLines []string
 	data, err := os.ReadFile(configPath)
@@ -183,27 +213,27 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 	} else {
 		existingLines = []string{}
 	}
-	
+
 	// Scan existing config
 	state := scanConfig(existingLines)
-	
+
 	// Process lines
 	var output []string
 	currentSection := ""
 	skipUntilNextSection := false
-	
+
 	modelInjected := false
 	providerInjected := false
 	superKiroInjected := false
 	subagentInjected := false
-	
+
 	for i, cl := range state.Lines {
 		if cl.Type == LineSection {
 			currentSection = cl.Key
-			
+
 			if cl.Key == "model_providers.superkiro" {
 				skipUntilNextSection = false
-				
+
 				// Inject SuperKiro section
 				output = append(output, "[model_providers.superkiro]")
 				output = append(output, fmt.Sprintf(`name = "SuperKiro"`))
@@ -214,7 +244,7 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 				continue
 			} else if cl.Key == "agents.subagent" {
 				skipUntilNextSection = false
-				
+
 				// Inject subagent section
 				output = append(output, "[agents.subagent]")
 				output = append(output, fmt.Sprintf(`model = "%s"`, subagent))
@@ -264,7 +294,7 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 			// All other lines (comments, blanks, other sections)
 			output = append(output, cl.Raw)
 		}
-		
+
 		// Inject missing top-level settings after first non-comment line
 		if i == 0 && cl.Type != LineComment && cl.Type != LineBlank {
 			if !modelInjected && state.ActiveModel == "" {
@@ -277,7 +307,7 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 			}
 		}
 	}
-	
+
 	// If empty config or missing sections, inject at appropriate places
 	if len(existingLines) == 0 {
 		output = []string{
@@ -306,7 +336,7 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 			header = append(header, "")
 			output = append(header, output...)
 		}
-		
+
 		// Inject missing sections at the end
 		if !superKiroInjected {
 			output = append(output, "")
@@ -315,19 +345,19 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 			output = append(output, fmt.Sprintf(`base_url = "%s"`, baseURL))
 			output = append(output, `wire_api = "responses"`)
 		}
-		
+
 		if !subagentInjected {
 			output = append(output, "")
 			output = append(output, "[agents.subagent]")
 			output = append(output, fmt.Sprintf(`model = "%s"`, subagent))
 		}
 	}
-	
+
 	// Write back
 	content := strings.Join(output, "\n")
 	if !strings.HasSuffix(content, "\n") {
 		content += "\n"
 	}
-	
+
 	return os.WriteFile(configPath, []byte(content), 0644)
 }
