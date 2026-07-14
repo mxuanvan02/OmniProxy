@@ -1103,10 +1103,11 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 		"supports_image":   supportsImage,
 		"input_modalities": modalities,
 		"modalities":       modalitiesMap,
-		"capabilities": map[string]bool{
+		"capabilities": map[string]interface{}{
 			"vision":       supportsImage,
 			"image":        supportsImage,
 			"image_vision": supportsImage,
+			"image_input":  map[string]bool{"supported": supportsImage},
 		},
 		"info": map[string]interface{}{
 			"meta": map[string]interface{}{
