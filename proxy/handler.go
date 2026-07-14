@@ -905,6 +905,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleOpenAIResponses(w, ar)
 	case path == "/v1/models" || path == "/models":
 		h.handleModels(w, r)
+	case strings.HasPrefix(path, "/v1/models/") || strings.HasPrefix(path, "/models/"):
+		modelID := strings.TrimPrefix(path, "/v1/models/")
+		modelID = strings.TrimPrefix(modelID, "/models/")
+		h.handleModelByID(w, r, modelID)
 	case path == "/api/event_logging/batch":
 		// Claude Code telemetry endpoint - return 200 OK directly
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -1040,6 +1044,61 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
+// handleModelByID returns a single model entry by ID. Claude Code CLI and other
+// gateway-aware clients may call /v1/models/{id} to fetch capabilities for a
+// specific model. We search the same model list used by /v1/models.
+func (h *Handler) handleModelByID(w http.ResponseWriter, r *http.Request, modelID string) {
+	if modelID == "" {
+		h.sendClaudeError(w, 404, "not_found_error", "Model ID is required")
+		return
+	}
+
+	// Build the same model list as /v1/models and find the matching entry.
+	h.modelsCacheMu.RLock()
+	cached := h.cachedModels
+	h.modelsCacheMu.RUnlock()
+	if len(cached) == 0 {
+		h.refreshModelsCache()
+		h.modelsCacheMu.RLock()
+		cached = h.cachedModels
+		h.modelsCacheMu.RUnlock()
+	}
+
+	thinkingSuffix := config.GetThinkingConfig().Suffix
+	models := buildAnthropicModelsResponse(cached, thinkingSuffix)
+	if len(models) == 0 {
+		models = fallbackAnthropicModels(thinkingSuffix)
+	}
+
+	models = append(models,
+		buildModelInfo("auto", "kiro-proxy", true),
+		buildModelInfo("gpt-4o", "kiro-proxy", true),
+		buildModelInfo("gpt-4", "kiro-proxy", true),
+	)
+	for _, combo := range config.ListCombos() {
+		models = append(models, buildModelInfo(combo.Name, "combo", true))
+	}
+	for _, id := range config.GetExtraModels() {
+		supportsImage := true
+		if strings.HasPrefix(strings.ToLower(id), "claude-") {
+			models = append(models, buildModelInfo(id, "anthropic", supportsImage))
+			models = append(models, buildModelInfo(id+thinkingSuffix, "anthropic", supportsImage))
+		} else {
+			models = append(models, buildModelInfo(id, "kiro-proxy", supportsImage))
+		}
+	}
+
+	for _, m := range models {
+		if m["id"] == modelID {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			json.NewEncoder(w).Encode(m)
+			return
+		}
+	}
+
+	h.sendClaudeError(w, 404, "not_found_error", "Model not found: "+modelID)
+}
+
 func buildAnthropicModelsResponse(cached []ModelInfo, thinkingSuffix string) []map[string]interface{} {
 	if len(cached) == 0 {
 		return nil
@@ -1108,6 +1167,9 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 			"image":        supportsImage,
 			"image_vision": supportsImage,
 			"image_input":  map[string]bool{"supported": supportsImage},
+			"streaming":    map[string]bool{"supported": true},
+			"tool_use":     map[string]bool{"supported": true},
+			"reasoning":    map[string]interface{}{"supported": true, "type": "adaptive"},
 		},
 		"info": map[string]interface{}{
 			"meta": map[string]interface{}{

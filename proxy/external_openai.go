@@ -275,6 +275,12 @@ func kiroPayloadToOpenAIRequest(payload *KiroPayload, account *config.Account) (
 		if payload.InferenceConfig.TopP > 0 {
 			body["top_p"] = payload.InferenceConfig.TopP
 		}
+		// Pass reasoning_effort to OpenAI-compatible upstreams (e.g. gpt-5.6-sol)
+		// when the client requested thinking. This enables the upstream model to
+		// allocate reasoning budget instead of relying only on the system prompt.
+		if payload.InferenceConfig.ReasoningEffort != "" {
+			body["reasoning_effort"] = payload.InferenceConfig.ReasoningEffort
+		}
 	}
 
 	return body, nil

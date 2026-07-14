@@ -341,11 +341,25 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 		payload.ConversationState.History = history
 	}
 
-	if req.MaxTokens > 0 || req.Temperature > 0 || req.TopP > 0 {
+	if req.MaxTokens > 0 || req.Temperature > 0 || req.TopP > 0 || req.Thinking != nil {
 		payload.InferenceConfig = &InferenceConfig{
 			MaxTokens:   req.MaxTokens,
 			Temperature: req.Temperature,
 			TopP:        req.TopP,
+		}
+		if req.Thinking != nil && req.Thinking.Type == "enabled" {
+			payload.InferenceConfig.Thinking = req.Thinking
+			budget := req.Thinking.BudgetTokens
+			switch {
+			case budget >= 50000:
+				payload.InferenceConfig.ReasoningEffort = "max"
+			case budget >= 10000:
+				payload.InferenceConfig.ReasoningEffort = "high"
+			case budget >= 3000:
+				payload.InferenceConfig.ReasoningEffort = "medium"
+			default:
+				payload.InferenceConfig.ReasoningEffort = "low"
+			}
 		}
 	}
 
