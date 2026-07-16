@@ -119,6 +119,20 @@ type Account struct {
 	LastUsed     int64   `json:"lastUsed,omitempty"`     // Last request timestamp
 	TotalTokens  int     `json:"totalTokens,omitempty"`  // Cumulative tokens processed
 	TotalCredits float64 `json:"totalCredits,omitempty"` // Cumulative credits consumed
+
+	// External provider credit balance (AuthMethod == "external_openai").
+	// Populated by fetching {BaseURL}/api/me with the account's AccessToken.
+	// Mirrors the upstream /api/me response so the admin UI can show remaining
+	// credits, usage, and request count alongside native Kiro usage bars.
+	ExtCreditLimit      float64 `json:"extCreditLimit,omitempty"`
+	ExtCreditsRemaining float64 `json:"extCreditsRemaining,omitempty"`
+	ExtCreditsUsed      float64 `json:"extCreditsUsed,omitempty"`
+	ExtRequestsCount    int64   `json:"extRequestsCount,omitempty"`
+	ExtTokensUsed       int64   `json:"extTokensUsed,omitempty"`
+	ExtStatus           string  `json:"extStatus,omitempty"`
+	ExtKeyMasked        string  `json:"extKeyMasked,omitempty"`
+	ExtLastUsedAt       int64   `json:"extLastUsedAt,omitempty"`
+	ExtCreditsCheckedAt int64   `json:"extCreditsCheckedAt,omitempty"`
 }
 
 // PromptFilterRule defines a single custom prompt sanitization rule.
@@ -565,6 +579,37 @@ func UpdateAccountOverageStatus(id, status, capability string, cap, rate, curren
 			cfg.Accounts[i].CurrentOverages = current
 			if checkedAt > 0 {
 				cfg.Accounts[i].OverageCheckedAt = checkedAt
+			}
+			return Save()
+		}
+	}
+	return nil
+}
+
+// UpdateAccountExternalCredits persists the external provider's /api/me credit
+// snapshot onto the account. Called after a successful fetchExternalProviderCredits.
+func UpdateAccountExternalCredits(id string, creditLimit, creditsRemaining, creditsUsed float64,
+	requestsCount, tokensUsed int64, status, keyMasked string, lastUsedAt, checkedAt int64) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			cfg.Accounts[i].ExtCreditLimit = creditLimit
+			cfg.Accounts[i].ExtCreditsRemaining = creditsRemaining
+			cfg.Accounts[i].ExtCreditsUsed = creditsUsed
+			cfg.Accounts[i].ExtRequestsCount = requestsCount
+			cfg.Accounts[i].ExtTokensUsed = tokensUsed
+			if status != "" {
+				cfg.Accounts[i].ExtStatus = status
+			}
+			if keyMasked != "" {
+				cfg.Accounts[i].ExtKeyMasked = keyMasked
+			}
+			if lastUsedAt > 0 {
+				cfg.Accounts[i].ExtLastUsedAt = lastUsedAt
+			}
+			if checkedAt > 0 {
+				cfg.Accounts[i].ExtCreditsCheckedAt = checkedAt
 			}
 			return Save()
 		}

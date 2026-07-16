@@ -987,6 +987,7 @@ let customSelectRefreshQueued = false;
       else if (action === 'toggle') toggleAccount(id, btn.dataset.enabled === 'true');
       else if (action === 'test') testAccount(id);
       else if (action === 'delete') deleteAccount(id);
+      else if (action === 'refreshCredits') refreshAccountCredits(id, btn.closest('.account-card'));
     });
   }
 
@@ -1063,6 +1064,7 @@ let customSelectRefreshQueued = false;
       else if (a === 'saveProxyURL') saveProxyURL(id);
       else if (a === 'loadModels') loadModels(id);
       else if (a === 'refreshModels') refreshAccountModels(id);
+      else if (a === 'refreshCredits') refreshAccountCredits(id);
     });
   }
 

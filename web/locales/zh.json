@@ -752,5 +752,20 @@
   "external.testFailed": "测试失败",
   "kirocli.uploadHint": "如果 Kiro CLI 在其他机器上，请上传 SQLite 文件",
   "kirocli.uploadLabel": "上传 SQLite 文件",
-  "kirocli.fileTooLarge": "文件过大（最大 50 MB）"
+  "kirocli.fileTooLarge": "文件过大（最大 50 MB）",
+  "accounts.extCredits": "外部额度",
+  "accounts.refreshCredits": "刷新额度",
+  "accounts.refreshCreditsFailed": "额度刷新失败",
+  "accounts.extUsed": "已用",
+  "accounts.extCreditsNoLimit": "无额度限制（无限）",
+  "detail.extCredits": "外部供应商额度",
+  "detail.extCreditLimit": "额度上限",
+  "detail.extCreditsRemaining": "剩余额度",
+  "detail.extCreditsUsed": "已用额度",
+  "detail.extRequestsCount": "请求数",
+  "detail.extTokensUsed": "已用 Token",
+  "detail.extStatus": "状态",
+  "detail.extKeyMasked": "API Key（掩码）",
+  "detail.extLastUsedAt": "最后使用",
+  "detail.extCheckedAt": "最后检查"
 }

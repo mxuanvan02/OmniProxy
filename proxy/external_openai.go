@@ -737,3 +737,58 @@ func testExternalProvider(account *config.Account) (time.Duration, error) {
 	}
 	return time.Since(start), nil
 }
+
+// ExternalProviderMe is the response shape returned by an external
+// OpenAI-compatible provider's /api/me endpoint. Not all fields are populated
+// by every provider; consumers must treat missing fields as zero/empty.
+type ExternalProviderMe struct {
+	CreditLimit      float64 `json:"creditLimit"`
+	CreditsRemaining float64 `json:"creditsRemaining"`
+	CreditsUsed      float64 `json:"creditsUsed"`
+	RequestsCount    int64   `json:"requestsCount"`
+	Status           string  `json:"status"`
+	KeyMasked        string  `json:"keyMasked"`
+	LastUsedAt       int64   `json:"lastUsedAt"`
+	TokensUsed       int64   `json:"tokensUsed"`
+	TokenLimit       int64   `json:"tokenLimit"`
+	TokensRemaining  int64   `json:"tokensRemaining"`
+}
+
+// fetchExternalProviderCredits queries the external provider's /api/me
+// endpoint and returns the credit/usage snapshot. The endpoint is optional:
+// providers that do not implement /api/me return an error which the caller
+// treats as "no credit info available" (non-fatal).
+func fetchExternalProviderCredits(account *config.Account) (*ExternalProviderMe, error) {
+	baseURL := strings.TrimRight(strings.TrimSpace(account.BaseURL), "/")
+	if baseURL == "" {
+		return nil, fmt.Errorf("no baseUrl")
+	}
+	apiKey := strings.TrimSpace(account.AccessToken)
+	if apiKey == "" {
+		return nil, fmt.Errorf("no apiKey")
+	}
+
+	req, err := http.NewRequest("GET", baseURL+"/api/me", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Accept", "application/json")
+
+	client := GetRestClientForProxy(ResolveAccountProxyURL(account))
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateErrBody(b))
+	}
+
+	var me ExternalProviderMe
+	if err := json.NewDecoder(resp.Body).Decode(&me); err != nil {
+		return nil, err
+	}
+	return &me, nil
+}

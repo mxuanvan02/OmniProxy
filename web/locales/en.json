@@ -753,5 +753,20 @@
   "kirocli.uploadHint": "Or upload the SQLite file if Kiro CLI is on another machine",
   "kirocli.uploadLabel": "Upload SQLite File",
   "kirocli.browse": "Browse...",
-  "kirocli.fileTooLarge": "File too large (max 50 MB)"
+  "kirocli.fileTooLarge": "File too large (max 50 MB)",
+  "accounts.extCredits": "External Credits",
+  "accounts.refreshCredits": "Refresh credits",
+  "accounts.refreshCreditsFailed": "Credit refresh failed",
+  "accounts.extUsed": "used",
+  "accounts.extCreditsNoLimit": "No credit limit (unlimited)",
+  "detail.extCredits": "External Provider Credits",
+  "detail.extCreditLimit": "Credit Limit",
+  "detail.extCreditsRemaining": "Credits Remaining",
+  "detail.extCreditsUsed": "Credits Used",
+  "detail.extRequestsCount": "Requests Count",
+  "detail.extTokensUsed": "Tokens Used",
+  "detail.extStatus": "Status",
+  "detail.extKeyMasked": "API Key (masked)",
+  "detail.extLastUsedAt": "Last Used",
+  "detail.extCheckedAt": "Last Checked"
 }

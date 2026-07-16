@@ -170,6 +170,12 @@ let testModalRunning = false;
       const usageClass = usagePct > 90 ? 'critical' : usagePct > 70 ? 'high' : '';
       const trialPct = (a.trialUsagePercent || 0) * 100;
       const trialClass = trialPct > 90 ? 'critical' : trialPct > 70 ? 'high' : '';
+      const isExternal = (a.authMethod === 'external_openai');
+      const extLimit = a.extCreditLimit || 0;
+      const extUsed = a.extCreditsUsed || 0;
+      const extRemaining = a.extCreditsRemaining || 0;
+      const extPct = extLimit > 0 ? (extUsed / extLimit) * 100 : 0;
+      const extClass = extPct > 90 ? 'critical' : extPct > 70 ? 'high' : '';
       const isSelected = selectedAccounts.has(a.id);
       const weight = a.weight || 0;
       const weightBadge = weight >= 2 ? '<span class="badge badge-warning">' + escapeHtml(t('accounts.weightShort')) + ':' + weight + '</span>' : '';
@@ -225,6 +231,19 @@ let testModalRunning = false;
           '<div class="usage-bar"><div class="usage-fill ' + trialClass + '" data-usage-pct="' + escapeAttr(trialPct) + '"></div></div>' +
           '<div class="usage-text"><span>' + (a.trialUsageCurrent != null ? a.trialUsageCurrent.toFixed(1) : 0) + ' / ' + (a.trialUsageLimit != null ? a.trialUsageLimit.toFixed(0) : 0) + '</span><span>' + trialPct.toFixed(1) + '%</span></div>' +
           '</div>' : '') +
+        (isExternal && extLimit > 0 ?
+          '<div class="account-usage">' +
+          '<div class="usage-label">' + escapeHtml(t('accounts.extCredits')) +
+          ' <button class="btn btn-icon btn-sm btn-ghost" data-action="refreshCredits" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.refreshCredits')) + '">' + refreshSvg + '</button>' +
+          (a.extStatus ? ' <span class="badge badge-info">' + escapeHtml(a.extStatus) + '</span>' : '') +
+          '</div>' +
+          '<div class="usage-bar"><div class="usage-fill ' + extClass + '" data-usage-pct="' + escapeAttr(extPct) + '"></div></div>' +
+          '<div class="usage-text"><span>' + extRemaining.toFixed(2) + ' / ' + extLimit.toFixed(0) + ' (' + t('accounts.extUsed') + ' ' + extUsed.toFixed(2) + ')</span><span>' + extPct.toFixed(1) + '%</span></div>' +
+          '</div>' : '') +
+        (isExternal && extLimit === 0 && a.extCreditsCheckedAt ?
+          '<div class="account-usage"><div class="usage-label">' + escapeHtml(t('accounts.extCredits')) +
+          ' <button class="btn btn-icon btn-sm btn-ghost" data-action="refreshCredits" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.refreshCredits')) + '">' + refreshSvg + '</button>' +
+          '</div><div class="usage-text"><span>' + escapeHtml(t('accounts.extCreditsNoLimit')) + '</span></div></div>' : '') +
         '<div class="account-stats">' +
         '<div class="account-stat"><div class="account-stat-value">' + (a.requestCount || 0) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.requests')) + '</div></div>' +
         '<div class="account-stat"><div class="account-stat-value">' + formatNum(a.totalTokens || 0) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.tokens')) + '</div></div>' +
@@ -406,6 +425,26 @@ let testModalRunning = false;
       toast(t('common.failed'), 'error');
     }
   }
+  async function refreshAccountCredits(id, card) {
+    if (card) card.classList.add('loading');
+    const dismiss = toast(t('accounts.refreshCredits') + '…', 'info', { duration: 0 });
+    try {
+      const res = await api('/accounts/' + id + '/credits', { method: 'POST' });
+      const d = await res.json();
+      dismiss();
+      if (d.success) {
+        const c = d.credits || {};
+        toast(t('accounts.extCredits') + ': ' + (c.creditsRemaining != null ? c.creditsRemaining.toFixed(2) : '?') + ' / ' + (c.creditLimit != null ? c.creditLimit.toFixed(0) : '?'), 'success');
+        loadAccounts();
+      } else {
+        toastError(t('accounts.refreshCreditsFailed') + (d.error ? ': ' + d.error : ''));
+      }
+    } catch (e) {
+      dismiss();
+      toastError(t('accounts.refreshCreditsFailed'));
+    }
+    if (card) card.classList.remove('loading');
+  }
 
   // Detail modal
   function detailItem(label, value) {
@@ -450,6 +489,21 @@ let testModalRunning = false;
       '<p class="help-block">' + escapeHtml(t('detail.overageHint')) + '</p>' +
       renderOverageBlock(a, idAttr) +
       '</div>' +
+
+      (a.authMethod === 'external_openai' ?
+        '<div class="detail-section"><h4>' + escapeHtml(t('detail.extCredits')) +
+        ' <button class="btn btn-sm btn-outline" data-detail-action="refreshCredits" data-id="' + idAttr + '" type="button">' + escapeHtml(t('accounts.refreshCredits')) + '</button>' +
+        '</h4><div class="detail-grid">' +
+        detailItem(t('detail.extCreditLimit'), (a.extCreditLimit || 0).toFixed(2)) +
+        detailItem(t('detail.extCreditsRemaining'), (a.extCreditsRemaining || 0).toFixed(2)) +
+        detailItem(t('detail.extCreditsUsed'), (a.extCreditsUsed || 0).toFixed(2)) +
+        detailItem(t('detail.extRequestsCount'), (a.extRequestsCount || 0)) +
+        detailItem(t('detail.extTokensUsed'), formatNum(a.extTokensUsed || 0)) +
+        detailItem(t('detail.extStatus'), a.extStatus || '-') +
+        detailItem(t('detail.extKeyMasked'), a.extKeyMasked || '-') +
+        (a.extLastUsedAt ? detailItem(t('detail.extLastUsedAt'), new Date(a.extLastUsedAt * 1000).toLocaleString()) : '') +
+        (a.extCreditsCheckedAt ? detailItem(t('detail.extCheckedAt'), new Date(a.extCreditsCheckedAt * 1000).toLocaleString()) : '') +
+        '</div></div>' : '') +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.proxyURL')) + '</h4><div class="machine-id-row">' +
       '<input type="text" id="proxyURLInput" value="' + escapeAttr(a.proxyURL || '') + '" placeholder="socks5://host:port" />' +

@@ -753,5 +753,20 @@
   "external.testFailed": "Kiểm tra thất bại",
   "kirocli.uploadHint": "Hoặc tải lên tệp SQLite nếu Kiro CLI ở máy khác",
   "kirocli.uploadLabel": "Tải lên tệp SQLite",
-  "kirocli.fileTooLarge": "Tệp quá lớn (tối đa 50 MB)"
+  "kirocli.fileTooLarge": "Tệp quá lớn (tối đa 50 MB)",
+  "accounts.extCredits": "Tín dụng ngoài",
+  "accounts.refreshCredits": "Làm mới tín dụng",
+  "accounts.refreshCreditsFailed": "Làm mới tín dụng thất bại",
+  "accounts.extUsed": "đã dùng",
+  "accounts.extCreditsNoLimit": "Không giới hạn (unlimited)",
+  "detail.extCredits": "Tín dụng nhà cung cấp ngoài",
+  "detail.extCreditLimit": "Giới hạn tín dụng",
+  "detail.extCreditsRemaining": "Tín dụng còn lại",
+  "detail.extCreditsUsed": "Tín dụng đã dùng",
+  "detail.extRequestsCount": "Số yêu cầu",
+  "detail.extTokensUsed": "Token đã dùng",
+  "detail.extStatus": "Trạng thái",
+  "detail.extKeyMasked": "API Key (che)",
+  "detail.extLastUsedAt": "Lần dùng cuối",
+  "detail.extCheckedAt": "Lần kiểm tra cuối"
 }

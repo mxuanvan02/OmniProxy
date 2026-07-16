@@ -1273,6 +1273,40 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 	return nil
 }
 
+// refreshExternalCredits fetches the external provider's /api/me endpoint and
+// persists the credit/usage snapshot onto the account so the admin UI can
+// render remaining credits. Non-fatal: returns error when the provider does
+// not implement /api/me (caller decides whether to surface it).
+func (h *Handler) refreshExternalCredits(account *config.Account) error {
+	me, err := fetchExternalProviderCredits(account)
+	if err != nil {
+		return err
+	}
+	now := time.Now().Unix()
+	if err := config.UpdateAccountExternalCredits(
+		account.ID,
+		me.CreditLimit, me.CreditsRemaining, me.CreditsUsed,
+		me.RequestsCount, me.TokensUsed,
+		me.Status, me.KeyMasked, me.LastUsedAt, now,
+	); err != nil {
+		return fmt.Errorf("persist credits: %w", err)
+	}
+	// Mirror onto the in-memory account so the next /admin/api/accounts read
+	// reflects the new values without a full reload.
+	account.ExtCreditLimit = me.CreditLimit
+	account.ExtCreditsRemaining = me.CreditsRemaining
+	account.ExtCreditsUsed = me.CreditsUsed
+	account.ExtRequestsCount = me.RequestsCount
+	account.ExtTokensUsed = me.TokensUsed
+	account.ExtStatus = me.Status
+	account.ExtKeyMasked = me.KeyMasked
+	account.ExtLastUsedAt = me.LastUsedAt
+	account.ExtCreditsCheckedAt = now
+	logger.Infof("[ExternalCredits] %s: remaining=%.2f used=%.2f limit=%.2f requests=%d status=%s",
+		account.Email, me.CreditsRemaining, me.CreditsUsed, me.CreditLimit, me.RequestsCount, me.Status)
+	return nil
+}
+
 // apiRefreshAccountModels POST /admin/api/accounts/{id}/models/refresh
 // Immediately fetches and updates the model routing cache for a specific account.
 func (h *Handler) apiRefreshAccountModels(w http.ResponseWriter, r *http.Request, id string) {
@@ -3161,6 +3195,9 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/models/cached") && r.Method == "GET":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/models/cached")
 		h.apiGetAccountModelsCached(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/credits") && r.Method == "POST":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/credits")
+		h.apiRefreshAccountCredits(w, r, id)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/models") && r.Method == "GET":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/models")
 		h.apiGetAccountModels(w, r, id)
@@ -4825,6 +4862,16 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"totalTokens":       stats.TotalTokens,
 			"totalCredits":      stats.TotalCredits,
 			"lastUsed":          stats.LastUsed,
+			"baseUrl":           a.BaseURL,
+			"extCreditLimit":      a.ExtCreditLimit,
+			"extCreditsRemaining": a.ExtCreditsRemaining,
+			"extCreditsUsed":      a.ExtCreditsUsed,
+			"extRequestsCount":    a.ExtRequestsCount,
+			"extTokensUsed":       a.ExtTokensUsed,
+			"extStatus":           a.ExtStatus,
+			"extKeyMasked":        a.ExtKeyMasked,
+			"extLastUsedAt":       a.ExtLastUsedAt,
+			"extCreditsCheckedAt": a.ExtCreditsCheckedAt,
 		}
 	}
 	json.NewEncoder(w).Encode(result)
@@ -7051,6 +7098,49 @@ func (h *Handler) apiGenerateMachineId(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"machineId": machineId})
 }
 
+// apiRefreshAccountCredits POST /admin/api/accounts/{id}/credits
+// Refreshes the external provider's credit balance via /api/me. Only meaningful
+// for external_openai accounts; native Kiro accounts return a friendly error.
+func (h *Handler) apiRefreshAccountCredits(w http.ResponseWriter, r *http.Request, id string) {
+	accounts := config.GetAccounts()
+	var account *config.Account
+	for i := range accounts {
+		if accounts[i].ID == id {
+			account = &accounts[i]
+			break
+		}
+	}
+	if account == nil {
+		w.WriteHeader(404)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+	if !isExternalAccount(account) {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Credits are only available for external OpenAI-compatible providers"})
+		return
+	}
+	if err := h.refreshExternalCredits(account); err != nil {
+		w.WriteHeader(502)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Credit refresh failed: " + err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"credits": map[string]interface{}{
+			"creditLimit":      account.ExtCreditLimit,
+			"creditsRemaining": account.ExtCreditsRemaining,
+			"creditsUsed":      account.ExtCreditsUsed,
+			"requestsCount":    account.ExtRequestsCount,
+			"tokensUsed":       account.ExtTokensUsed,
+			"status":           account.ExtStatus,
+			"keyMasked":        account.ExtKeyMasked,
+			"lastUsedAt":       account.ExtLastUsedAt,
+			"checkedAt":        account.ExtCreditsCheckedAt,
+		},
+	})
+}
+
 // apiTestAccount tests a specific account by sending a real model request through its proxy.
 func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id string) {
 	accounts := config.GetAccounts()
@@ -7136,16 +7226,25 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	// External OpenAI-compatible providers have no Kiro usage/subscription to
-	// refresh. Refresh their model list instead so the admin UI shows real data.
+	// refresh. Refresh their model list and credit balance (via /api/me) so
+	// the admin UI shows real data.
 	if isExternalAccount(account) {
-		if err := h.fetchAndCacheAccountModels(account); err != nil {
+		modelsErr := h.fetchAndCacheAccountModels(account)
+		creditsErr := h.refreshExternalCredits(account)
+		if modelsErr != nil && creditsErr != nil {
 			w.WriteHeader(500)
-			json.NewEncoder(w).Encode(map[string]string{"error": "External provider refresh failed: " + err.Error()})
+			json.NewEncoder(w).Encode(map[string]string{"error": "External provider refresh failed: " + modelsErr.Error()})
 			return
+		}
+		msg := "External provider refreshed"
+		if modelsErr != nil {
+			msg = "Models refresh failed: " + modelsErr.Error()
+		} else if creditsErr != nil {
+			msg = "Models refreshed; credits unavailable: " + creditsErr.Error()
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
-			"message": "External provider models refreshed",
+			"message": msg,
 		})
 		return
 	}
