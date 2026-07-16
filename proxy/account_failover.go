@@ -4,7 +4,6 @@ import (
 	"superkiro/config"
 	"superkiro/logger"
 	"strings"
-	"time"
 )
 
 // maxAccountRetryAttempts is no longer a fixed cap — the retry loops in handler.go
@@ -98,24 +97,11 @@ func (h *Handler) disableAccount(account *config.Account, banStatus, banReason s
 	if account == nil {
 		return
 	}
-
-	updatedAccount := *account
-	if !updatedAccount.Enabled && updatedAccount.BanStatus == banStatus && updatedAccount.BanReason == banReason {
-		return
-	}
-
-	updatedAccount.Enabled = false
-	updatedAccount.BanStatus = banStatus
-	updatedAccount.BanReason = banReason
-	updatedAccount.BanTime = time.Now().Unix()
-
-	if err := config.UpdateAccount(account.ID, updatedAccount); err != nil {
-		logger.Warnf("[AccountFailover] Failed to disable %s: %v", account.Email, err)
-		return
-	}
-
-	logger.Warnf("[AccountFailover] Disabled %s: %s", account.Email, banReason)
-	h.pool.Reload()
+	// Auto-disable is intentionally disabled by operator policy. We only log
+	// the upstream failure so operators can investigate and manually toggle the
+	// account via the admin UI. This prevents transient upstream blips from
+	// permanently removing healthy accounts from the pool.
+	logger.Warnf("[AccountFailover] Would-disable %s (banStatus=%s, reason=%s) — auto-disable OFF, keeping account enabled", account.Email, banStatus, banReason)
 }
 
 func (h *Handler) disableAccountOverage(account *config.Account) {
@@ -150,7 +136,17 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error, model
 	case isQuotaErrorMessage(errMsg):
 		h.pool.RecordError(account.ID, true, model)
 	case isSuspensionErrorMessage(errMsg):
-		h.disableAccount(account, "BANNED", "AWS temporarily suspended - unusual user activity detected")
+		// The "temporarily suspended" / "account suspended" patterns are Kiro/
+		// AWS-specific upstream messages. External OpenAI-compatible providers
+		// may return errors that happen to contain "suspended" without meaning
+		// the account is banned — never auto-disable external accounts on this
+		// pattern; treat as a soft cooldown so operators can investigate.
+		if isExternalAccount(account) {
+			logger.Warnf("[AccountFailover] External provider %s returned suspension-like error (not auto-banning): %v", account.Email, err)
+			h.pool.RecordError(account.ID, false, model)
+		} else {
+			h.disableAccount(account, "BANNED", "AWS temporarily suspended - unusual user activity detected")
+		}
 	case isProfileUnavailableErrorMessage(errMsg):
 		// Profile ARN may be transiently unresolvable (upstream blip, stale token).
 		// Treat as a soft failure: short cooldown so the next request rotates account,

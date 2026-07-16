@@ -1197,6 +1197,14 @@ func (h *Handler) refreshModelsCache() {
 		if account.AuthMethod == "external_idp" {
 			continue
 		}
+		// Skip external OpenAI-compatible providers — they have no Kiro token and
+		// their model list comes from {BaseURL}/v1/models via fetchExternalProviderModels,
+		// not CodeWhisperer's ListAvailableModels. Calling ListAvailableModels with
+		// their access token fails (DNS/auth) and triggers handleAccountFailure,
+		// which can wrongly mark the account BANNED.
+		if isExternalAccount(account) {
+			continue
+		}
 		if err := h.ensureValidToken(account); err != nil {
 			logger.Warnf("[ModelsCache] Skip %s token refresh failed: %v", account.Email, err)
 			h.handleAccountFailure(account, err, "")
@@ -4950,6 +4958,13 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	oldEnabled := existing.Enabled
 	if v, ok := updates["enabled"].(bool); ok {
 		existing.Enabled = v
+		// When re-enabling an account, clear any prior ban/suspend marker so
+		// the UI reflects the operator's intent and the pool routes to it again.
+		if v && (existing.BanStatus == "BANNED" || existing.BanStatus == "DISABLED" || existing.BanStatus == "SUSPENDED") {
+			existing.BanStatus = "ACTIVE"
+			existing.BanReason = ""
+			existing.BanTime = 0
+		}
 	}
 	if v, ok := updates["nickname"].(string); ok {
 		existing.Nickname = v
