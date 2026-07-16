@@ -268,6 +268,28 @@ func (h *Handler) handleComboRequest(
 	}
 	logger.Warnf("[COMBO] %s all models failed — lastStatus=%d lastError=%s", comboName, lastStatus, truncateStr(lastErrMsg, 200))
 
+	// Detect streaming: if the original request was stream:true, the client
+	// expects SSE events. Sending a JSON error body after the combo handler
+	// has not yet committed SSE headers is technically valid HTTP, but Claude
+	// Code CLI and other streaming clients may not parse it correctly because
+	// they've already negotiated SSE mode. Send the error as SSE instead.
+	isStream := isComboRequestStreaming(originalBody)
+	if isStream {
+		flusher, ok := w.(http.Flusher)
+		if ok {
+			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			w.WriteHeader(200)
+			if format == "claude" {
+				h.sendClaudeSSEError(w, flusher, "api_error", "All combo models failed: "+lastErrMsg)
+			} else {
+				h.sendOpenAISSEError(w, flusher, "server_error", "All combo models failed: "+lastErrMsg)
+			}
+			return
+		}
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(lastStatus)
 	errResp := map[string]interface{}{
@@ -277,6 +299,17 @@ func (h *Handler) handleComboRequest(
 		},
 	}
 	json.NewEncoder(w).Encode(errResp) //nolint:errcheck
+}
+
+// isComboRequestStreaming checks if the original request body has stream:true.
+func isComboRequestStreaming(body []byte) bool {
+	var probe struct {
+		Stream bool `json:"stream"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return false
+	}
+	return probe.Stream
 }
 
 // patchModelInBody replaces the "model" field in the JSON request body.
@@ -310,6 +343,11 @@ func extractErrorMessage(body []byte) string {
 	body = bytes.TrimSpace(body)
 	if len(body) == 0 {
 		return ""
+	}
+	// If the body is an SSE stream (starts with "event:" or "data:"),
+	// extract the JSON payload from the last data: line and parse that.
+	if bytes.HasPrefix(body, []byte("event:")) || bytes.HasPrefix(body, []byte("data:")) {
+		return extractSSEErrorMessage(body)
 	}
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(body, &obj); err != nil {
@@ -362,4 +400,47 @@ func hasSSEErrorEvent(body []byte) bool {
 	// OpenAI SSE: data: {"error":{"type":"api_error",...}}
 	// Look for data: {"error": after the last valid chunk.
 	return bytes.Contains(body, []byte(`data: {"error":`))
+}
+
+// extractSSEErrorMessage parses an SSE error body and returns the error message.
+// Handles both Claude format (event: error\ndata: {"type":"error","error":...})
+// and OpenAI format (data: {"error":{"message":"..."}}).
+func extractSSEErrorMessage(body []byte) string {
+	// Find the last "data:" line containing an error payload.
+	lines := bytes.Split(body, []byte("\n"))
+	for i := len(lines) - 1; i >= 0; i-- {
+		line := bytes.TrimSpace(lines[i])
+		if !bytes.HasPrefix(line, []byte("data:")) {
+			continue
+		}
+		jsonData := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		if bytes.Equal(jsonData, []byte("[DONE]")) {
+			continue
+		}
+		var obj map[string]json.RawMessage
+		if json.Unmarshal(jsonData, &obj) != nil {
+			continue
+		}
+		// Claude: {"type":"error","error":{"message":"..."}}
+		if errRaw, ok := obj["error"]; ok {
+			var errObj map[string]json.RawMessage
+			if json.Unmarshal(errRaw, &errObj) == nil {
+				if msgRaw, ok := errObj["message"]; ok {
+					var msg string
+					if json.Unmarshal(msgRaw, &msg) == nil {
+						return msg
+					}
+				}
+			}
+		}
+		// OpenAI: {"error":{"message":"..."}}
+		if msgRaw, ok := obj["message"]; ok {
+			var msg string
+			if json.Unmarshal(msgRaw, &msg) == nil {
+				return msg
+			}
+		}
+	}
+	// Fallback: return trimmed body
+	return truncateStr(string(body), 200)
 }

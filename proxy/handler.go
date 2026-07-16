@@ -2049,17 +2049,46 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	if lastErr == nil {
-		h.sendClaudeError(w, 503, "api_error", "No available accounts")
+		h.sendClaudeSSEError(w, flusher, "api_error", "No available accounts")
 		return
 	}
 
 	h.recordError(apiKeyID, "", model, endpointClaude, lastErr.Error())
-	h.sendClaudeError(w, upstreamErrorStatus(lastErr), "api_error", lastErr.Error())
+	h.sendClaudeSSEError(w, flusher, "api_error", lastErr.Error())
 }
 
 func (h *Handler) sendSSE(w http.ResponseWriter, flusher http.Flusher, event string, data interface{}) {
 	jsonData, _ := json.Marshal(data)
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", event, string(jsonData))
+	flusher.Flush()
+}
+
+// sendClaudeSSEError sends an error as a proper Claude SSE error event.
+// Use this instead of sendClaudeError when the response is already in SSE mode
+// (Content-Type: text/event-stream has been committed). Sending a JSON error
+// body after SSE headers are set produces malformed output that causes
+// streaming clients (e.g. Claude Code CLI) to hang silently.
+func (h *Handler) sendClaudeSSEError(w http.ResponseWriter, flusher http.Flusher, errType, message string) {
+	h.sendSSE(w, flusher, "error", map[string]interface{}{
+		"type": "error",
+		"error": map[string]string{
+			"type":    errType,
+			"message": message,
+		},
+	})
+}
+
+// sendOpenAISSEError sends an error as an OpenAI SSE data event followed by [DONE].
+// Use this instead of sendOpenAIError when the response is already in SSE mode.
+func (h *Handler) sendOpenAISSEError(w http.ResponseWriter, flusher http.Flusher, errType, message string) {
+	data, _ := json.Marshal(map[string]interface{}{
+		"error": map[string]string{
+			"message": message,
+			"type":    errType,
+		},
+	})
+	fmt.Fprintf(w, "data: %s\n\n", string(data))
+	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
 }
 
@@ -2865,12 +2894,12 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	}
 
 	if lastErr == nil {
-		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
+		h.sendOpenAISSEError(w, flusher, "server_error", "No available accounts")
 		return
 	}
 
 	h.recordError(apiKeyID, "", model, endpointOpenAI, lastErr.Error())
-	h.sendOpenAIError(w, upstreamErrorStatus(lastErr), "server_error", lastErr.Error())
+	h.sendOpenAISSEError(w, flusher, "server_error", lastErr.Error())
 }
 
 // handleOpenAINonStream handles OpenAI non-streaming response
