@@ -1302,14 +1302,30 @@ func (h *Handler) refreshModelsCache() {
 		if account.AuthMethod == "external_idp" {
 			continue
 		}
+		// Codex accounts: seed the fixed subscription model list into the cache
+		// (no /v1/models endpoint to poll). Also set per-account model list so
+		// routing knows which models this account can serve.
+		if isCodexAccount(account) {
+			codexModels := codexSubscriptionModels()
+			modelIDs := make([]string, 0, len(codexModels))
+			for _, m := range codexModels {
+				modelIDs = append(modelIDs, m.ModelId)
+			}
+			h.pool.SetModelList(account.ID, modelIDs)
+			aggregated = mergeUniqueModels(aggregated, codexModels)
+			continue
+		}
 		// Skip external OpenAI-compatible providers — they have no Kiro token and
 		// their model list comes from {BaseURL}/v1/models via fetchExternalProviderModels,
 		// not CodeWhisperer's ListAvailableModels. Calling ListAvailableModels with
 		// their access token fails (DNS/auth) and triggers handleAccountFailure,
 		// which can wrongly mark the account BANNED.
-		// Codex accounts also use a non-Kiro backend (OpenAI /v1/responses);
-		// their model list is fetched separately via fetchCodexModels.
-		if isExternalAccount(account) || isCodexAccount(account) {
+		if isExternalAccount(account) {
+			if err := h.fetchAndCacheAccountModels(account); err == nil {
+				h.modelsCacheMu.RLock()
+				aggregated = mergeUniqueModels(aggregated, h.cachedModels)
+				h.modelsCacheMu.RUnlock()
+			}
 			continue
 		}
 		if err := h.ensureValidToken(account); err != nil {
@@ -5372,6 +5388,20 @@ func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 				failCount++
 				continue
 			}
+			// Codex accounts: refresh JWT profile + seed models, skip Kiro API
+			if isCodexAccount(account) {
+				refreshCodexAccountID(account)
+				h.fetchAndCacheAccountModels(account)
+				successCount++
+				continue
+			}
+			// External OpenAI-compatible providers: refresh models + credits
+			if isExternalAccount(account) {
+				h.fetchAndCacheAccountModels(account)
+				h.refreshExternalCredits(account)
+				successCount++
+				continue
+			}
 			// refresh token
 			if account.RefreshToken != "" {
 				if newAccess, newRefresh, newExpires, profileArn, _, _, err := auth.RefreshAccountToken(account); err == nil {
@@ -8000,6 +8030,23 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 			msg = "Models refresh failed: " + modelsErr.Error()
 		} else if creditsErr != nil {
 			msg = "Models refreshed; credits unavailable: " + creditsErr.Error()
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"message": msg,
+		})
+		return
+	}
+
+	// Codex (ChatGPT subscription) accounts have no Kiro usage API to call.
+	// Refresh their JWT-extracted profile (email, name, plan_type) and seed
+	// the fixed Codex subscription model list into the cache.
+	if isCodexAccount(account) {
+		refreshCodexAccountID(account)
+		modelsErr := h.fetchAndCacheAccountModels(account)
+		msg := "Codex account refreshed"
+		if modelsErr != nil {
+			msg = "Codex profile refreshed; models unavailable: " + modelsErr.Error()
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
