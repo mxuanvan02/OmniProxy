@@ -988,6 +988,7 @@ let customSelectRefreshQueued = false;
       else if (action === 'test') testAccount(id);
       else if (action === 'delete') deleteAccount(id);
       else if (action === 'refreshCredits') refreshAccountCredits(id, btn.closest('.account-card'));
+      else if (action === 'refreshToken') refreshAccountToken(id);
     });
   }
 

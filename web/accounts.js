@@ -320,8 +320,12 @@ let testModalRunning = false;
       const extClass = extPct > 90 ? 'critical' : extPct > 70 ? 'high' : '';
       const isSelected = selectedAccounts.has(a.id);
       const weight = a.weight || 0;
-      const weightBadge = weight >= 2 ? '<span class="badge badge-warning">' + escapeHtml(t('accounts.weightShort')) + ':' + weight + '</span>' : '';
-      const overageBadge = renderOverageBadge(a);
+      // Kiro-only badges: subscription type, trial, weight, overage.
+      // Codex/external accounts have their own tier indicators and don't
+      // use Kiro's overage/weight/machine-id system.
+      const isKiroNative = !isCodex && !isExternal;
+      const weightBadge = isKiroNative && weight >= 2 ? '<span class="badge badge-warning">' + escapeHtml(t('accounts.weightShort')) + ':' + weight + '</span>' : '';
+      const overageBadge = isKiroNative ? renderOverageBadge(a) : '';
       const banned = a.banStatus && a.banStatus !== 'ACTIVE';
       const idAttr = escapeAttr(a.id);
       const displayEmail = getDisplayEmail(a.email, a.id);
@@ -330,10 +334,11 @@ let testModalRunning = false;
       const refreshSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
       const userSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
       const copySvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+      const keySvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 8.5m0 0l3 3L22 8l-3-3m-3.5 3.5L19 5"/></svg>';
 
       // Codex accounts: show plan + active-limit + chatgpt_account_id badges.
-      // These mirror the Kiro subscription badge so Codex cards have a
-      // comparable tier indicator at a glance.
+      // These replace the Kiro subscription badge (which defaults to "Free"
+      // when subscriptionType is empty — misleading for Codex Plus/Pro plans).
       const codexBadge = isCodex ?
         (getCodexPlanBadge(a.codexPlanType) +
          getCodexLimitBadge(a.codexActiveLimit) +
@@ -349,8 +354,8 @@ let testModalRunning = false;
         '<div class="account-email">' + escapeHtml(displayEmail) + '</div>' +
         '<div class="account-nickname">' + (a.nickname ? '<span class="nickname-badge">' + escapeHtml(a.nickname) + '</span>' : '') + '</div>' +
         '<div class="account-meta">' +
-        getSubBadge(a.subscriptionType) +
-        getTrialBadge(a) +
+        (isKiroNative ? getSubBadge(a.subscriptionType) : '') +
+        (isKiroNative ? getTrialBadge(a) : '') +
         weightBadge +
         overageBadge +
         '<span class="badge badge-info">' + escapeHtml(formatAuthMethod(a.provider || a.authMethod)) + '</span>' +
@@ -361,6 +366,7 @@ let testModalRunning = false;
         '</div>' +
         '<div class="account-actions">' +
         '<button class="btn btn-icon btn-sm btn-ghost" data-action="refresh" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.refresh')) + '">' + refreshSvg + '</button>' +
+        (a.refreshToken ? '<button class="btn btn-icon btn-sm btn-ghost" data-action="refreshToken" data-id="' + idAttr + '" title="' + escapeAttr(t('detail.refreshToken')) + '">' + keySvg + '</button>' : '') +
         '<button class="btn btn-icon btn-sm btn-ghost" data-action="detail" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.detail')) + '">' + userSvg + '</button>' +
         '<button class="btn btn-icon btn-sm btn-ghost" data-action="copyJSON" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.copyJSON')) + '">' + copySvg + '</button>' +
         (banned ? '' :
@@ -649,6 +655,11 @@ let testModalRunning = false;
     const a = accountsData.find(x => x.id === id);
     if (!a) return;
     const idAttr = escapeAttr(id);
+    const isCodex = a.authMethod === 'codex';
+    const isExternal = a.authMethod === 'external_openai';
+    // Kiro-native accounts use Machine ID, Weight, Overage, and the Kiro
+    // subscription/quota system. Codex and external providers don't.
+    const isKiroNative = !isCodex && !isExternal;
     $('detailBody').innerHTML =
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.basicInfo')) + '</h4><div class="detail-grid">' +
       detailItem(t('detail.email'), getDisplayEmail(a.email, null)) +
@@ -656,6 +667,9 @@ let testModalRunning = false;
       detailItem(t('detail.authMethod'), formatAuthMethod(a.provider || a.authMethod)) +
       detailItem(t('detail.region'), a.region || 'us-east-1') +
       (a.baseUrl ? detailItem(t('external.baseUrlLabel'), a.baseUrl) : '') +
+      (isCodex && a.codexEmail ? detailItem(t('detail.codexEmail'), a.codexEmail) : '') +
+      (isCodex && a.codexName ? detailItem(t('detail.codexName'), a.codexName) : '') +
+      (isCodex && a.chatgptAccountId ? detailItem(t('detail.codexChatGPTId'), a.chatgptAccountId) : '') +
       '</div></div>' +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.nickname')) + '</h4><div class="machine-id-row">' +
@@ -663,29 +677,36 @@ let testModalRunning = false;
       '<button class="btn btn-sm btn-primary" data-detail-action="saveNickname" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
       '</div></div>' +
 
-      '<div class="detail-section"><h4>' + escapeHtml(t('detail.machineId')) + '</h4><div class="machine-id-row">' +
-      '<input type="text" id="machineIdInput" value="' + escapeAttr(a.machineId || '') + '" placeholder="UUID" />' +
-      '<button class="btn btn-sm btn-outline" id="generateMachineIdBtn" type="button">' + escapeHtml(t('detail.generate')) + '</button>' +
-      '<button class="btn btn-sm btn-primary" data-detail-action="saveMachineId" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
-      '</div></div>' +
+      // Machine ID — Kiro only (used for CodeWhisperer request tracking)
+      (isKiroNative ?
+        '<div class="detail-section"><h4>' + escapeHtml(t('detail.machineId')) + '</h4><div class="machine-id-row">' +
+        '<input type="text" id="machineIdInput" value="' + escapeAttr(a.machineId || '') + '" placeholder="UUID" />' +
+        '<button class="btn btn-sm btn-outline" id="generateMachineIdBtn" type="button">' + escapeHtml(t('detail.generate')) + '</button>' +
+        '<button class="btn btn-sm btn-primary" data-detail-action="saveMachineId" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
+        '</div></div>' : '') +
 
-      '<div class="detail-section"><h4>' + escapeHtml(t('detail.weight')) + '</h4>' +
-      '<div class="form-group">' +
-      '<input type="number" id="weightInput" value="' + (a.weight || 0) + '" min="0" max="10" />' +
-      '<small>' + escapeHtml(t('detail.weightHint')) + '</small>' +
-      '</div>' +
-      '<button class="btn btn-sm btn-primary" data-detail-action="saveWeight" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
-      '</div>' +
+      // Weight — Kiro only (load balancing priority for Kiro pool)
+      (isKiroNative ?
+        '<div class="detail-section"><h4>' + escapeHtml(t('detail.weight')) + '</h4>' +
+        '<div class="form-group">' +
+        '<input type="number" id="weightInput" value="' + (a.weight || 0) + '" min="0" max="10" />' +
+        '<small>' + escapeHtml(t('detail.weightHint')) + '</small>' +
+        '</div>' +
+        '<button class="btn btn-sm btn-primary" data-detail-action="saveWeight" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
+        '</div>' : '') +
 
-      '<div class="detail-section">' +
-      '<h4>' + escapeHtml(t('detail.overage')) +
-      ' <button class="btn btn-sm btn-outline" data-detail-action="refreshOverage" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.overageRefresh')) + '</button>' +
-      '</h4>' +
-      '<p class="help-block">' + escapeHtml(t('detail.overageHint')) + '</p>' +
-      renderOverageBlock(a, idAttr) +
-      '</div>' +
+      // Overage — Kiro only (AWS Q billing feature, not applicable to
+      // Codex/external providers)
+      (isKiroNative ?
+        '<div class="detail-section">' +
+        '<h4>' + escapeHtml(t('detail.overage')) +
+        ' <button class="btn btn-sm btn-outline" data-detail-action="refreshOverage" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.overageRefresh')) + '</button>' +
+        '</h4>' +
+        '<p class="help-block">' + escapeHtml(t('detail.overageHint')) + '</p>' +
+        renderOverageBlock(a, idAttr) +
+        '</div>' : '') +
 
-      (a.authMethod === 'external_openai' ?
+      (isExternal ?
         '<div class="detail-section"><h4>' + escapeHtml(t('detail.extCredits')) +
         ' <button class="btn btn-sm btn-outline" data-detail-action="refreshCredits" data-id="' + idAttr + '" type="button">' + escapeHtml(t('accounts.refreshCredits')) + '</button>' +
         '</h4><div class="detail-grid">' +
@@ -700,15 +721,12 @@ let testModalRunning = false;
         (a.extCreditsCheckedAt ? detailItem(t('detail.extCheckedAt'), new Date(a.extCreditsCheckedAt * 1000).toLocaleString()) : '') +
         '</div></div>' : '') +
 
-      (a.authMethod === 'codex' ?
+      (isCodex ?
         '<div class="detail-section"><h4>' + escapeHtml(t('detail.codexUsage')) +
         ' <button class="btn btn-sm btn-outline" data-detail-action="refresh" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.refreshUsage')) + '</button>' +
         '</h4><div class="detail-grid">' +
         detailItem(t('detail.codexPlanType'), formatCodexPlan(a.codexPlanType)) +
         detailItem(t('detail.codexActiveLimit'), a.codexActiveLimit || '-') +
-        detailItem(t('detail.codexEmail'), a.codexEmail || '-') +
-        detailItem(t('detail.codexName'), a.codexName || '-') +
-        detailItem(t('detail.codexChatGPTId'), a.chatgptAccountId || '-') +
         '</div>' +
         '<div class="detail-grid" style="margin-top:0.5rem">' +
         detailItem(t('detail.codexPrimaryUsed'), formatUsageBar(a.codexPrimaryUsedPercent || 0)) +
@@ -736,28 +754,20 @@ let testModalRunning = false;
       (a.tokenRefreshedAt ? detailItem(t('detail.tokenRefreshedAt'), new Date(a.tokenRefreshedAt * 1000).toLocaleString()) : '') +
       '</div></div>' +
 
-      '<div class="detail-section"><h4>' + escapeHtml(t('detail.proxyURL')) + '</h4><div class="machine-id-row">' +
-      '<input type="text" id="proxyURLInput" value="' + escapeAttr(a.proxyURL || '') + '" placeholder="socks5://host:port" />' +
-      '<button class="btn btn-sm btn-primary" data-detail-action="saveProxyURL" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
-      '</div><p class="help-block">' + escapeHtml(t('detail.proxyHint')) + '</p></div>' +
+      // Proxy URL — Kiro only (Codex/external don't use per-account proxy
+      // for upstream calls; they have BaseURL instead)
+      (isKiroNative ?
+        '<div class="detail-section"><h4>' + escapeHtml(t('detail.proxyURL')) + '</h4><div class="machine-id-row">' +
+        '<input type="text" id="proxyURLInput" value="' + escapeAttr(a.proxyURL || '') + '" placeholder="socks5://host:port" />' +
+        '<button class="btn btn-sm btn-primary" data-detail-action="saveProxyURL" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
+        '</div><p class="help-block">' + escapeHtml(t('detail.proxyHint')) + '</p></div>' : '') +
 
-      // Subscription section — Codex accounts show Codex-specific info
-      // (plan, active limit, credits) instead of the empty Kiro quota
-      // fields. Kiro/external accounts keep the original layout.
-      (a.authMethod === 'codex' ?
-        '<div class="detail-section"><h4>' + escapeHtml(t('detail.subscription')) + '</h4><div class="detail-grid">' +
-        detailItem(t('detail.codexPlanType'), formatCodexPlan(a.codexPlanType)) +
-        detailItem(t('detail.codexActiveLimit'), a.codexActiveLimit || '-') +
-        detailItem(t('detail.codexEmail'), a.codexEmail || '-') +
-        detailItem(t('detail.codexName'), a.codexName || '-') +
-        detailItem(t('detail.codexChatGPTId'), a.chatgptAccountId || '-') +
-        detailItem(t('detail.codexCreditsBalance'), a.codexCreditsBalance || 0) +
-        detailItem(t('detail.codexCreditsUnlimited'), a.codexCreditsUnlimited ? '✓' : '✗') +
-        '</div></div>'
-        :
+      // Subscription section — Kiro only. Codex account info (plan, email,
+      // name, ChatGPT ID, credits) is already shown in Basic Info + Codex
+      // Usage sections above, so no separate subscription section needed.
+      (isKiroNative ?
         '<div class="detail-section"><h4>' + escapeHtml(t('detail.subscription')) + '</h4><div class="detail-grid">' +
         detailItem(t('detail.subscriptionType'), a.subscriptionTitle || (a.subscriptionType ? formatSubscriptionLabel(a.subscriptionType) : '-')) +
-        detailItem(t('detail.tokenExpiry'), formatTokenExpiry(a.expiresAt)) +
         detailItem(t('detail.mainQuota'), (a.usageCurrent != null ? a.usageCurrent.toFixed(1) : 0) + ' / ' + (a.usageLimit != null ? a.usageLimit.toFixed(0) : 0)) +
         detailItem(t('detail.resetDate'), a.nextResetDate || '-') +
         (a.trialUsageLimit > 0 ?
@@ -765,7 +775,7 @@ let testModalRunning = false;
           detailItem(t('detail.trialStatus'), a.trialStatus || '-') +
           detailItem(t('detail.trialExpiry'), '-')
           : '') +
-        '</div></div>') +
+        '</div></div>' : '') +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.statistics')) + '</h4><div class="detail-grid">' +
       detailItem(t('detail.requestCount'), a.requestCount || 0) +
