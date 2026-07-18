@@ -808,8 +808,15 @@ func refreshCodexAccountID(account *config.Account) {
 // its routing cache with this list so claude-cli / openai clients can
 // request any of them by name.
 //
-// Source: Codex CLI default model registry + observed /v1/responses
-// accept-list. Updated when OpenAI ships new subscription-tier models.
+// Source: Codex CLI model registry (openai/codex GitHub) + official
+// model guide at developers.openai.com/codex/models + observed
+// /v1/responses accept-list. Updated when OpenAI ships new models.
+//
+// Note: The upstream /backend-api/codex/models endpoint exists but
+// returns an empty list for most accounts because model visibility is
+// gated by Statsig feature flags (see openai/codex#31873). The models
+// are still callable via -m / model field, so we hardcode the full
+// list here as a reliable fallback.
 func codexSubscriptionModels() []ModelInfo {
 	type lim struct {
 		MaxInputTokens  int
@@ -819,12 +826,27 @@ func codexSubscriptionModels() []ModelInfo {
 		id, name, desc string
 		lim
 	}{
-		{"gpt-5.6-sol", "GPT-5.6 Sol", "Codex reasoning model (default)", lim{300000, 128000}},
-		{"gpt-5.1", "GPT-5.1", "Codex fast model", lim{272000, 128000}},
-		{"gpt-5", "GPT-5", "GPT-5 base", lim{272000, 128000}},
+		// ── GPT-5.6 family (current flagship) ──
+		{"gpt-5.6", "GPT-5.6", "GPT-5.6 alias (routes to Sol)", lim{300000, 128000}},
+		{"gpt-5.6-sol", "GPT-5.6 Sol", "Flagship GPT-5.6 — hardest coding & reasoning", lim{300000, 128000}},
+		{"gpt-5.6-terra", "GPT-5.6 Terra", "Balanced GPT-5.6 — everyday workhorse", lim{272000, 128000}},
+		{"gpt-5.6-luna", "GPT-5.6 Luna", "Fast & affordable GPT-5.6 — high-throughput", lim{200000, 100000}},
+		// ── GPT-5.5 (previous default) ──
+		{"gpt-5.5", "GPT-5.5", "Previous default reasoning model", lim{272000, 128000}},
+		// ── GPT-5.4 family ──
+		{"gpt-5.4", "GPT-5.4", "Older default reasoning model", lim{272000, 128000}},
+		{"gpt-5.4-mini", "GPT-5.4 Mini", "Lower-cost testing & lighter workflows", lim{200000, 100000}},
+		{"gpt-5.4-nano", "GPT-5.4 Nano", "High-throughput simple tasks", lim{200000, 100000}},
+		// ── GPT-5.1 / GPT-5 ──
+		{"gpt-5.1", "GPT-5.1", "GPT-5.1 reasoning model", lim{272000, 128000}},
+		{"gpt-5.1-codex-mini", "GPT-5.1 Codex Mini", "Cheaper coding workflows", lim{200000, 100000}},
+		{"gpt-5", "GPT-5", "GPT-5 base model", lim{272000, 128000}},
+		// ── Codex-specialized ──
+		{"gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", "Agentic coding (spark)", lim{200000, 100000}},
+		{"codex-mini-latest", "Codex Mini", "Codex mini (latest)", lim{200000, 100000}},
+		// ── o-series reasoning ──
 		{"o4", "o4", "OpenAI o4 reasoning", lim{200000, 100000}},
 		{"o3", "o3", "OpenAI o3 reasoning", lim{200000, 100000}},
-		{"codex-mini-latest", "Codex Mini", "Codex mini (latest)", lim{200000, 100000}},
 	}
 	out := make([]ModelInfo, 0, len(specs))
 	for _, s := range specs {

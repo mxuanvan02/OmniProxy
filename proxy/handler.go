@@ -1260,29 +1260,23 @@ func hasEnabledCodexAccount() bool {
 }
 
 // codexSubscriptionModelsList returns the Codex subscription model list
-// in the /v1/models response format (map[string]interface{}).
+// in the /v1/models response format (map[string]interface{}). Derives
+// from the same codexSubscriptionModels() source as the routing cache so
+// both surfaces stay in sync.
 func codexSubscriptionModelsList() []map[string]interface{} {
-	specs := []struct {
-		id, name, desc string
-		maxIn, maxOut  int
-	}{
-		{"gpt-5.6-sol", "GPT-5.6 Sol", "Codex reasoning model (default)", 300000, 128000},
-		{"gpt-5.1", "GPT-5.1", "Codex fast model", 272000, 128000},
-		{"gpt-5", "GPT-5", "GPT-5 base", 272000, 128000},
-		{"o4", "o4", "OpenAI o4 reasoning", 200000, 100000},
-		{"o3", "o3", "OpenAI o3 reasoning", 200000, 100000},
-		{"codex-mini-latest", "Codex Mini", "Codex mini (latest)", 200000, 100000},
-	}
-	out := make([]map[string]interface{}, 0, len(specs))
-	for _, s := range specs {
-		m := buildModelInfo(s.id, "openai-codex", true)
-		m["name"] = s.name
-		m["description"] = s.desc
-		m["token_limits"] = map[string]interface{}{
-			"maxInputTokens":  s.maxIn,
-			"maxOutputTokens": s.maxOut,
+	models := codexSubscriptionModels()
+	out := make([]map[string]interface{}, 0, len(models))
+	for _, m := range models {
+		entry := buildModelInfo(m.ModelId, "openai-codex", true)
+		entry["name"] = m.ModelName
+		entry["description"] = m.Description
+		if m.TokenLimits != nil {
+			entry["token_limits"] = map[string]interface{}{
+				"maxInputTokens":  m.TokenLimits.MaxInputTokens,
+				"maxOutputTokens": m.TokenLimits.MaxOutputTokens,
+			}
 		}
-		out = append(out, m)
+		out = append(out, entry)
 	}
 	return out
 }

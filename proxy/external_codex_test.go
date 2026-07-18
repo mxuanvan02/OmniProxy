@@ -15,9 +15,17 @@ func TestCodexSubscriptionModels(t *testing.T) {
 		t.Fatal("codexSubscriptionModels returned empty list")
 	}
 	want := map[string]bool{
+		"gpt-5.6":           true,
 		"gpt-5.6-sol":       true,
+		"gpt-5.6-terra":     true,
+		"gpt-5.6-luna":      true,
+		"gpt-5.5":           true,
+		"gpt-5.4":           true,
+		"gpt-5.4-mini":      true,
 		"gpt-5.1":           true,
+		"gpt-5":             true,
 		"o4":                true,
+		"o3":                true,
 		"codex-mini-latest": true,
 	}
 	seen := map[string]bool{}
