@@ -357,12 +357,10 @@ func kiroPayloadToCodexResponsesRequest(payload *KiroPayload, account *config.Ac
 	}
 
 	if payload.InferenceConfig != nil {
-		if payload.InferenceConfig.Temperature > 0 {
-			body["temperature"] = payload.InferenceConfig.Temperature
-		}
-		if payload.InferenceConfig.TopP > 0 {
-			body["top_p"] = payload.InferenceConfig.TopP
-		}
+		// NOTE: temperature and top_p are intentionally NOT forwarded
+		// to the ChatGPT backend. The Codex/ChatGPT responses API rejects
+		// these parameters with HTTP 400 "Unsupported parameter: temperature"
+		// for GPT-5.x reasoning models. Only reasoning.effort is supported.
 		if payload.InferenceConfig.ReasoningEffort != "" {
 			body["reasoning"] = map[string]string{"effort": payload.InferenceConfig.ReasoningEffort}
 		}
