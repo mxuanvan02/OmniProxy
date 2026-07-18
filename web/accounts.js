@@ -204,6 +204,29 @@ let testModalRunning = false;
     var labels = { 'free': 'Free', 'plus': 'Plus', 'team': 'Team', 'pro': 'Pro' };
     return labels[plan] || plan;
   }
+  // formatCodexAccountLabel returns a friendly, identifiable label for a
+  // freshly imported/logged-in Codex account. Preference order:
+  //   name + email + plan  →  email + plan  →  name + plan  →  chatgptAccountId
+  function formatCodexAccountLabel(acc) {
+    if (!acc) return '';
+    var parts = [];
+    var name = acc.name || acc.nickname || '';
+    var email = acc.email || '';
+    var plan = acc.planType ? '[' + formatCodexPlan(acc.planType) + ']' : '';
+    if (name && email) {
+      parts.push(name, email);
+    } else if (email) {
+      parts.push(email);
+    } else if (name) {
+      parts.push(name);
+    } else if (acc.chatgptAccountId) {
+      parts.push('codex-' + String(acc.chatgptAccountId).slice(0, 8));
+    } else if (acc.id) {
+      parts.push(acc.id.slice(0, 12));
+    }
+    if (plan) parts.push(plan);
+    return parts.join(' ');
+  }
   function formatUsageBar(pct) {
     if (pct == null || pct === 0) return '-';
     var cls = pct >= 90 ? 'critical' : pct >= 70 ? 'warning' : 'ok';
@@ -1606,7 +1629,7 @@ let testModalRunning = false;
         if (d.success) {
           closeModal();
           loadAccounts(); loadStats();
-          toastPrimary(t('codex.importSuccess') + ': ' + (d.account?.email || d.account?.id));
+          toastPrimary(t('codex.importSuccess') + ': ' + formatCodexAccountLabel(d.account));
           autoRefreshNewAccount(d.account?.id);
         }
       } catch (e) {
@@ -1652,7 +1675,7 @@ let testModalRunning = false;
       const d = await res.json();
       if (d.success) {
         closeModal(); loadAccounts(); loadStats();
-        toastPrimary(t('codex.importSuccess') + ': ' + (d.account?.chatgptAccountId || d.account?.id));
+        toastPrimary(t('codex.importSuccess') + ': ' + formatCodexAccountLabel(d.account));
         autoRefreshNewAccount(d.account?.id);
       } else toastError(d.error || t('common.failed'));
     } catch (e) {
@@ -1761,6 +1784,18 @@ let testModalRunning = false;
         const skipped = d.skippedCount || 0;
         let msg = t('ninerouter.importDone') + ': ' + ok + ' imported';
         if (skipped > 0) msg += ', ' + skipped + ' skipped';
+        // List imported account names so the user can identify them
+        const imported = (d.imported || []).filter(x => x.status === 'imported');
+        if (imported.length > 0) {
+          var names = imported.map(function(x) {
+            var label = x.name || x.email || '';
+            if (x.planType) label += ' [' + formatCodexPlan(x.planType) + ']';
+            return label || (x.source === 'codex' ? 'codex-' + (x.accountId || '').slice(0,8) : x.email);
+          }).filter(Boolean);
+          if (names.length > 0) {
+            msg += ' — ' + names.join(', ');
+          }
+        }
         // Surface any per-account errors
         const errors = (d.imported || []).filter(x => x.status === 'error');
         if (errors.length > 0) {

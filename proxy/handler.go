@@ -6269,7 +6269,11 @@ func (h *Handler) apiImportCodexTokens(w http.ResponseWriter, r *http.Request) {
 		"success": true,
 		"account": map[string]interface{}{
 			"id":                account.ID,
+			"email":             account.Email,
+			"nickname":          account.Nickname,
 			"chatgptAccountId":  account.ChatGPTAccountID,
+			"planType":          jwtInfo.PlanType,
+			"name":              jwtInfo.Name,
 			"expiresAt":         account.ExpiresAt,
 		},
 	})
@@ -6340,6 +6344,7 @@ func (h *Handler) apiImportFrom9Router(w http.ResponseWriter, r *http.Request) {
 		Name      string `json:"name"`
 		AccountID string `json:"accountId,omitempty"`
 		Email     string `json:"email,omitempty"`
+		PlanType  string `json:"planType,omitempty"`
 		Status    string `json:"status"` // "imported" | "skipped" | "error"
 		Error     string `json:"error,omitempty"`
 	}
@@ -6368,6 +6373,7 @@ func (h *Handler) apiImportFrom9Router(w http.ResponseWriter, r *http.Request) {
 				Name:      c.Name,
 				AccountID: acc.ChatGPTAccountID,
 				Email:     acc.Email,
+				PlanType:  acc.CodexPlanType,
 				Status:    "imported",
 			})
 		}
