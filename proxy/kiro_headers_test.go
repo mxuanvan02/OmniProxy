@@ -2,7 +2,7 @@ package proxy
 
 import (
 	"strings"
-	"superkiro/config"
+	"omniproxy/config"
 	"testing"
 )
 

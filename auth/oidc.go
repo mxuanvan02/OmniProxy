@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"superkiro/config"
+	"omniproxy/config"
 	"net/http"
 	"net/url"
 	"strings"
@@ -475,6 +475,18 @@ func RefreshToken(account *config.Account) (string, string, int64, string, strin
 			return at, rt, exp, "", "", "", nil
 		}
 		// Fall through to social fallback as last resort.
+	}
+
+	// Codex (ChatGPT subscription) refresh against OpenAI's auth.openai.com
+	// token endpoint. Completely separate from Kiro/AWS auth — must not fall
+	// through to OIDC/social endpoints (those would 400 on an OpenAI refresh
+	// token and could burn the rotation cache).
+	if account.AuthMethod == "codex" {
+		tokens, err := RefreshCodexToken(account.RefreshToken)
+		if err != nil {
+			return "", "", 0, "", "", "", err
+		}
+		return tokens.AccessToken, tokens.RefreshToken, tokens.ExpiresAt, "", "", "", nil
 	}
 
 	if account.AuthMethod == "social" {

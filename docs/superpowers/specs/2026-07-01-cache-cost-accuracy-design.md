@@ -8,7 +8,7 @@
 
 ## 1. Bối cảnh & Vấn đề
 
-SuperKiro là proxy đứng trước Kiro (AWS CodeWhisperer/Smithy), phục vụ client định dạng Claude/OpenAI. Hiện tại:
+OmniProxy là proxy đứng trước Kiro (AWS CodeWhisperer/Smithy), phục vụ client định dạng Claude/OpenAI. Hiện tại:
 
 - `promptCacheTracker` (`proxy/cache_tracker.go`) **mô phỏng** con số cache bằng fingerprint SHA-256 rồi đắp vào field `usage` trả client. Con số này **không liên quan** tới chi phí thật Kiro tính.
 - Chi phí thật đến từ `meteringEvent.usage` (`proxy/kiro.go:604-607`) — **do Kiro upstream quyết**, proxy chỉ đọc.

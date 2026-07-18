@@ -2,7 +2,7 @@ package proxy
 
 import (
 	"io"
-	"superkiro/config"
+	"omniproxy/config"
 	"net/http"
 	"path/filepath"
 	"strings"

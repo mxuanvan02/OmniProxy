@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"superkiro/config"
-	accountpool "superkiro/pool"
+	"omniproxy/config"
+	accountpool "omniproxy/pool"
 	"testing"
 	"time"
 )

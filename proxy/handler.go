@@ -11,10 +11,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"superkiro/auth"
-	"superkiro/config"
-	"superkiro/logger"
-	"superkiro/pool"
+	"omniproxy/auth"
+	"omniproxy/config"
+	"omniproxy/logger"
+	"omniproxy/pool"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -87,10 +87,11 @@ func getCliToolConfigured() map[string]bool {
 	return out
 }
 
-// isSuperKiroActiveProvider checks whether the ACTIVE (uncommented)
-// model_provider in a TOML config file is set to "superkiro".
+// isOmniProxyActiveProvider checks whether the ACTIVE (uncommented)
+// model_provider in a TOML config file is set to "omniproxy" (new name)
+// or "superkiro" (legacy name for backward compatibility).
 // A line starting with # is a comment and is ignored.
-func isSuperKiroActiveProvider(data []byte) bool {
+func isOmniProxyActiveProvider(data []byte) bool {
 	for _, line := range strings.Split(string(data), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || trimmed[0] == '#' {
@@ -106,7 +107,7 @@ func isSuperKiroActiveProvider(data []byte) bool {
 		if !strings.Contains(strings.ToLower(trimmed), "model_provider") {
 			continue
 		}
-		if strings.Contains(trimmed, `"superkiro"`) {
+		if strings.Contains(trimmed, `"omniproxy"`) || strings.Contains(trimmed, `"superkiro"`) {
 			return true
 		}
 	}
@@ -215,10 +216,10 @@ func backupToolConfig(toolID string) string {
 		if err != nil {
 			continue
 		}
-		if isSuperKiroActiveProvider(data) {
+		if isOmniProxyActiveProvider(data) {
 			continue
 		}
-		backupPath := fmt.Sprintf("%s.superkiro.bak.%d", p, time.Now().Unix())
+		backupPath := fmt.Sprintf("%s.omniproxy.bak.%d", p, time.Now().Unix())
 		if err := os.WriteFile(backupPath, data, 0644); err != nil {
 			continue
 		}
@@ -231,7 +232,7 @@ func backupToolConfig(toolID string) string {
 
 type ToolStatus struct {
 	Installed    bool `json:"installed"`
-	HasSuperKiro bool `json:"hasSuperKiro"`
+	HasOmniProxy bool `json:"hasOmniProxy"`
 }
 
 // getToolConfigPaths returns config file paths for a tool (shared across checks)
@@ -295,7 +296,7 @@ func checkToolInstalled(toolID string) bool {
 	}
 }
 
-func checkToolHasSuperKiro(toolID string) bool {
+func checkToolHasOmniProxy(toolID string) bool {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return false
@@ -335,7 +336,7 @@ func checkToolHasSuperKiro(toolID string) bool {
 			return false
 		}
 		model, _ := cfg["model"].(string)
-		if strings.HasPrefix(model, "superkiro/") {
+		if strings.HasPrefix(model, "omniproxy/") {
 			return true
 		}
 		return false
@@ -349,7 +350,8 @@ func checkToolHasSuperKiro(toolID string) bool {
 		configExists = true
 		// Only the active model_provider matters — the section may exist
 		// but if another provider is selected the tool isn't connected to us
-		return strings.Contains(string(data), "model_provider = \"superkiro\"")
+		return strings.Contains(string(data), "model_provider = \"omniproxy\"") ||
+			strings.Contains(string(data), "model_provider = \"superkiro\"")
 
 	case "cline":
 		path := filepath.Join(homeDir, ".cline", "data", "globalState.json")
@@ -403,6 +405,7 @@ func checkToolHasSuperKiro(toolID string) bool {
 		}
 		configExists = true
 		return strings.Contains(string(data), "[providers.9router]") ||
+			strings.Contains(strings.ToLower(string(data)), "omniproxy") ||
 			strings.Contains(strings.ToLower(string(data)), "superkiro")
 
 	case "hermes":
@@ -412,7 +415,8 @@ func checkToolHasSuperKiro(toolID string) bool {
 			break
 		}
 		configExists = true
-		return strings.Contains(string(data), "superkiro:")
+		return strings.Contains(string(data), "omniproxy:") ||
+			strings.Contains(string(data), "superkiro:")
 
 	case "droid":
 		path := filepath.Join(homeDir, ".factory", "settings.json")
@@ -443,7 +447,8 @@ func checkToolHasSuperKiro(toolID string) bool {
 			break
 		}
 		configExists = true
-		return strings.Contains(string(data), "\"superkiro\"")
+		return strings.Contains(string(data), "\"omniproxy\"") ||
+			strings.Contains(string(data), "\"superkiro\"")
 
 	case "copilot":
 		path := filepath.Join(homeDir, ".config", "Code", "User", "chatLanguageModels.json")
@@ -457,7 +462,7 @@ func checkToolHasSuperKiro(toolID string) bool {
 			return false
 		}
 		for _, e := range entries {
-			if title, _ := e["title"].(string); strings.EqualFold(title, "SuperKiro") {
+			if title, _ := e["title"].(string); (strings.EqualFold(title, "OmniProxy") || strings.EqualFold(title, "SuperKiro")) {
 				return true
 			}
 		}
@@ -490,7 +495,7 @@ func getCliToolsStatus() map[string]ToolStatus {
 	for _, id := range ids {
 		out[id] = ToolStatus{
 			Installed:    checkToolInstalled(id),
-			HasSuperKiro: checkToolHasSuperKiro(id),
+			HasOmniProxy: checkToolHasOmniProxy(id),
 		}
 	}
 	return out
@@ -792,6 +797,13 @@ func (h *Handler) refreshAllAccounts() {
 				account.ProfileArn = profileArn
 				config.UpdateAccountProfileArn(account.ID, profileArn)
 			}
+			// Codex accounts: re-extract chatgpt_account_id from the new
+			// access-token JWT (it may rotate when OpenAI re-issues the
+			// user's account) and persist it.
+			if account.AuthMethod == codexAuthMethod {
+				account.AccessToken = newAccessToken
+				refreshCodexAccountID(account)
+			}
 			// Persist re-registered OIDC client credentials so next refresh cycle uses them.
 			if newClientID != "" && newClientSecret != "" {
 				account.ClientID = newClientID
@@ -809,8 +821,19 @@ func (h *Handler) refreshAllAccounts() {
 			}
 		}
 
-		// refresh account info (skip for external IdP — their tokens cannot call CodeWhisperer APIs)
-		if !(account.AuthMethod == "external_idp") && (account.BanStatus == "" || account.BanStatus == "ACTIVE") {
+		// Codex accounts: backfill JWT profile (email, name, plan_type)
+		// if missing. This runs on every refresh cycle but only persists
+		// when the fields are empty or changed — covers accounts imported
+		// before the profile extraction was added. Must run BEFORE the
+		// Kiro RefreshAccountInfo block, which would `continue` on error
+		// for Codex accounts (they can't call CodeWhisperer APIs).
+		if account.AuthMethod == codexAuthMethod && account.AccessToken != "" {
+			refreshCodexAccountID(account)
+		}
+
+		// refresh account info (skip for external IdP and Codex — their
+		// tokens cannot call CodeWhisperer usage APIs).
+		if account.AuthMethod != "external_idp" && account.AuthMethod != codexAuthMethod && (account.BanStatus == "" || account.BanStatus == "ACTIVE") {
 			info, err := RefreshAccountInfo(account)
 			if err != nil {
 				logger.Warnf("[BackgroundRefresh] Failed to refresh %s: %v", account.Email, err)
@@ -954,11 +977,24 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 // handleStats returns stats (requires API Key auth)
 func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 	var kiroUsageCurrent, kiroUsageLimit, trialUsageCurrent, trialUsageLimit float64
+	var codexAccounts, codexEnabled int
+	var codexPrimaryPctSum, codexSecondaryPctSum int
+	var codexCreditsBalance int
 	for _, a := range h.pool.GetAllAccounts() {
-		kiroUsageCurrent += a.UsageCurrent
-		kiroUsageLimit += a.UsageLimit
-		trialUsageCurrent += a.TrialUsageCurrent
-		trialUsageLimit += a.TrialUsageLimit
+		if isCodexAccount(&a) {
+			codexAccounts++
+			if a.Enabled {
+				codexEnabled++
+				codexPrimaryPctSum += a.CodexPrimaryUsedPercent
+				codexSecondaryPctSum += a.CodexSecondaryUsedPercent
+				codexCreditsBalance += a.CodexCreditsBalance
+			}
+		} else {
+			kiroUsageCurrent += a.UsageCurrent
+			kiroUsageLimit += a.UsageLimit
+			trialUsageCurrent += a.TrialUsageCurrent
+			trialUsageLimit += a.TrialUsageLimit
+		}
 	}
 	h.modelsCacheMu.RLock()
 	cachedModels := h.cachedModels
@@ -968,6 +1004,11 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 		if m.ModelId != "" && m.ModelId != "auto" {
 			modelIds = append(modelIds, m.ModelId)
 		}
+	}
+	// Include Codex models in the count when enabled.
+	codexModelCount := 0
+	if codexEnabled > 0 {
+		codexModelCount = len(codexSubscriptionModelsList())
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -984,9 +1025,24 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 		"kiroUsageLimit":    kiroUsageLimit,
 		"trialUsageCurrent": trialUsageCurrent,
 		"trialUsageLimit":   trialUsageLimit,
-		"availableModels":   len(modelIds),
-		"modelIds":          modelIds,
-		"uptime":            time.Now().Unix() - h.startTime,
+		"codexAccounts":     codexAccounts,
+		"codexEnabled":      codexEnabled,
+		"codexPrimaryUsedAvg": func() int {
+			if codexEnabled == 0 {
+				return 0
+			}
+			return codexPrimaryPctSum / codexEnabled
+		}(),
+		"codexSecondaryUsedAvg": func() int {
+			if codexEnabled == 0 {
+				return 0
+			}
+			return codexSecondaryPctSum / codexEnabled
+		}(),
+		"codexCreditsBalance": codexCreditsBalance,
+		"availableModels":    len(modelIds) + codexModelCount,
+		"modelIds":           modelIds,
+		"uptime":             time.Now().Unix() - h.startTime,
 	})
 }
 
@@ -1033,6 +1089,15 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 			models = append(models, buildModelInfo(id+thinkingSuffix, "anthropic", supportsImage))
 		} else {
 			models = append(models, buildModelInfo(id, "kiro-proxy", supportsImage))
+		}
+	}
+
+	// Append Codex subscription models when at least one Codex account
+	// is enabled. These are served by the /v1/responses backend and are
+	// only reachable through a ChatGPT subscription login.
+	if hasEnabledCodexAccount() {
+		for _, m := range codexSubscriptionModelsList() {
+			models = append(models, m)
 		}
 	}
 
@@ -1182,6 +1247,46 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 	}
 }
 
+// hasEnabledCodexAccount returns true if at least one enabled Codex
+// account exists in the config. Used to decide whether to advertise
+// Codex subscription models in /v1/models.
+func hasEnabledCodexAccount() bool {
+	for _, a := range config.GetEnabledAccounts() {
+		if isCodexAccount(&a) {
+			return true
+		}
+	}
+	return false
+}
+
+// codexSubscriptionModelsList returns the Codex subscription model list
+// in the /v1/models response format (map[string]interface{}).
+func codexSubscriptionModelsList() []map[string]interface{} {
+	specs := []struct {
+		id, name, desc string
+		maxIn, maxOut  int
+	}{
+		{"gpt-5.6-sol", "GPT-5.6 Sol", "Codex reasoning model (default)", 300000, 128000},
+		{"gpt-5.1", "GPT-5.1", "Codex fast model", 272000, 128000},
+		{"gpt-5", "GPT-5", "GPT-5 base", 272000, 128000},
+		{"o4", "o4", "OpenAI o4 reasoning", 200000, 100000},
+		{"o3", "o3", "OpenAI o3 reasoning", 200000, 100000},
+		{"codex-mini-latest", "Codex Mini", "Codex mini (latest)", 200000, 100000},
+	}
+	out := make([]map[string]interface{}, 0, len(specs))
+	for _, s := range specs {
+		m := buildModelInfo(s.id, "openai-codex", true)
+		m["name"] = s.name
+		m["description"] = s.desc
+		m["token_limits"] = map[string]interface{}{
+			"maxInputTokens":  s.maxIn,
+			"maxOutputTokens": s.maxOut,
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 // refreshModelsCache fetches model list from Kiro API and caches it
 func (h *Handler) refreshModelsCache() {
 	accounts := config.GetEnabledAccounts()
@@ -1202,7 +1307,9 @@ func (h *Handler) refreshModelsCache() {
 		// not CodeWhisperer's ListAvailableModels. Calling ListAvailableModels with
 		// their access token fails (DNS/auth) and triggers handleAccountFailure,
 		// which can wrongly mark the account BANNED.
-		if isExternalAccount(account) {
+		// Codex accounts also use a non-Kiro backend (OpenAI /v1/responses);
+		// their model list is fetched separately via fetchCodexModels.
+		if isExternalAccount(account) || isCodexAccount(account) {
 			continue
 		}
 		if err := h.ensureValidToken(account); err != nil {
@@ -1238,6 +1345,24 @@ func (h *Handler) refreshModelsCache() {
 // fetchAndCacheAccountModels fetches and writes model cache for a single account.
 // Also updates the pool routing cache and global aggregated model list.
 func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
+	// Codex accounts expose a fixed set of subscription-tier models
+	// (gpt-5.6-sol, gpt-5.1, o4, etc.) — no /v1/models endpoint to poll.
+	// Seed the cache with the canonical Codex model list so routing picks
+	// them up.
+	if isCodexAccount(account) {
+		models := codexSubscriptionModels()
+		modelIDs := make([]string, 0, len(models))
+		for _, m := range models {
+			modelIDs = append(modelIDs, m.ModelId)
+		}
+		h.pool.SetModelList(account.ID, modelIDs)
+		h.modelsCacheMu.Lock()
+		h.cachedModels = mergeUniqueModels(h.cachedModels, models)
+		h.modelsCacheTime = time.Now().Unix()
+		h.modelsCacheMu.Unlock()
+		logger.Infof("[ModelsCache] Seeded %d Codex subscription models for %s", len(models), account.Email)
+		return nil
+	}
 	// External OpenAI-compatible providers expose /v1/models, not Kiro's
 	// ListAvailableModels. Use the dedicated fetcher so their model list is
 	// real (and routing picks them correctly for requested model IDs).
@@ -1964,17 +2089,24 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointClaude, model)
-		err := dispatchChat(account, payload, callback)
+		// Codex accounts emit per-token deltas from /v1/responses; wrap the
+		// callback with downstream coalescing so we don't json.Marshal +
+		// Flush per token (cuts syscall count ~50-100x for reasoning models).
+		effectiveCallback := callback
+		if isCodexAccount(account) {
+			effectiveCallback = newCodexCoalescer(callback)
+		}
+		err := dispatchChat(account, payload, effectiveCallback)
 		if err != nil {
 			lastErr = err
 			// Transient upstream errors (5xx, overload, timeout) are retried
 			// in-place with backoff before rotating to a different account.
-			if h.tryTransientRetry(account, payload, callback, err) {
+			if h.tryTransientRetry(account, payload, effectiveCallback, err) {
 				h.pool.RecordSuccess(account.ID, model)
 				goto skipAccountHandling
 			}
 			//  try refresh+retry before rotating accounts
-			if h.tryRefreshAndRetry(account, payload, callback, err) {
+			if h.tryRefreshAndRetry(account, payload, effectiveCallback, err) {
 				h.pool.RecordSuccess(account.ID, model)
 				// Retry succeeded, proceed to success path
 				goto skipAccountHandling
@@ -2795,17 +2927,23 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointOpenAI, model)
-		err := dispatchChat(account, payload, callback)
+		// Codex accounts: wrap callback with downstream coalescing to cut
+		// per-token json.Marshal + Flush syscalls ~50-100x.
+		effectiveCallback := callback
+		if isCodexAccount(account) {
+			effectiveCallback = newCodexCoalescer(callback)
+		}
+		err := dispatchChat(account, payload, effectiveCallback)
 		if err != nil {
 			lastErr = err
 			// Transient upstream errors (5xx, overload, timeout) are retried
 			// in-place with backoff before rotating to a different account.
-			if h.tryTransientRetry(account, payload, callback, err) {
+			if h.tryTransientRetry(account, payload, effectiveCallback, err) {
 				h.pool.RecordSuccess(account.ID, model)
 				goto skipOpenAIStreamHandling
 			}
 			//  try refresh+retry before rotating accounts
-			if h.tryRefreshAndRetry(account, payload, callback, err) {
+			if h.tryRefreshAndRetry(account, payload, effectiveCallback, err) {
 				h.pool.RecordSuccess(account.ID, model)
 				goto skipOpenAIStreamHandling
 			}
@@ -3025,6 +3163,7 @@ func (h *Handler) tryRefreshAndRetry(account *config.Account, payload *KiroPaylo
 	}
 	// External OpenAI-compatible providers have no refresh token; a 401 means
 	// the configured API key is invalid. Don't attempt Kiro-style refresh.
+	// Codex accounts DO have an OAuth refresh token, so they fall through.
 	if isExternalAccount(account) {
 		return false
 	}
@@ -3183,6 +3322,13 @@ func (h *Handler) ensureValidToken(account *config.Account) error {
 	// persist
 	config.UpdateAccountToken(account.ID, accessToken, refreshToken, expiresAt)
 
+	// Codex accounts: re-extract chatgpt_account_id from the refreshed
+	// access-token JWT and persist it (it may rotate on re-issue).
+	if account.AuthMethod == codexAuthMethod {
+		account.AccessToken = accessToken
+		refreshCodexAccountID(account)
+	}
+
 	return nil
 }
 
@@ -3283,6 +3429,18 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiImportKiroApiKey(w, r)
 	case path == "/auth/external-provider" && r.Method == "POST":
 		h.apiImportExternalProvider(w, r)
+	case path == "/auth/codex/login" && r.Method == "POST":
+		h.apiCodexLoginStart(w, r)
+	case path == "/auth/codex/poll" && r.Method == "POST":
+		h.apiCodexLoginPoll(w, r)
+	case path == "/auth/codex/cancel" && r.Method == "POST":
+		h.apiCodexLoginCancel(w, r)
+	case path == "/auth/codex-import" && r.Method == "POST":
+		h.apiImportCodexTokens(w, r)
+	case path == "/auth/import-9router" && r.Method == "POST":
+		h.apiImportFrom9Router(w, r)
+	case path == "/auth/import-9router/preview" && r.Method == "POST":
+		h.apiPreview9Router(w, r)
 	case path == "/auth/kiro-cli-register" && r.Method == "POST":
 		h.apiRegisterKiroCli(w, r)
 	case path == "/auth/sso-cache" && r.Method == "POST":
@@ -3530,19 +3688,19 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 			},
 			"models": modelsMap,
 		}
-		current["provider"] = map[string]interface{}{"superkiro": provider}
+		current["provider"] = map[string]interface{}{"omniproxy": provider}
 		if current["model"] != nil {
 			delete(current, "model")
 		}
 		if activeM != "" {
-			current["model"] = "superkiro/" + activeM
+			current["model"] = "omniproxy/" + activeM
 		}
 		if subM != "" {
 			current["agent"] = map[string]interface{}{
 				"explorer": map[string]interface{}{
 					"description": "Fast explorer subagent for codebase exploration",
 					"mode":        "subagent",
-					"model":       "superkiro/" + subM,
+					"model":       "omniproxy/" + subM,
 				},
 			}
 		}
@@ -3717,7 +3875,7 @@ requires_api_key = true
 		if data, err := os.ReadFile(configPath); err == nil {
 			yamlContent = string(data)
 		}
-		providerBlock := fmt.Sprintf(`  superkiro:
+		providerBlock := fmt.Sprintf(`  omniproxy:
     base_url: %s
     api_key: %s
     api_mode: openai
@@ -3728,11 +3886,11 @@ requires_api_key = true
 		if strings.TrimSpace(yamlContent) == "" {
 			yamlContent = fmt.Sprintf(`model:
   default: "%s"
-  provider: "superkiro"
+  provider: "omniproxy"
   base_url: "%s"
 `, hermesModel, hermesBPURL)
 		}
-		yamlContent = upsertYAMLProviderBlock(yamlContent, "superkiro", providerBlock)
+		yamlContent = upsertYAMLProviderBlock(yamlContent, "omniproxy", providerBlock)
 		if err := os.WriteFile(filepath.Join(hermesDir, "config.yaml"), []byte(yamlContent), 0644); err != nil {
 			http.Error(w, `{"error":"failed to write config.yaml"}`, 500)
 			return
@@ -3832,7 +3990,7 @@ requires_api_key = true
 		if !ok {
 			providers = map[string]interface{}{}
 		}
-		providers["superkiro"] = map[string]interface{}{
+		providers["omniproxy"] = map[string]interface{}{
 			"baseUrl": ocBPURL,
 			"apiKey":  req.APIKey,
 			"api":     "openai-completions",
@@ -3848,19 +4006,19 @@ requires_api_key = true
 		}
 		if _, ok := currentOC["agents"].(map[string]interface{}); !ok {
 			agentsList := []map[string]interface{}{
-				{"id": "default", "model": "superkiro/" + ocModel, "primary": true},
+				{"id": "default", "model": "omniproxy/" + ocModel, "primary": true},
 			}
 			for agID, agModel := range agentModels {
 				agentsList = append(agentsList, map[string]interface{}{
 					"id":    agID,
-					"model": "superkiro/" + agModel,
+					"model": "omniproxy/" + agModel,
 				})
 			}
 			currentOC["agents"] = map[string]interface{}{
 				"defaults": map[string]interface{}{
-					"model": map[string]string{"primary": "superkiro/" + ocModel},
+					"model": map[string]string{"primary": "omniproxy/" + ocModel},
 					"models": map[string]interface{}{
-						"superkiro/" + ocModel: map[string]interface{}{},
+						"omniproxy/" + ocModel: map[string]interface{}{},
 					},
 				},
 				"list": agentsList,
@@ -4068,22 +4226,27 @@ func readCliToolSettingsFromFile(toolID string) *CliToolSettings {
 		var models []string
 		var subagentModel string
 		if providers != nil {
-			if p, _ := providers["superkiro"].(map[string]interface{}); p != nil {
-				if opts, _ := p["options"].(map[string]interface{}); opts != nil {
-					baseUrl, _ = opts["baseURL"].(string)
-					apiKey, _ = opts["apiKey"].(string)
-				}
-				if modelsMap, _ := p["models"].(map[string]interface{}); modelsMap != nil {
-					for name := range modelsMap {
-						models = append(models, name)
-					}
+		// Check both new "omniproxy" and legacy "superkiro" provider keys.
+		p, _ := providers["omniproxy"].(map[string]interface{})
+		if p == nil {
+			p, _ = providers["superkiro"].(map[string]interface{})
+		}
+		if p != nil {
+			if opts, _ := p["options"].(map[string]interface{}); opts != nil {
+				baseUrl, _ = opts["baseURL"].(string)
+				apiKey, _ = opts["apiKey"].(string)
+			}
+			if modelsMap, _ := p["models"].(map[string]interface{}); modelsMap != nil {
+				for name := range modelsMap {
+					models = append(models, name)
 				}
 			}
 		}
+	}
 		if agent, _ := cfg["agent"].(map[string]interface{}); agent != nil {
 			if explorer, _ := agent["explorer"].(map[string]interface{}); explorer != nil {
 				if m, _ := explorer["model"].(string); m != "" {
-					subagentModel = strings.TrimPrefix(m, "superkiro/")
+					subagentModel = strings.TrimPrefix(m, "omniproxy/")
 				}
 			}
 		}
@@ -4091,7 +4254,7 @@ func readCliToolSettingsFromFile(toolID string) *CliToolSettings {
 			BaseURL:       baseUrl,
 			APIKey:        apiKey,
 			Models:        models,
-			ActiveModel:   strings.TrimPrefix(activeModel, "superkiro/"),
+			ActiveModel:   strings.TrimPrefix(activeModel, "omniproxy/"),
 			SubagentModel: subagentModel,
 			Config:        raw,
 		}
@@ -4349,7 +4512,12 @@ func readCliToolSettingsFromFile(toolID string) *CliToolSettings {
 		var agentModels map[string]string
 		if modelsSec != nil {
 			if providers, _ := modelsSec["providers"].(map[string]interface{}); providers != nil {
-				if p, _ := providers["superkiro"].(map[string]interface{}); p != nil {
+				// Check both new "omniproxy" and legacy "superkiro" keys.
+				p, _ := providers["omniproxy"].(map[string]interface{})
+				if p == nil {
+					p, _ = providers["superkiro"].(map[string]interface{})
+				}
+				if p != nil {
 					baseUrl, _ = p["baseUrl"].(string)
 					apiKey, _ = p["apiKey"].(string)
 					if ms, _ := p["models"].([]interface{}); len(ms) > 0 {
@@ -4378,7 +4546,7 @@ func readCliToolSettingsFromFile(toolID string) *CliToolSettings {
 					if am, _ := a.(map[string]interface{}); am != nil {
 						if id, _ := am["id"].(string); id != "" {
 							if m, _ := am["model"].(string); m != "" {
-								m = strings.TrimPrefix(m, "superkiro/")
+								m = strings.TrimPrefix(m, "omniproxy/")
 								agentModels[id] = strings.TrimPrefix(m, "9router/")
 							}
 						}
@@ -4407,7 +4575,7 @@ func readCliToolSettingsFromFile(toolID string) *CliToolSettings {
 		}
 		for _, e := range entries {
 			title, _ := e["title"].(string)
-			if !strings.EqualFold(title, "SuperKiro") {
+			if !strings.EqualFold(title, "OmniProxy") && !strings.EqualFold(title, "SuperKiro") {
 				continue
 			}
 			baseUrl, _ := e["baseUrl"].(string)
@@ -4650,7 +4818,7 @@ func (h *Handler) apiMitmSaveAliases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	homeDir, _ := os.UserHomeDir()
-	mitmDir := filepath.Join(homeDir, ".superkiro", "mitm")
+	mitmDir := filepath.Join(homeDir, ".omniproxy", "mitm")
 	os.MkdirAll(mitmDir, 0755)
 	aliasesPath := filepath.Join(mitmDir, "aliases.json")
 
@@ -4749,7 +4917,7 @@ func (h *Handler) apiCopilotSettings(w http.ResponseWriter, r *http.Request) {
 			if json.Unmarshal(data, &models) == nil {
 				cfg.Models = models
 				for _, m := range models {
-					if title, _ := m["title"].(string); strings.Contains(strings.ToLower(title), "superkiro") {
+					if title, _ := m["title"].(string); strings.Contains(strings.ToLower(title), "superkiro") || strings.Contains(strings.ToLower(title), "omniproxy") {
 						cfg.Has9Router = true
 						break
 					}
@@ -4784,7 +4952,7 @@ func (h *Handler) apiCopilotSettings(w http.ResponseWriter, r *http.Request) {
 		var kept []map[string]interface{}
 		for _, m := range existing {
 			title, _ := m["title"].(string)
-			if strings.Contains(strings.ToLower(title), "superkiro") {
+			if strings.Contains(strings.ToLower(title), "superkiro") || strings.Contains(strings.ToLower(title), "omniproxy") {
 				continue
 			}
 			kept = append(kept, m)
@@ -4796,7 +4964,7 @@ func (h *Handler) apiCopilotSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, m := range modelsList {
 			kept = append(kept, map[string]interface{}{
-				"title":    "SuperKiro",
+				"title":    "OmniProxy",
 				"provider": "openai",
 				"model":    m,
 				"apiKey":   req.APIKey,
@@ -4830,7 +4998,7 @@ func (h *Handler) apiCopilotSettings(w http.ResponseWriter, r *http.Request) {
 		var kept []map[string]interface{}
 		for _, m := range existing {
 			title, _ := m["title"].(string)
-			if strings.Contains(strings.ToLower(title), "superkiro") {
+			if strings.Contains(strings.ToLower(title), "superkiro") || strings.Contains(strings.ToLower(title), "omniproxy") {
 				continue
 			}
 			kept = append(kept, m)
@@ -4909,6 +5077,19 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"extKeyMasked":        a.ExtKeyMasked,
 			"extLastUsedAt":       a.ExtLastUsedAt,
 			"extCreditsCheckedAt": a.ExtCreditsCheckedAt,
+			"chatgptAccountId":          a.ChatGPTAccountID,
+			"codexPlanType":             a.CodexPlanType,
+			"codexActiveLimit":          a.CodexActiveLimit,
+			"codexEmail":                a.CodexEmail,
+			"codexName":                 a.CodexName,
+			"codexPrimaryUsedPercent":   a.CodexPrimaryUsedPercent,
+			"codexSecondaryUsedPercent": a.CodexSecondaryUsedPercent,
+			"codexPrimaryWindowMinutes": a.CodexPrimaryWindowMinutes,
+			"codexPrimaryResetAt":       a.CodexPrimaryResetAt,
+			"codexSecondaryResetAt":     a.CodexSecondaryResetAt,
+			"codexCreditsBalance":       a.CodexCreditsBalance,
+			"codexCreditsUnlimited":     a.CodexCreditsUnlimited,
+			"codexUsageCheckedAt":       a.CodexUsageCheckedAt,
 		}
 	}
 	json.NewEncoder(w).Encode(result)
@@ -5914,6 +6095,534 @@ func (h *Handler) apiSocialLoginPoll(w http.ResponseWriter, r *http.Request) {
 			"email": account.Email,
 		},
 	})
+}
+
+// ==================== Codex (ChatGPT subscription) OAuth ====================
+
+// apiCodexLoginStart begins a Codex PKCE login flow. Returns the authorize
+// URL the user must open in their browser. The proxy has started a local
+// HTTP server on port 1455 to receive the OAuth callback.
+func (h *Handler) apiCodexLoginStart(w http.ResponseWriter, r *http.Request) {
+	session, err := auth.StartCodexLogin()
+	if err != nil {
+		w.WriteHeader(502)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"authUrl":   session.AuthURL,
+		"expiresIn": int(time.Until(session.ExpiresAt).Seconds()),
+		"provider":  "codex",
+	})
+}
+
+// apiCodexLoginPoll polls the active Codex login session. On success,
+// creates a Codex account in the pool with the access/refresh tokens and
+// chatgpt_account_id extracted from the JWT.
+func (h *Handler) apiCodexLoginPoll(w http.ResponseWriter, r *http.Request) {
+	tokens, err := auth.PollCodexLogin()
+	if err != nil {
+		errMsg := err.Error()
+		if errMsg == "authorization_pending" {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"pending": true,
+				"error":   errMsg,
+			})
+			return
+		}
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": errMsg})
+		return
+	}
+
+	// Extract profile info (email, name, plan_type) from the JWT.
+	jwtInfo := auth.ExtractCodexJWTInfoPublic(tokens.AccessToken)
+
+	// Use the JWT email if available; otherwise fall back to the
+	// chatgpt_account_id prefix as the display name.
+	displayName := "codex-" + tokens.AccountID[:min(8, len(tokens.AccountID))]
+	nickname := "Codex (" + tokens.AccountID + ")"
+	if jwtInfo.Email != "" {
+		displayName = jwtInfo.Email
+	}
+	if jwtInfo.Name != "" {
+		nickname = jwtInfo.Name
+	}
+
+	account := config.Account{
+		ID:               auth.GenerateAccountID(),
+		Email:            displayName,
+		Nickname:         nickname,
+		AuthMethod:       codexAuthMethod,
+		Provider:         "OpenAI Codex",
+		AccessToken:      tokens.AccessToken,
+		RefreshToken:     tokens.RefreshToken,
+		ExpiresAt:        tokens.ExpiresAt,
+		ChatGPTAccountID: tokens.AccountID,
+		Region:           "external",
+		Enabled:          true,
+		MachineId:        config.GenerateMachineId(),
+		CodexEmail:       jwtInfo.Email,
+		CodexName:        jwtInfo.Name,
+		CodexPlanType:    jwtInfo.PlanType,
+	}
+
+	if err := config.AddAccount(account); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	h.pool.Reload()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"account": map[string]interface{}{
+			"id":                account.ID,
+			"email":             account.Email,
+			"chatgptAccountId":  account.ChatGPTAccountID,
+			"planType":          jwtInfo.PlanType,
+			"name":              jwtInfo.Name,
+			"expiresAt":         account.ExpiresAt,
+		},
+	})
+}
+
+// apiCodexLoginCancel tears down any active Codex login session. Useful
+// when the user abandons the browser flow or wants to restart.
+func (h *Handler) apiCodexLoginCancel(w http.ResponseWriter, r *http.Request) {
+	auth.CancelCodexLogin()
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+}
+
+// apiImportCodexTokens lets an operator import a pre-existing Codex
+// auth.json (e.g. from ~/.codex/auth.json on another machine) instead of
+// running the OAuth flow. The access token's JWT is decoded to extract
+// the chatgpt_account_id.
+func (h *Handler) apiImportCodexTokens(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		AccessToken  string `json:"accessToken"`
+		RefreshToken string `json:"refreshToken"`
+		ExpiresAt    int64  `json:"expiresAt"`
+		Nickname     string `json:"nickname"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	if strings.TrimSpace(req.AccessToken) == "" || strings.TrimSpace(req.RefreshToken) == "" {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "accessToken and refreshToken are required"})
+		return
+	}
+
+	accountID := extractCodexAccountIDForImport(req.AccessToken)
+	if accountID == "" {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "access token JWT missing chatgpt_account_id (not a Codex token?)"})
+		return
+	}
+
+	// Extract profile info from JWT
+	jwtInfo := auth.ExtractCodexJWTInfoPublic(strings.TrimSpace(req.AccessToken))
+
+	nickname := strings.TrimSpace(req.Nickname)
+	if nickname == "" {
+		nickname = "Codex (" + accountID + ")"
+		if jwtInfo.Name != "" {
+			nickname = jwtInfo.Name
+		}
+	}
+	displayEmail := "codex-" + accountID[:min(8, len(accountID))]
+	if jwtInfo.Email != "" {
+		displayEmail = jwtInfo.Email
+	}
+
+	account := config.Account{
+		ID:               auth.GenerateAccountID(),
+		Email:            displayEmail,
+		Nickname:         nickname,
+		AuthMethod:       codexAuthMethod,
+		Provider:         "OpenAI Codex",
+		AccessToken:      strings.TrimSpace(req.AccessToken),
+		RefreshToken:     strings.TrimSpace(req.RefreshToken),
+		ExpiresAt:        req.ExpiresAt,
+		ChatGPTAccountID: accountID,
+		Region:           "external",
+		Enabled:          true,
+		MachineId:        config.GenerateMachineId(),
+		CodexEmail:       jwtInfo.Email,
+		CodexName:        jwtInfo.Name,
+		CodexPlanType:    jwtInfo.PlanType,
+	}
+	if account.ExpiresAt == 0 {
+		// Default 1h if caller didn't supply; refresh will fix it up.
+		account.ExpiresAt = time.Now().Unix() + 3600
+	}
+
+	if err := config.AddAccount(account); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	h.pool.Reload()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"account": map[string]interface{}{
+			"id":                account.ID,
+			"chatgptAccountId":  account.ChatGPTAccountID,
+			"expiresAt":         account.ExpiresAt,
+		},
+	})
+}
+
+// ==================== 9router import ====================
+
+// apiPreview9Router reads ~/.9router/db.json and returns a preview of the
+// codex + kiro accounts that would be imported, WITHOUT writing anything.
+// The frontend uses this to show a confirmation modal before committing.
+func (h *Handler) apiPreview9Router(w http.ResponseWriter, r *http.Request) {
+	result, err := auth.ReadNineRouterDB()
+	if err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"path":    result.Path,
+		"codex":   nineRouterAccountsToJSON(result.Codex),
+		"kiro":    nineRouterAccountsToJSON(result.Kiro),
+		"skipped": result.Skipped,
+	})
+}
+
+// apiImportFrom9Router reads ~/.9router/db.json and imports all codex +
+// kiro accounts into OmniProxy's config. Codex accounts are imported
+// directly (their access token is a JWT we can decode for the
+// chatgpt_account_id). Kiro accounts go through token refresh to validate
+// + extract profileArn, mirroring the kiro-cli import path.
+//
+// Request body (all optional):
+//   - importCodex: bool (default true)
+//   - importKiro:  bool (default true)
+//   - refreshKiro: bool (default true — refresh kiro tokens to validate)
+func (h *Handler) apiImportFrom9Router(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ImportCodex *bool `json:"importCodex"`
+		ImportKiro  *bool `json:"importKiro"`
+		RefreshKiro *bool `json:"refreshKiro"`
+	}
+	// Body is optional; ignore decode errors.
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	importCodex := true
+	importKiro := true
+	refreshKiro := true
+	if req.ImportCodex != nil {
+		importCodex = *req.ImportCodex
+	}
+	if req.ImportKiro != nil {
+		importKiro = *req.ImportKiro
+	}
+	if req.RefreshKiro != nil {
+		refreshKiro = *req.RefreshKiro
+	}
+
+	result, err := auth.ReadNineRouterDB()
+	if err != nil {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	type importedAcc struct {
+		Source    string `json:"source"`
+		Name      string `json:"name"`
+		AccountID string `json:"accountId,omitempty"`
+		Email     string `json:"email,omitempty"`
+		Status    string `json:"status"` // "imported" | "skipped" | "error"
+		Error     string `json:"error,omitempty"`
+	}
+	var imported []importedAcc
+	skippedCount := 0
+
+	// ── Codex accounts ──
+	if importCodex {
+		for _, c := range result.Codex {
+			acc, err := h.importOne9RouterCodex(c)
+			if err != nil {
+				imported = append(imported, importedAcc{
+					Source: "codex", Name: c.Name, Status: "error", Error: err.Error(),
+				})
+				continue
+			}
+			if acc == nil {
+				skippedCount++
+				imported = append(imported, importedAcc{
+					Source: "codex", Name: c.Name, Status: "skipped",
+				})
+				continue
+			}
+			imported = append(imported, importedAcc{
+				Source:    "codex",
+				Name:      c.Name,
+				AccountID: acc.ChatGPTAccountID,
+				Email:     acc.Email,
+				Status:    "imported",
+			})
+		}
+	}
+
+	// ── Kiro accounts ──
+	if importKiro {
+		for _, k := range result.Kiro {
+			acc, err := h.importOne9RouterKiro(k, refreshKiro)
+			if err != nil {
+				imported = append(imported, importedAcc{
+					Source: "kiro", Name: k.Name, Status: "error", Error: err.Error(),
+				})
+				continue
+			}
+			if acc == nil {
+				skippedCount++
+				imported = append(imported, importedAcc{
+					Source: "kiro", Name: k.Name, Status: "skipped",
+				})
+				continue
+			}
+			imported = append(imported, importedAcc{
+				Source: "kiro",
+				Name:   k.Name,
+				Email:  acc.Email,
+				Status: "imported",
+			})
+		}
+	}
+
+	h.pool.Reload()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":       true,
+		"path":          result.Path,
+		"imported":      imported,
+		"importedCount": len(imported) - skippedCount,
+		"skippedCount":  skippedCount,
+		"skippedProviders": result.Skipped,
+	})
+}
+
+// importOne9RouterCodex imports a single Codex account from 9router.
+// Dedups by chatgpt_account_id (updates existing account if found).
+// Returns nil if the account is skipped (e.g. empty tokens).
+func (h *Handler) importOne9RouterCodex(c auth.NineRouterImportedAccount) (*config.Account, error) {
+	if c.AccessToken == "" || c.RefreshToken == "" {
+		return nil, nil
+	}
+	// Re-extract chatgpt_account_id from the JWT in case 9router's
+	// providerSpecificData is stale.
+	accountID := c.ChatGPTAccountID
+	if accountID == "" {
+		accountID = auth.ExtractCodexAccountIDPublic(c.AccessToken)
+	}
+	if accountID == "" {
+		return nil, fmt.Errorf("cannot extract chatgpt_account_id from access token")
+	}
+
+	// Extract profile info (email, name, plan_type) from JWT.
+	jwtInfo := auth.ExtractCodexJWTInfoPublic(c.AccessToken)
+
+	// Dedup by chatgpt_account_id.
+	for _, existing := range config.GetAccounts() {
+		if existing.AuthMethod == codexAuthMethod && existing.ChatGPTAccountID == accountID {
+			existing.AccessToken = c.AccessToken
+			existing.RefreshToken = c.RefreshToken
+			existing.ExpiresAt = c.ExpiresAt
+			if c.ExpiresAt == 0 {
+				existing.ExpiresAt = time.Now().Unix() + 3600
+			}
+			if c.Name != "" {
+				existing.Nickname = c.Name
+			}
+			// Update JWT-extracted profile fields
+			if jwtInfo.Email != "" {
+				existing.CodexEmail = jwtInfo.Email
+			}
+			if jwtInfo.Name != "" {
+				existing.CodexName = jwtInfo.Name
+			}
+			if jwtInfo.PlanType != "" {
+				existing.CodexPlanType = jwtInfo.PlanType
+			}
+			if err := config.UpdateAccount(existing.ID, existing); err != nil {
+				return nil, err
+			}
+			return &existing, nil
+		}
+	}
+
+	email := "codex-" + accountID[:min(8, len(accountID))]
+	if jwtInfo.Email != "" {
+		email = jwtInfo.Email
+	}
+	nickname := c.Name
+	if nickname == "" {
+		nickname = "Codex (" + accountID + ")"
+		if jwtInfo.Name != "" {
+			nickname = jwtInfo.Name
+		}
+	}
+	planLabel := c.PlanType
+	if jwtInfo.PlanType != "" {
+		planLabel = jwtInfo.PlanType
+	}
+	if planLabel != "" {
+		nickname = nickname + " [" + planLabel + "]"
+	}
+
+	acc := config.Account{
+		ID:               auth.GenerateAccountID(),
+		Email:            email,
+		Nickname:         nickname,
+		AuthMethod:       codexAuthMethod,
+		Provider:         "OpenAI Codex (9router)",
+		AccessToken:      c.AccessToken,
+		RefreshToken:     c.RefreshToken,
+		ExpiresAt:        c.ExpiresAt,
+		ChatGPTAccountID: accountID,
+		Region:           "external",
+		Enabled:          true,
+		MachineId:        config.GenerateMachineId(),
+		CodexEmail:       jwtInfo.Email,
+		CodexName:        jwtInfo.Name,
+		CodexPlanType:    jwtInfo.PlanType,
+	}
+	if acc.ExpiresAt == 0 {
+		acc.ExpiresAt = time.Now().Unix() + 3600
+	}
+	if err := config.AddAccount(acc); err != nil {
+		return nil, err
+	}
+	return &acc, nil
+}
+
+// importOne9RouterKiro imports a single Kiro account from 9router.
+// 9router's kiro connections store refreshToken + profileArn but NOT
+// clientId/clientSecret, so we use the social refresh path (kiro.dev
+// /refreshToken) to validate + get a fresh access token.
+// Dedups by profileArn (updates existing account if found).
+func (h *Handler) importOne9RouterKiro(k auth.NineRouterImportedAccount, refresh bool) (*config.Account, error) {
+	if k.RefreshToken == "" {
+		return nil, nil
+	}
+
+	accessToken := k.AccessToken
+	refreshToken := k.RefreshToken
+	expiresAt := k.ExpiresAt
+	profileArn := k.ProfileArn
+	region := "us-east-1"
+
+	if refresh {
+		// Validate via social refresh (no clientId/clientSecret needed).
+		tempAccount := &config.Account{
+			RefreshToken: k.RefreshToken,
+			AuthMethod:   "social",
+			Region:       region,
+		}
+		newAccess, newRefresh, newExp, newProfileArn, _, _, err := auth.RefreshAccountToken(tempAccount)
+		if err != nil {
+			return nil, fmt.Errorf("kiro token refresh failed: %v", err)
+		}
+		if newAccess != "" {
+			accessToken = newAccess
+		}
+		if newRefresh != "" {
+			refreshToken = newRefresh
+		}
+		if newExp > 0 {
+			expiresAt = newExp
+		}
+		if newProfileArn != "" {
+			profileArn = newProfileArn
+		}
+	}
+
+	email := ""
+	if accessToken != "" {
+		email, _, _ = auth.GetUserInfo(accessToken)
+	}
+	if email == "" {
+		email = "kiro-9router-" + k.SourceID[:min(8, len(k.SourceID))]
+	}
+
+	// Dedup by profileArn.
+	if profileArn != "" {
+		if existing := findDedupTarget(profileArn, email, "idc"); existing != nil {
+			existing.AccessToken = accessToken
+			existing.RefreshToken = refreshToken
+			existing.ExpiresAt = expiresAt
+			existing.Email = email
+			if k.Name != "" {
+				existing.Nickname = k.Name
+			}
+			if err := config.UpdateAccount(existing.ID, *existing); err != nil {
+				return nil, err
+			}
+			return existing, nil
+		}
+	}
+
+	nickname := k.Name
+	if nickname == "" {
+		nickname = "Kiro (9router)"
+	}
+
+	acc := config.Account{
+		ID:           auth.GenerateAccountID(),
+		Email:        email,
+		Nickname:     nickname,
+		AuthMethod:   "social",
+		Provider:     "Imported (9router)",
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		ExpiresAt:    expiresAt,
+		Region:       region,
+		Enabled:      true,
+		MachineId:    config.GenerateMachineId(),
+		ProfileArn:   profileArn,
+	}
+	if acc.ExpiresAt == 0 {
+		acc.ExpiresAt = time.Now().Unix() + 3600
+	}
+	if err := config.AddAccount(acc); err != nil {
+		return nil, err
+	}
+	return &acc, nil
+}
+
+// nineRouterAccountsToJSON converts the parsed account slice to the JSON
+// shape returned by the preview endpoint (no tokens — just metadata).
+func nineRouterAccountsToJSON(accounts []auth.NineRouterImportedAccount) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(accounts))
+	for _, a := range accounts {
+		entry := map[string]interface{}{
+			"name":     a.Name,
+			"provider": a.Provider,
+			"hasToken": a.AccessToken != "" || a.RefreshToken != "",
+		}
+		if a.ChatGPTAccountID != "" {
+			entry["chatgptAccountId"] = a.ChatGPTAccountID
+		}
+		if a.ProfileArn != "" {
+			entry["profileArn"] = a.ProfileArn
+		}
+		if a.PlanType != "" {
+			entry["planType"] = a.PlanType
+		}
+		if a.ExpiresAt > 0 {
+			entry["expiresAt"] = a.ExpiresAt
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 func (h *Handler) apiImportKiroCli(w http.ResponseWriter, r *http.Request) {
@@ -6989,7 +7698,7 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
 	// Aggregate Kiro-side quota (usageCurrent/usageLimit) across all pool accounts.
 	// These reflect the real per-account credit quotas reported by Kiro, distinct
-	// from totalCredits which only counts credits consumed through SuperKiro.
+	// from totalCredits which only counts credits consumed through OmniProxy.
 	var kiroUsageCurrent, kiroUsageLimit, trialUsageCurrent, trialUsageLimit float64
 	for _, a := range h.pool.GetAllAccounts() {
 		kiroUsageCurrent += a.UsageCurrent

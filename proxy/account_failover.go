@@ -1,8 +1,8 @@
 package proxy
 
 import (
-	"superkiro/config"
-	"superkiro/logger"
+	"omniproxy/config"
+	"omniproxy/logger"
 	"strings"
 )
 

@@ -9,7 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"superkiro/config"
+	"omniproxy/config"
 	"testing"
 	"time"
 )

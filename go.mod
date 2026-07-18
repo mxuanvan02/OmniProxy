@@ -1,4 +1,4 @@
-module superkiro
+module omniproxy
 
 go 1.25.0
 

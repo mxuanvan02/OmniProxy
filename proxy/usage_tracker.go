@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"superkiro/config"
-	"superkiro/logger"
+	"omniproxy/config"
+	"omniproxy/logger"
 	"sync"
 	"time"
 )

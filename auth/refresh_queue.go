@@ -3,7 +3,7 @@ package auth
 import (
 	"crypto/sha256"
 	"fmt"
-	"superkiro/config"
+	"omniproxy/config"
 	"sync"
 	"time"
 )

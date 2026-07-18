@@ -18,8 +18,8 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-	"superkiro/config"
-	"superkiro/logger"
+	"omniproxy/config"
+	"omniproxy/logger"
 	"time"
 )
 
@@ -133,12 +133,12 @@ func kiroPayloadToOpenAIRequest(payload *KiroPayload, account *config.Account) (
 		modelID = "auto"
 	}
 	// Strip internal routing prefixes that external providers don't understand.
-	// Kiro accounts advertise models with a "kr/" prefix (and SuperKiro uses
-	// "superkiro/" internally for combo routing); external OpenAI-compatible
+	// Kiro accounts advertise models with a "kr/" prefix (and OmniProxy uses
+	// "omniproxy/" internally for combo routing); external OpenAI-compatible
 	// providers receive the bare model ID so their model registry can match it.
 	modelID = stripInternalModelPrefix(modelID)
 	// External providers (e.g. bddevlab) use dash-form model IDs
-	// ("claude-opus-4-8") while SuperKiro's ParseModelAndThinking normalises
+	// ("claude-opus-4-8") while OmniProxy's ParseModelAndThinking normalises
 	// to dot-form ("claude-opus-4.8"). Revert to dash-form so the external
 	// provider's model registry can match. Only applies to claude-* models;
 	// other model families (gpt-*, o1-*, etc.) pass through unchanged.
@@ -351,7 +351,7 @@ func resolveExternalModelID(account *config.Account, requested string) string {
 	return requested
 }
 
-// dotToDashClaudeVersion reverts SuperKiro's dot-form normalisation
+// dotToDashClaudeVersion reverts OmniProxy's dot-form normalisation
 // ("claude-opus-4.8" → "claude-opus-4-8") for external providers that use
 // dash-form model IDs. Non-claude models and already-dash-form IDs pass
 // through unchanged. Dated snapshots (claude-sonnet-4-20250514) are not
@@ -367,15 +367,15 @@ func dotToDashClaudeVersion(model string) string {
 
 var claudeDotToDashPattern = regexp.MustCompile(`(?i)claude-(opus|sonnet|haiku)-(\d+)\.(\d{1,2})\b`)
 
-// stripInternalModelPrefix removes routing prefixes that SuperKiro / Kiro use
+// stripInternalModelPrefix removes routing prefixes that OmniProxy / Kiro use
 // internally but external OpenAI-compatible providers don't understand:
 //   - "kr/"        — Kiro account model prefix (e.g. "kr/claude-sonnet-5")
-//   - "superkiro/" — SuperKiro combo routing prefix
+//   - "omniproxy/" — OmniProxy combo routing prefix
 //
 // The bare model ID is returned so the external provider's own model registry
 // can match it (e.g. "claude-sonnet-5"). Unknown prefixes pass through unchanged.
 func stripInternalModelPrefix(model string) string {
-	for _, p := range []string{"kr/", "superkiro/"} {
+	for _, p := range []string{"kr/", "omniproxy/"} {
 		if strings.HasPrefix(model, p) {
 			return strings.TrimPrefix(model, p)
 		}
@@ -699,6 +699,9 @@ func fetchExternalProviderModels(account *config.Account) ([]ModelInfo, error) {
 // (Claude/OpenAI, stream/non-stream) go through this so external accounts are
 // supported uniformly without per-handler branching.
 func dispatchChat(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+	if isCodexAccount(account) {
+		return CallExternalCodex(account, payload, callback)
+	}
 	if isExternalAccount(account) {
 		return CallExternalOpenAI(account, payload, callback)
 	}
@@ -712,7 +715,7 @@ func testExternalProvider(account *config.Account) (time.Duration, error) {
 	start := time.Now()
 	payload := &KiroPayload{}
 	payload.ConversationState.ChatTriggerType = "MANUAL"
-	payload.ConversationState.ConversationID = "superkiro-test"
+	payload.ConversationState.ConversationID = "omniproxy-test"
 	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
 		Content: "ping",
 		ModelID: "auto",

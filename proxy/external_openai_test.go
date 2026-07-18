@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"superkiro/config"
+	"omniproxy/config"
 	"testing"
 )
 
@@ -348,12 +348,12 @@ func TestIsExternalAccount(t *testing.T) {
 }
 
 // TestStripInternalModelPrefix verifies that internal routing prefixes
-// ("kr/", "superkiro/") are stripped before sending to external providers,
+// ("kr/", "omniproxy/") are stripped before sending to external providers,
 // while bare model IDs pass through unchanged.
 func TestStripInternalModelPrefix(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"kr/claude-sonnet-5", "claude-sonnet-5"},
-		{"superkiro/claude-sonnet-5", "claude-sonnet-5"},
+		{"omniproxy/claude-sonnet-5", "claude-sonnet-5"},
 		{"claude-sonnet-5", "claude-sonnet-5"},
 		{"gpt-4o", "gpt-4o"},
 		{"kr/auto", "auto"},
@@ -367,7 +367,7 @@ func TestStripInternalModelPrefix(t *testing.T) {
 }
 
 // TestDotToDashClaudeVersion verifies that dot-form claude version IDs
-// (SuperKiro's internal normalisation) are reverted to dash-form for
+// (OmniProxy's internal normalisation) are reverted to dash-form for
 // external providers that use dash-form model registries (e.g. bddevlab).
 func TestDotToDashClaudeVersion(t *testing.T) {
 	cases := []struct{ in, want string }{

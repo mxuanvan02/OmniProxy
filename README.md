@@ -1,12 +1,12 @@
 <p align="center">
-  <a href="https://github.com/lenhanpham/SuperKiro">
+  <a href="https://github.com/mxuanvan02/OmniProxy">
     <picture>
-      <img src="web/icon.svg" alt="SuperKiro" style="width: 25%;">
+      <img src="web/icon.svg" alt="OmniProxy" style="width: 25%;">
     </picture>
   </a>
 </p>
 
-# SuperKiro
+# OmniProxy
 <div align="center">
   <a href="https://go.dev/">
     <img src="https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go" alt="Go Version">
@@ -29,9 +29,9 @@
 </div>
 
 <p align="center">
-  <a href="https://github.com/lenhanpham/SuperKiro">
+  <a href="https://github.com/mxuanvan02/OmniProxy">
     <picture>
-      <img src="resources/webui.jpg" alt="SuperKiro" style="width: 75%;">
+      <img src="resources/webui.jpg" alt="OmniProxy" style="width: 75%;">
     </picture>
   </a>
 </p>
@@ -57,8 +57,8 @@ Not all IDEs, CLI tools, and Agents are fully tested. Only Claude Code, OpenCode
 ### Docker Compose (Recommended)
 
 ```bash
-git clone https://github.com/lenhanpham/SuperKiro.git
-cd SuperKiro
+git clone https://github.com/mxuanvan02/OmniProxy.git
+cd OmniProxy
 mkdir -p data
 docker-compose up -d
 ```
@@ -67,21 +67,21 @@ docker-compose up -d
 
 ```bash
 docker run -d \
-  --name superkiro \
+  --name omniproxy \
   -p 8080:8080 \
   -e ADMIN_PASSWORD=your_secure_password \
   -v /path/to/data:/app/data \
   --restart unless-stopped \
-  ghcr.io/lenhanpham/superkiro:latest
+  ghcr.io/mxuanvan02/omniproxy:latest
 ```
 
 ### Build from Source
 
 ```bash
-git clone https://github.com/lenhanpham/SuperKiro.git
-cd SuperKiro
-go build -o superkiro .
-./superkiro
+git clone https://github.com/mxuanvan02/OmniProxy.git
+cd OmniProxy
+go build -o omniproxy .
+./omniproxy
 ```
 
 ### Deploy on Zeabur
@@ -158,7 +158,7 @@ Friendly discussion is welcome. If you run into issues, try asking Claude Code, 
 
 ## Acknowledge 
 
-SuperKiro is forked from Kiro-Go and developed based on [Kiro-Go](https://github.com/Quorinex/Kiro-Go) 
+OmniProxy is forked from Kiro-Go and developed based on [Kiro-Go](https://github.com/Quorinex/Kiro-Go) 
 
 ## Disclaimer
 

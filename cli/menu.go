@@ -9,7 +9,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
-	"superkiro/logger"
+	"omniproxy/logger"
 	"syscall"
 )
 
@@ -25,7 +25,7 @@ func showMenu(addr string, pidPath string, shutdown func()) {
 
 		fmt.Println()
 		fmt.Println(" ══════════════════════════════════════════")
-		fmt.Printf("               SuperKiro                   \n")
+		fmt.Printf("               OmniProxy                   \n")
 		fmt.Printf("           %-28s \n", displayURL)
 		fmt.Println(" ══════════════════════════════════════════")
 		fmt.Println()
@@ -125,7 +125,7 @@ func spawnBackground(pidPath string) {
 		return
 	}
 
-	fmt.Printf("\n  SuperKiro running in background (PID: %d)\n", cmd.Process.Pid)
+	fmt.Printf("\n  OmniProxy running in background (PID: %d)\n", cmd.Process.Pid)
 }
 
 func pause(msg string) {

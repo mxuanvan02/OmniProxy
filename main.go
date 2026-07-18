@@ -4,11 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"superkiro/cli"
-	"superkiro/config"
-	"superkiro/logger"
-	"superkiro/pool"
-	"superkiro/proxy"
+	"omniproxy/cli"
+	"omniproxy/config"
+	"omniproxy/logger"
+	"omniproxy/pool"
+	"omniproxy/proxy"
 	"net/http"
 	"os"
 	"os/signal"
@@ -73,7 +73,7 @@ func main() {
 		// Logs are still captured in the ring buffer for the verbose log viewer.
 		logger.SetOutput(io.Discard)
 	} else {
-		logger.Infof("SuperKiro starting on http://%s (log level: %s)", addr, logger.LevelName(logger.GetLevel()))
+		logger.Infof("OmniProxy starting on http://%s (log level: %s)", addr, logger.LevelName(logger.GetLevel()))
 		logger.Infof("Admin panel: http://%s/admin", addr)
 		logger.Infof("Claude API: http://%s/v1/messages", addr)
 		logger.Infof("OpenAI API: http://%s/v1/chat/completions", addr)

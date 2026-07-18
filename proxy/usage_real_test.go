@@ -1,7 +1,7 @@
 package proxy
 
 import (
-	"superkiro/config"
+	"omniproxy/config"
 	"sync/atomic"
 	"testing"
 	"time"

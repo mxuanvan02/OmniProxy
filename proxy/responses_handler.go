@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"superkiro/config"
+	"omniproxy/config"
 	"net/http"
 	"strings"
 	"time"
@@ -497,7 +497,15 @@ func (h *Handler) handleResponsesStream(
 		}
 
 	h.usageTracker.TrackActive(account.ID, endpointOpenAIResponses, model)
-		err := dispatchChat(account, payload, callback)
+		// Codex accounts: wrap callback with downstream coalescing to cut
+		// per-token json.Marshal + Flush syscalls ~50-100x. Only safe
+		// pre-stream-start (coalescer flushes on terminal events so the
+		// response.created / first delta ordering is preserved).
+		effectiveCallback := callback
+		if isCodexAccount(account) {
+			effectiveCallback = newCodexCoalescer(callback)
+		}
+		err := dispatchChat(account, payload, effectiveCallback)
 		var finalContent string
 		var reasoning string
 		if err != nil {
@@ -505,7 +513,7 @@ func (h *Handler) handleResponsesStream(
 			// in-place with backoff before rotating. Only safe if we haven't
 			// started streaming the response yet (otherwise we'd duplicate
 			// the response.created event).
-			if !responseStarted && h.tryTransientRetry(account, payload, callback, err) {
+			if !responseStarted && h.tryTransientRetry(account, payload, effectiveCallback, err) {
 				h.pool.RecordSuccess(account.ID, model)
 				goto responsesStreamSuccess
 			}

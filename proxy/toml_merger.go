@@ -32,9 +32,9 @@ type MergeState struct {
 	ActiveModel         string
 	ActiveProvider      string
 	SubagentModel       string
-	HasSuperKiroSection bool
+	HasOmniProxySection bool
 	HasSubagentSection  bool
-	SuperKiroSectionEnd int
+	OmniProxySectionEnd int
 	SubagentSectionEnd  int
 	Lines               []ConfigLine
 }
@@ -145,7 +145,7 @@ func scanConfig(lines []string) MergeState {
 	}
 
 	currentSection := ""
-	inSuperKiro := false
+	inOmniProxy := false
 	inSubagent := false
 
 	for i, line := range lines {
@@ -154,22 +154,25 @@ func scanConfig(lines []string) MergeState {
 		if cl.Type == LineSection {
 			currentSection = cl.Key
 
-			if cl.Key == "model_providers.superkiro" {
-				state.HasSuperKiroSection = true
-				inSuperKiro = true
+			// Detect both the new "omniproxy" section and the legacy
+			// "superkiro" section name for backward compatibility with
+			// configs created by older versions.
+			if cl.Key == "model_providers.omniproxy" || cl.Key == "model_providers.superkiro" {
+				state.HasOmniProxySection = true
+				inOmniProxy = true
 				inSubagent = false
 			} else if cl.Key == "agents.subagent" {
 				state.HasSubagentSection = true
 				inSubagent = true
-				inSuperKiro = false
+				inOmniProxy = false
 			} else {
-				if inSuperKiro {
-					state.SuperKiroSectionEnd = i
+				if inOmniProxy {
+					state.OmniProxySectionEnd = i
 				}
 				if inSubagent {
 					state.SubagentSectionEnd = i
 				}
-				inSuperKiro = false
+				inOmniProxy = false
 				inSubagent = false
 			}
 		} else if cl.Type == LineKeyValue && cl.IsActive {
@@ -191,8 +194,8 @@ func scanConfig(lines []string) MergeState {
 	}
 
 	// Handle case where section extends to EOF
-	if inSuperKiro {
-		state.SuperKiroSectionEnd = len(lines)
+	if inOmniProxy {
+		state.OmniProxySectionEnd = len(lines)
 	}
 	if inSubagent {
 		state.SubagentSectionEnd = len(lines)
@@ -201,7 +204,7 @@ func scanConfig(lines []string) MergeState {
 	return state
 }
 
-// MergeCodexConfig merges SuperKiro configuration into existing Codex config.toml
+// MergeCodexConfig merges OmniProxy configuration into existing Codex config.toml
 func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 	configPath := filepath.Join(homeDir, ".codex", "config.toml")
 
@@ -231,12 +234,12 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 		if cl.Type == LineSection {
 			currentSection = cl.Key
 
-			if cl.Key == "model_providers.superkiro" {
+			if cl.Key == "model_providers.omniproxy" {
 				skipUntilNextSection = false
 
-				// Inject SuperKiro section
-				output = append(output, "[model_providers.superkiro]")
-				output = append(output, fmt.Sprintf(`name = "SuperKiro"`))
+				// Inject OmniProxy section
+				output = append(output, "[model_providers.omniproxy]")
+				output = append(output, fmt.Sprintf(`name = "OmniProxy"`))
 				output = append(output, fmt.Sprintf(`base_url = "%s"`, baseURL))
 				output = append(output, `wire_api = "responses"`)
 				superKiroInjected = true
@@ -274,11 +277,11 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 					modelInjected = true
 				}
 			} else if cl.Key == "model_provider" {
-				if cl.Value != "superkiro" {
+				if cl.Value != "omniproxy" {
 					// Comment out old value
 					output = append(output, "#"+cl.Raw)
 					if !providerInjected {
-						output = append(output, `model_provider = "superkiro"`)
+						output = append(output, `model_provider = "omniproxy"`)
 						providerInjected = true
 					}
 				} else {
@@ -302,7 +305,7 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 				modelInjected = true
 			}
 			if !providerInjected && state.ActiveProvider == "" {
-				output = append(output, `model_provider = "superkiro"`)
+				output = append(output, `model_provider = "omniproxy"`)
 				providerInjected = true
 			}
 		}
@@ -311,12 +314,12 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 	// If empty config or missing sections, inject at appropriate places
 	if len(existingLines) == 0 {
 		output = []string{
-			fmt.Sprintf(`# SuperKiro Configuration for Codex CLI`),
+			fmt.Sprintf(`# OmniProxy Configuration for Codex CLI`),
 			fmt.Sprintf(`model = "%s"`, model),
-			`model_provider = "superkiro"`,
+			`model_provider = "omniproxy"`,
 			"",
-			"[model_providers.superkiro]",
-			`name = "SuperKiro"`,
+			"[model_providers.omniproxy]",
+			`name = "OmniProxy"`,
 			fmt.Sprintf(`base_url = "%s"`, baseURL),
 			`wire_api = "responses"`,
 			"",
@@ -331,7 +334,7 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 				header = append(header, fmt.Sprintf(`model = "%s"`, model))
 			}
 			if !providerInjected {
-				header = append(header, `model_provider = "superkiro"`)
+				header = append(header, `model_provider = "omniproxy"`)
 			}
 			header = append(header, "")
 			output = append(header, output...)
@@ -340,8 +343,8 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 		// Inject missing sections at the end
 		if !superKiroInjected {
 			output = append(output, "")
-			output = append(output, "[model_providers.superkiro]")
-			output = append(output, `name = "SuperKiro"`)
+			output = append(output, "[model_providers.omniproxy]")
+			output = append(output, `name = "OmniProxy"`)
 			output = append(output, fmt.Sprintf(`base_url = "%s"`, baseURL))
 			output = append(output, `wire_api = "responses"`)
 		}

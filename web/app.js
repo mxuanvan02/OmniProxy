@@ -769,7 +769,7 @@ let customSelectRefreshQueued = false;
       if (!currentVersion) await loadVersion();
       const current = currentVersion.replace(/^v/i, '');
       if (!current) throw new Error('Current version missing');
-      const res = await fetch('https://raw.githubusercontent.com/lenhanpham/SuperKiro/main/version.json?t=' + Date.now());
+      const res = await fetch('https://raw.githubusercontent.com/lenhanpham/OmniProxy/main/version.json?t=' + Date.now());
       if (!res.ok) throw new Error('Fetch failed');
       const d = await res.json();
       const latest = (d.version || '').replace(/^v/i, '');

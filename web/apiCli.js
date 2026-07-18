@@ -332,9 +332,9 @@
     showManualConfigModal([{
       filename: '~/.config/opencode/opencode.json',
       content: JSON.stringify({
-        provider: { superkiro: { npm: '@ai-sdk/openai-compatible', options: { baseURL: endpoint, apiKey: apiKey }, models: modelsObj } },
-        model: 'superkiro/' + activeModel,
-        agent: { explorer: { description: 'Fast explorer subagent for codebase exploration', mode: 'subagent', model: 'superkiro/' + subagentModel } }
+        provider: { omniproxy: { npm: '@ai-sdk/openai-compatible', options: { baseURL: endpoint, apiKey: apiKey }, models: modelsObj } },
+        model: 'omniproxy/' + activeModel,
+        agent: { explorer: { description: 'Fast explorer subagent for codebase exploration', mode: 'subagent', model: 'omniproxy/' + subagentModel } }
       }, null, 2)
     }]);
   };
@@ -494,7 +494,7 @@
     var apiKey = await getCliApiKey('codex_ak', 'codex_akCustom');
     var model = window.__codexState.model || 'provider/model-id';
     var subagentModel = window.__codexState.subagentModel || model;
-    var configContent = '# SuperKiro Configuration for Codex CLI\nmodel = "' + model + '"\nmodel_provider = "superkiro"\n\n[model_providers.superkiro]\nname = "SuperKiro"\nbase_url = "' + endpoint + '"\nwire_api = "responses"\n\n[agents.subagent]\nmodel = "' + subagentModel + '"\n';
+    var configContent = '# OmniProxy Configuration for Codex CLI\nmodel = "' + model + '"\nmodel_provider = "omniproxy"\n\n[model_providers.omniproxy]\nname = "OmniProxy"\nbase_url = "' + endpoint + '"\nwire_api = "responses"\n\n[agents.subagent]\nmodel = "' + subagentModel + '"\n';
     showManualConfigModal([
       { filename: '~/.codex/config.toml', content: configContent },
       { filename: '~/.codex/auth.json', content: JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: apiKey }, null, 2) }
@@ -603,8 +603,8 @@
     var model = window.__continueState.model || 'provider/model-id';
     var code = document.getElementById('continueCodeBlock');
     if (code) code.textContent = JSON.stringify({
-      models: [{ title: 'SuperKiro', provider: 'openai', model: model, apiKey: apiKey, baseUrl: endpoint }],
-      tabAutocompleteModel: { title: 'SuperKiro', provider: 'openai', model: model, apiKey: apiKey, baseUrl: endpoint }
+      models: [{ title: 'OmniProxy', provider: 'openai', model: model, apiKey: apiKey, baseUrl: endpoint }],
+      tabAutocompleteModel: { title: 'OmniProxy', provider: 'openai', model: model, apiKey: apiKey, baseUrl: endpoint }
     }, null, 2);
   }
   window.continueCopyCode = function () {
@@ -840,7 +840,7 @@
     var endpoint = getEndpointValue('hermes');
     var apiKey = await getCliApiKey('hermes_ak', 'hermes_akCustom');
     var model = window.__hermesState.model || 'provider/model-id';
-    var yamlContent = 'providers:\n  superkiro:\n    base_url: ' + endpoint + '\n    api_key: ' + (apiKey || 'sk-your-api-key') + '\n    api_mode: openai\n    discover_models: false\n    models:\n    - ' + model + '\n';
+    var yamlContent = 'providers:\n  omniproxy:\n    base_url: ' + endpoint + '\n    api_key: ' + (apiKey || 'sk-your-api-key') + '\n    api_mode: openai\n    discover_models: false\n    models:\n    - ' + model + '\n';
     showManualConfigModal([
       { filename: '~/.hermes/config.yaml', content: yamlContent },
       { filename: '~/.hermes/.env', content: 'OPENAI_API_KEY=' + (apiKey || 'sk-your-api-key') + '\n' }
@@ -991,7 +991,7 @@
     var apiKey = await getCliApiKey('openclaw_ak', 'openclaw_akCustom');
     var model = window.__openClawState.model || 'provider/model-id';
     var ocConfig = {
-      models: { providers: { superkiro: { baseUrl: endpoint, apiKey: apiKey, api: 'openai-completions', models: [{ id: model, name: model }] } } }
+      models: { providers: { omniproxy: { baseUrl: endpoint, apiKey: apiKey, api: 'openai-completions', models: [{ id: model, name: model }] } } }
     };
     showManualConfigModal([{ filename: '~/.openclaw/openclaw.json', content: JSON.stringify(ocConfig, null, 2) }]);
   };
@@ -1361,7 +1361,7 @@
         html += '<div style="display:flex;gap:0.5rem;align-items:center;margin-top:' + (idx > 0 ? '0.35rem' : '0') + ';" class="kiro-mapping-row">' +
           '<input type="text" class="form-control kiro-from" style="flex:1;" data-i18n-placeholder="cliTools.cwModelPlaceholder" placeholder="CodeWhisperer model ID" value="' + escapeAttr(k) + '" autocomplete="off" />' +
           '<span style="font-size:0.75rem;color:var(--muted-foreground);">&rarr;</span>' +
-          '<input type="text" class="form-control kiro-to" style="flex:1;" data-i18n-placeholder="cliTools.skModelPlaceholder" placeholder="SuperKiro model" value="' + escapeAttr(state.models[k]) + '" autocomplete="off" />' +
+          '<input type="text" class="form-control kiro-to" style="flex:1;" data-i18n-placeholder="cliTools.skModelPlaceholder" placeholder="OmniProxy model" value="' + escapeAttr(state.models[k]) + '" autocomplete="off" />' +
           '<button class="btn btn-outline btn-sm" onclick="kiroSelectModel(this)" type="button" data-i18n="cliTools.selectModel">Select</button>' +
           '<button class="btn btn-outline btn-sm" onclick="kiroRemoveMapping(this)" type="button" style="padding:0.25rem 0.5rem;">&times;</button>' +
           '</div>';
@@ -1388,7 +1388,7 @@
       div.style.cssText = 'display:flex;gap:0.5rem;align-items:center;margin-top:0.35rem;';
       div.innerHTML = '<input type="text" class="form-control kiro-from" style="flex:1;" data-i18n-placeholder="cliTools.cwModelPlaceholder" placeholder="CodeWhisperer model ID" autocomplete="off" />' +
         '<span style="font-size:0.75rem;color:var(--muted-foreground);">&rarr;</span>' +
-        '<input type="text" class="form-control kiro-to" style="flex:1;" data-i18n-placeholder="cliTools.skModelPlaceholder" placeholder="SuperKiro model" autocomplete="off" />' +
+        '<input type="text" class="form-control kiro-to" style="flex:1;" data-i18n-placeholder="cliTools.skModelPlaceholder" placeholder="OmniProxy model" autocomplete="off" />' +
         '<button class="btn btn-outline btn-sm" onclick="kiroSelectModel(this)" type="button" data-i18n="cliTools.selectModel">Select</button>' +
         '<button class="btn btn-outline btn-sm" onclick="kiroRemoveMapping(this)" type="button" style="padding:0.25rem 0.5rem;">&times;</button>';
       container.appendChild(div);
@@ -1469,7 +1469,7 @@
     var s = cliToolStatuses[toolId];
     if (!s) return 'unknown';
     if (!s.installed) return 'not_installed';
-    if (!s.hasSuperKiro) return 'not_configured';
+    if (!s.hasOmniProxy) return 'not_configured';
     return 'connected';
   }
 
@@ -1482,7 +1482,7 @@
       var data = await res.json();
       for (var k in data) {
         if (data.hasOwnProperty(k)) {
-          cliToolStatuses[k] = { installed: !!data[k].installed, hasSuperKiro: !!data[k].hasSuperKiro };
+          cliToolStatuses[k] = { installed: !!data[k].installed, hasOmniProxy: !!data[k].hasOmniProxy };
         }
       }
     } catch (e) {}
@@ -1491,7 +1491,7 @@
 
   function updateCliBadge(toolId, connected) {
     var existing = cliToolStatuses[toolId] || { installed: true };
-    existing.hasSuperKiro = connected;
+    existing.hasOmniProxy = connected;
     cliToolStatuses[toolId] = existing;
     var card = document.querySelector('.cli-tool-card[data-cli-tool="' + toolId + '"]');
     if (!card) return;

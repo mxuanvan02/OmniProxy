@@ -8,3 +8,17 @@
 .DS_Store
 *.orig
 *.rej
+
+# Backup files
+*.bak-*
+*.bak
+superkiro.bak-*
+superkiro_backup_*
+omniproxy.bak-*
+omniproxy_backup_*
+*.bak-*.json
+*.new
+superkiro-linux-*
+omniproxy-linux-*
+/omniproxy
+/superkiro

@@ -2,7 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
-	"superkiro/config"
+	"omniproxy/config"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"

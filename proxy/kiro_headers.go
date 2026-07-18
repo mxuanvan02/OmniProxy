@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"superkiro/config"
+	"omniproxy/config"
 )
 
 const (

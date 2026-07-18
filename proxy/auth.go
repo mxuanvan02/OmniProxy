@@ -2,7 +2,7 @@ package proxy
 
 import (
 	"context"
-	"superkiro/config"
+	"omniproxy/config"
 	"net/http"
 	"strings"
 )

@@ -3,9 +3,9 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
-	"superkiro/auth"
-	"superkiro/config"
-	accountpool "superkiro/pool"
+	"omniproxy/auth"
+	"omniproxy/config"
+	accountpool "omniproxy/pool"
 	"net/http"
 	"net/http/httptest"
 	"strings"

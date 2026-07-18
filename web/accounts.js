@@ -5,6 +5,7 @@ let accountsData = [];
 const selectedAccounts = new Set();
 let filterKeyword = '';
 let filterStatus = 'all';
+let filterCategory = 'all';
 let builderIdSession = '';
 let builderIdPollTimer = null;
 let iamSession = '';
@@ -28,6 +29,7 @@ let testModalRunning = false;
       if (filterStatus === 'enabled' && !a.enabled) return false;
       if (filterStatus === 'disabled' && (a.enabled || (a.banStatus && a.banStatus !== 'ACTIVE'))) return false;
       if (filterStatus === 'banned' && (!a.banStatus || a.banStatus === 'ACTIVE')) return false;
+      if (filterCategory !== 'all' && accountCategory(a) !== filterCategory) return false;
       if (filterKeyword) {
         const kw = filterKeyword.toLowerCase();
         const emailMatch = (a.email || '').toLowerCase().includes(kw);
@@ -37,9 +39,29 @@ let testModalRunning = false;
       return true;
     });
   }
+  // getFilteredAccountsGrouped returns the filtered accounts grouped by
+  // category for the grouped list view. Returns an array of
+  // { category, label, icon, accounts } in display order: kiro, codex, external, other.
+  function getFilteredAccountsGrouped() {
+    const filtered = getFilteredAccounts();
+    const groups = { kiro: [], codex: [], external: [], other: [] };
+    for (const a of filtered) {
+      groups[accountCategory(a)].push(a);
+    }
+    const order = ['kiro', 'codex', 'external', 'other'];
+    const out = [];
+    for (const cat of order) {
+      if (groups[cat].length > 0) {
+        out.push({ category: cat, label: categoryLabel(cat), icon: categoryIcon(cat), accounts: groups[cat] });
+      }
+    }
+    return out;
+  }
   function onFilterChange() {
     filterKeyword = $('filterSearch').value;
     filterStatus = $('filterStatusSelect').value;
+    const catSel = $('filterCategorySelect');
+    if (catSel) filterCategory = catSel.value;
     renderAccounts();
   }
   function toggleSelectAll(checked) {
@@ -109,10 +131,37 @@ let testModalRunning = false;
     if (normalized === 'external_idp') return t('auth.enterpriseSso');
     if (normalized === 'social') return t('auth.social');
     if (normalized === 'external_openai') return t('auth.externalOpenai');
+    if (normalized === 'codex') return t('auth.codex');
     if (normalized === 'builderid') return 'BuilderID';
     if (normalized === 'github') return t('local.providerGithub');
     if (normalized === 'google') return t('local.providerGoogle');
     return method;
+  }
+
+  // accountCategory returns the category bucket for an account:
+  //   'kiro'     — native Kiro/AWS auth (social, idc, external_idp, builderid, api_key)
+  //   'codex'    — ChatGPT subscription Codex OAuth
+  //   'external' — external OpenAI-compatible provider
+  //   'other'    — anything else
+  function accountCategory(a) {
+    const m = String(a.authMethod || '').toLowerCase();
+    if (m === 'codex') return 'codex';
+    if (m === 'external_openai') return 'external';
+    if (m === 'social' || m === 'idc' || m === 'external_idp' ||
+        m === 'builderid' || m === 'api_key' || m === '' ) return 'kiro';
+    return 'other';
+  }
+  function categoryLabel(cat) {
+    if (cat === 'kiro') return t('category.kiro');
+    if (cat === 'codex') return t('category.codex');
+    if (cat === 'external') return t('category.external');
+    return t('category.other');
+  }
+  function categoryIcon(cat) {
+    if (cat === 'kiro') return 'fa-solid fa-cloud';
+    if (cat === 'codex') return 'fa-solid fa-robot';
+    if (cat === 'external') return 'fa-solid fa-plug';
+    return 'fa-solid fa-circle-question';
   }
   function getStatusBadge(a) {
     const out = [];
@@ -150,6 +199,32 @@ let testModalRunning = false;
     if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
     return n.toString();
   }
+  function formatCodexPlan(plan) {
+    if (!plan) return '-';
+    var labels = { 'free': 'Free', 'plus': 'Plus', 'team': 'Team', 'pro': 'Pro' };
+    return labels[plan] || plan;
+  }
+  function formatUsageBar(pct) {
+    if (pct == null || pct === 0) return '-';
+    var cls = pct >= 90 ? 'critical' : pct >= 70 ? 'warning' : 'ok';
+    return '<span class="codex-usage-bar"><span class="codex-usage-fill ' + cls + '" style="width:' + pct + '%"></span><span class="codex-usage-label">' + pct + '%</span></span>';
+  }
+  function formatWindowMinutes(mins) {
+    if (!mins) return '-';
+    if (mins >= 1440) return (mins / 1440).toFixed(0) + ' days';
+    if (mins >= 60) return (mins / 60).toFixed(0) + ' hours';
+    return mins + ' mins';
+  }
+  function formatResetTime(ts) {
+    if (!ts) return '-';
+    var d = new Date(ts * 1000);
+    var diffMs = d - new Date();
+    if (diffMs <= 0) return t('accounts.expired');
+    var diffHrs = Math.floor(diffMs / (1000 * 60 * 60));
+    var diffDays = Math.floor(diffHrs / 24);
+    if (diffDays > 0) return diffDays + 'd ' + (diffHrs % 24) + 'h (' + d.toLocaleDateString() + ')';
+    return diffHrs + 'h (' + d.toLocaleString() + ')';
+  }
   function applyUsageBars(root) {
     qsa('.usage-fill[data-usage-pct]', root).forEach(el => {
       const pct = Math.max(0, Math.min(100, parseFloat(el.dataset.usagePct) || 0));
@@ -165,12 +240,36 @@ let testModalRunning = false;
       container.innerHTML = '<div class="empty-state">' + escapeHtml(t('accounts.empty')) + '</div>';
       return;
     }
-    container.innerHTML = filtered.map(a => {
+    // Group by category (kiro / codex / external / other) with section headers
+    // so the operator can visually distinguish Kiro-subscription accounts
+    // from Codex-subscription accounts at a glance.
+    const groups = getFilteredAccountsGrouped();
+    let html = '';
+    for (const g of groups) {
+      html += '<div class="account-category-group" data-category="' + escapeAttr(g.category) + '">' +
+        '<div class="account-category-header">' +
+        '<span class="account-category-icon"><i class="' + g.icon + '" aria-hidden="true"></i></span>' +
+        '<span class="account-category-title">' + escapeHtml(g.label) + '</span>' +
+        '<span class="account-category-count">' + g.accounts.length + '</span>' +
+        '</div>' +
+        g.accounts.map(renderAccountCard).join('') +
+        '</div>';
+    }
+    container.innerHTML = html;
+    applyUsageBars(container);
+    enhanceCustomSelects(container);
+  }
+
+  // renderAccountCard produces the HTML for a single account row. Extracted
+  // from renderAccounts so the grouped view can call it per-account without
+  // duplicating the card markup.
+  function renderAccountCard(a) {
       const usagePct = (a.usagePercent || 0) * 100;
       const usageClass = usagePct > 90 ? 'critical' : usagePct > 70 ? 'high' : '';
       const trialPct = (a.trialUsagePercent || 0) * 100;
       const trialClass = trialPct > 90 ? 'critical' : trialPct > 70 ? 'high' : '';
       const isExternal = (a.authMethod === 'external_openai');
+      const isCodex = (a.authMethod === 'codex');
       const extLimit = a.extCreditLimit || 0;
       const extUsed = a.extCreditsUsed || 0;
       const extRemaining = a.extCreditsRemaining || 0;
@@ -189,6 +288,10 @@ let testModalRunning = false;
       const userSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
       const copySvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 
+      // Codex accounts: show chatgpt_account_id + plan badge if present.
+      const codexBadge = isCodex && a.chatgptAccountId ?
+        '<span class="badge badge-info">ID: ' + escapeHtml(String(a.chatgptAccountId).slice(0, 8)) + '</span>' : '';
+
       return '' +
         '<div class="account-card' + (isSelected ? ' selected' : '') + '" data-id="' + idAttr + '">' +
         '<div class="account-header">' +
@@ -203,6 +306,7 @@ let testModalRunning = false;
         weightBadge +
         overageBadge +
         '<span class="badge badge-info">' + escapeHtml(formatAuthMethod(a.provider || a.authMethod)) + '</span>' +
+        codexBadge +
         getStatusBadge(a) +
         '</div>' +
         '</div>' +
@@ -244,6 +348,17 @@ let testModalRunning = false;
           '<div class="account-usage"><div class="usage-label">' + escapeHtml(t('accounts.extCredits')) +
           ' <button class="btn btn-icon btn-sm btn-ghost" data-action="refreshCredits" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.refreshCredits')) + '">' + refreshSvg + '</button>' +
           '</div><div class="usage-text"><span>' + escapeHtml(t('accounts.extCreditsNoLimit')) + '</span></div></div>' : '') +
+        (isCodex && (a.codexPrimaryUsedPercent || a.codexUsageCheckedAt) ?
+          '<div class="account-usage">' +
+          '<div class="usage-label">' + escapeHtml(t('detail.codexUsage')) +
+          (a.codexPlanType ? ' <span class="badge badge-info">' + escapeHtml(formatCodexPlan(a.codexPlanType)) + '</span>' : '') +
+          (a.codexActiveLimit ? ' <span class="badge badge-info">' + escapeHtml(a.codexActiveLimit) + '</span>' : '') +
+          '</div>' +
+          (a.codexPrimaryUsedPercent ?
+            '<div class="usage-bar"><div class="usage-fill ' + (a.codexPrimaryUsedPercent >= 90 ? 'critical' : a.codexPrimaryUsedPercent >= 70 ? 'high' : '') + '" data-usage-pct="' + escapeAttr(a.codexPrimaryUsedPercent) + '"></div></div>' +
+            '<div class="usage-text"><span>' + escapeHtml(t('detail.codexPrimaryUsed')) + '</span><span>' + a.codexPrimaryUsedPercent + '%</span></div>'
+            : '<div class="usage-text"><span>' + escapeHtml(t('detail.codexUsageHint')) + '</span></div>') +
+          '</div>' : '') +
         '<div class="account-stats">' +
         '<div class="account-stat"><div class="account-stat-value">' + (a.requestCount || 0) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.requests')) + '</div></div>' +
         '<div class="account-stat"><div class="account-stat-value">' + formatNum(a.totalTokens || 0) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.tokens')) + '</div></div>' +
@@ -251,9 +366,6 @@ let testModalRunning = false;
         '<div class="account-stat"><div class="account-stat-value">' + escapeHtml(formatTokenExpiry(a.expiresAt)) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.expiry')) + '</div></div>' +
         '</div>' +
         '</div>';
-    }).join('');
-    applyUsageBars(container);
-    enhanceCustomSelects(container);
   }
 
   // Account actions
@@ -504,6 +616,29 @@ let testModalRunning = false;
         (a.extLastUsedAt ? detailItem(t('detail.extLastUsedAt'), new Date(a.extLastUsedAt * 1000).toLocaleString()) : '') +
         (a.extCreditsCheckedAt ? detailItem(t('detail.extCheckedAt'), new Date(a.extCreditsCheckedAt * 1000).toLocaleString()) : '') +
         '</div></div>' : '') +
+
+      (a.authMethod === 'codex' ?
+        '<div class="detail-section"><h4>' + escapeHtml(t('detail.codexUsage')) +
+        '</h4><div class="detail-grid">' +
+        detailItem(t('detail.codexPlanType'), formatCodexPlan(a.codexPlanType)) +
+        detailItem(t('detail.codexActiveLimit'), a.codexActiveLimit || '-') +
+        detailItem(t('detail.codexEmail'), a.codexEmail || '-') +
+        detailItem(t('detail.codexName'), a.codexName || '-') +
+        detailItem(t('detail.codexChatGPTId'), a.chatgptAccountId || '-') +
+        '</div>' +
+        '<div class="detail-grid" style="margin-top:0.5rem">' +
+        detailItem(t('detail.codexPrimaryUsed'), formatUsageBar(a.codexPrimaryUsedPercent || 0)) +
+        detailItem(t('detail.codexSecondaryUsed'), formatUsageBar(a.codexSecondaryUsedPercent || 0)) +
+        detailItem(t('detail.codexPrimaryWindow'), formatWindowMinutes(a.codexPrimaryWindowMinutes || 0)) +
+        detailItem(t('detail.codexPrimaryResetAt'), formatResetTime(a.codexPrimaryResetAt)) +
+        '</div>' +
+        '<div class="detail-grid" style="margin-top:0.5rem">' +
+        detailItem(t('detail.codexCreditsBalance'), a.codexCreditsBalance || 0) +
+        detailItem(t('detail.codexCreditsUnlimited'), a.codexCreditsUnlimited ? '✓' : '✗') +
+        (a.codexUsageCheckedAt ? detailItem(t('detail.codexLastChecked'), new Date(a.codexUsageCheckedAt * 1000).toLocaleString()) : '') +
+        '</div>' +
+        '<p class="help-block">' + escapeHtml(t('detail.codexUsageHint')) + '</p>' +
+        '</div>' : '') +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.proxyURL')) + '</h4><div class="machine-id-row">' +
       '<input type="text" id="proxyURLInput" value="' + escapeAttr(a.proxyURL || '') + '" placeholder="socks5://host:port" />' +
@@ -835,7 +970,9 @@ let testModalRunning = false;
     ssocache: 'fa-solid fa-folder-tree',
     local: 'fa-solid fa-folder-open',
     credentials: 'fa-solid fa-code',
-    cookie: 'fa-solid fa-cookie-bite'
+    cookie: 'fa-solid fa-cookie-bite',
+    codex: 'fa-solid fa-robot',
+    ninerouter: 'fa-solid fa-arrow-right-to-bracket'
   };
   function methodCard(type, title, desc) {
     var icon = METHOD_ICONS[type] || 'fa-solid fa-circle-plus';
@@ -867,6 +1004,8 @@ let testModalRunning = false;
     else if (type === 'apikey') modalApiKey(title, body);
     else if (type === 'external') modalExternal(title, body);
     else if (type === 'cookie') modalCookie(title, body);
+    else if (type === 'codex') modalCodex(title, body);
+    else if (type === 'ninerouter') modalNineRouter(title, body);
     if (!modal.classList.contains('active')) openDialog('addModal');
     enhanceCustomSelects(body);
   }
@@ -881,6 +1020,13 @@ let testModalRunning = false;
   function modalAdd(title, body) {
     title.textContent = t('modal.addAccount');
     body.innerHTML =
+      // ── Kiro category ──
+      '<div class="add-category-section">' +
+      '<div class="add-category-header">' +
+      '<span class="add-category-icon"><i class="fa-solid fa-cloud" aria-hidden="true"></i></span>' +
+      '<span class="add-category-title">' + escapeHtml(t('category.kiro')) + '</span>' +
+      '<span class="add-category-desc">' + escapeHtml(t('modal.kiroCategoryDesc')) + '</span>' +
+      '</div>' +
       '<div class="method-list">' +
       methodCard('builderid', t('modal.builderIdTitle'), t('modal.builderIdDesc')) +
       methodCard('iam', t('modal.iamTitle'), t('modal.iamDesc')) +
@@ -896,6 +1042,19 @@ let testModalRunning = false;
       methodCard('apikey', t('modal.apikeyTitle'), t('modal.apikeyDesc')) +
       methodCard('external', t('modal.externalTitle'), t('modal.externalDesc')) +
       methodCard('cookie', t('modal.cookieTitle'), t('modal.cookieDesc')) +
+      '</div>' +
+      '</div>' +
+      // ── Codex category ──
+      '<div class="add-category-section">' +
+      '<div class="add-category-header">' +
+      '<span class="add-category-icon"><i class="fa-solid fa-robot" aria-hidden="true"></i></span>' +
+      '<span class="add-category-title">' + escapeHtml(t('category.codex')) + '</span>' +
+      '<span class="add-category-desc">' + escapeHtml(t('modal.codexCategoryDesc')) + '</span>' +
+      '</div>' +
+      '<div class="method-list">' +
+      methodCard('codex', t('modal.codexTitle'), t('modal.codexDesc')) +
+      methodCard('ninerouter', t('modal.ninerouterTitle'), t('modal.ninerouterDesc')) +
+      '</div>' +
       '</div>' +
       '<div class="modal-footer"><button class="btn btn-secondary" data-close-add="1" type="button">' + escapeHtml(t('common.cancel')) + '</button></div>';
   }
@@ -1355,6 +1514,267 @@ let testModalRunning = false;
       btn.disabled = false; btn.textContent = t('common.add');
     }
   }
+
+  // ==================== Codex (ChatGPT subscription) ====================
+
+  // modalCodex offers two paths: (1) OAuth PKCE login (opens browser to
+  // auth.openai.com, callback on port 1455), (2) manual token import for
+  // users who already have a ~/.codex/auth.json from the official Codex CLI.
+  function modalCodex(title, body) {
+    title.textContent = t('modal.codexTitle');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('modal.codexDesc')) + '</p>' +
+      '<div class="method-list">' +
+      methodCard('codexLogin', t('codex.loginTitle'), t('codex.loginDesc')) +
+      methodCard('codexImport', t('codex.importTitle'), t('codex.importDesc')) +
+      '</div>' +
+      '<div class="modal-footer"><button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button></div>';
+    // Wire sub-method cards.
+    qsa('.method-card', body).forEach(card => {
+      card.addEventListener('click', () => {
+        const m = card.dataset.method;
+        if (m === 'codexLogin') modalCodexLogin(title, body);
+        else if (m === 'codexImport') modalCodexImport(title, body);
+      });
+    });
+  }
+
+  // modalCodexLogin — PKCE browser flow. Starts the OAuth session, shows
+  // the authorize URL, polls until the user completes browser auth.
+  var codexPollTimer = null;
+  function modalCodexLogin(title, body) {
+    title.textContent = t('codex.loginTitle');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('codex.loginDesc')) + '</p>' +
+      '<div id="codexStep1">' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="codex" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="startCodexLoginBtn" type="button">' + escapeHtml(t('codex.startLogin')) + '</button>' +
+      '</div>' +
+      '</div>' +
+      '<div id="codexStep2" class="hidden">' +
+      '<div class="form-group"><label>' + escapeHtml(t('codex.authUrl')) + '</label>' +
+      '<div class="endpoint"><span id="codexAuthUrl" class="font-mono text-xs"></span></div>' +
+      '<div class="flex gap-2 mt-2">' +
+      '<button class="btn btn-sm btn-outline flex-1" id="codexOpenBtn" type="button">' + escapeHtml(t('builderid.open')) + '</button>' +
+      '<button class="btn btn-sm btn-outline flex-1" id="codexCopyBtn" type="button">' + escapeHtml(t('common.copy')) + '</button>' +
+      '</div>' +
+      '</div>' +
+      '<p id="codexStatus" class="text-center text-sm mt-4 muted-text">' + escapeHtml(t('builderid.waiting')) + '</p>' +
+      '<div class="modal-footer"><button class="btn btn-secondary" id="codexCancelBtn" type="button">' + escapeHtml(t('common.cancel')) + '</button></div>' +
+      '</div>';
+    $('startCodexLoginBtn').addEventListener('click', startCodexLogin);
+  }
+  async function startCodexLogin() {
+    const btn = $('startCodexLoginBtn');
+    btn.disabled = true; btn.textContent = t('common.loading') || '...';
+    try {
+      const res = await api('/auth/codex/login', { method: 'POST' });
+      const d = await res.json();
+      if (d.error) { toastError(d.error); return; }
+      $('codexStep1').classList.add('hidden');
+      $('codexStep2').classList.remove('hidden');
+      $('codexAuthUrl').textContent = d.authUrl;
+      $('codexOpenBtn').addEventListener('click', () => window.open(d.authUrl, '_blank'));
+      $('codexCopyBtn').addEventListener('click', async () => {
+        await copyText(d.authUrl);
+        toastPrimary(t('common.copied'));
+      });
+      $('codexCancelBtn').addEventListener('click', cancelCodexLogin);
+      pollCodexLogin();
+    } catch (e) {
+      toastError(t('common.failed') + ': ' + (e.message || e));
+    } finally {
+      btn.disabled = false; btn.textContent = t('codex.startLogin');
+    }
+  }
+  function pollCodexLogin() {
+    if (codexPollTimer) clearTimeout(codexPollTimer);
+    codexPollTimer = setTimeout(async () => {
+      try {
+        const res = await api('/auth/codex/poll', { method: 'POST' });
+        const d = await res.json();
+        if (d.pending) {
+          $('codexStatus').textContent = t('builderid.waiting');
+          pollCodexLogin();
+          return;
+        }
+        if (d.error) {
+          toastError(d.error);
+          return;
+        }
+        if (d.success) {
+          closeModal();
+          loadAccounts(); loadStats();
+          toastPrimary(t('codex.importSuccess') + ': ' + (d.account?.email || d.account?.id));
+          autoRefreshNewAccount(d.account?.id);
+        }
+      } catch (e) {
+        toastError(t('common.failed') + ': ' + (e.message || e));
+      }
+    }, 2000);
+  }
+  async function cancelCodexLogin() {
+    if (codexPollTimer) { clearTimeout(codexPollTimer); codexPollTimer = null; }
+    try { await api('/auth/codex/cancel', { method: 'POST' }); } catch {}
+    showModal('codex');
+  }
+
+  // modalCodexImport — manual paste of access_token + refresh_token from
+  // ~/.codex/auth.json (for users who already logged in via the official
+  // Codex CLI on this or another machine).
+  function modalCodexImport(title, body) {
+    title.textContent = t('codex.importTitle');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('codex.importDesc')) + '</p>' +
+      '<div class="form-group"><label>' + escapeHtml(t('codex.accessTokenLabel')) + '</label>' +
+      '<textarea id="codexAccessToken" class="font-mono" rows="3" placeholder="' + escapeAttr(t('codex.accessTokenPlaceholder')) + '"></textarea></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('codex.refreshTokenLabel')) + '</label>' +
+      '<textarea id="codexRefreshToken" class="font-mono" rows="2" placeholder="' + escapeAttr(t('codex.refreshTokenPlaceholder')) + '"></textarea></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('detail.nickname')) + '</label>' +
+      '<input type="text" id="codexNickname" placeholder="' + escapeAttr(t('codex.nicknamePlaceholder')) + '" /></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="codex" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="importCodexBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
+      '</div>';
+    $('importCodexBtn').addEventListener('click', importCodexTokens);
+  }
+  async function importCodexTokens() {
+    const accessToken = $('codexAccessToken').value.trim();
+    const refreshToken = $('codexRefreshToken').value.trim();
+    const nickname = $('codexNickname').value.trim();
+    if (!accessToken) return toastWarning(t('codex.accessTokenLabel') + ' is required');
+    if (!refreshToken) return toastWarning(t('codex.refreshTokenLabel') + ' is required');
+    const btn = $('importCodexBtn');
+    btn.disabled = true; btn.textContent = t('common.loading') || '...';
+    try {
+      const res = await api('/auth/codex-import', { method: 'POST', body: JSON.stringify({ accessToken, refreshToken, nickname }) });
+      const d = await res.json();
+      if (d.success) {
+        closeModal(); loadAccounts(); loadStats();
+        toastPrimary(t('codex.importSuccess') + ': ' + (d.account?.chatgptAccountId || d.account?.id));
+        autoRefreshNewAccount(d.account?.id);
+      } else toastError(d.error || t('common.failed'));
+    } catch (e) {
+      toastError(t('common.failed') + ': ' + (e.message || e));
+    } finally {
+      btn.disabled = false; btn.textContent = t('common.add');
+    }
+  }
+
+  // ==================== 9router import ====================
+
+  // modalNineRouter reads ~/.9router/db.json and shows a preview of the
+  // codex + kiro accounts found, with checkboxes to select which to import.
+  function modalNineRouter(title, body) {
+    title.textContent = t('modal.ninerouterTitle');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('ninerouter.desc')) + '</p>' +
+      '<div id="ninerouterPreview"><p class="text-center muted-text">' + escapeHtml(t('common.loading') || '...') + '</p></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '</div>';
+    loadNineRouterPreview();
+  }
+  async function loadNineRouterPreview() {
+    const container = $('ninerouterPreview');
+    if (!container) return;
+    try {
+      const res = await api('/auth/import-9router/preview', { method: 'POST' });
+      const d = await res.json();
+      if (d.error) {
+        container.innerHTML = '<div class="message message-error"><p>' + escapeHtml(d.error) + '</p></div>';
+        return;
+      }
+      const codex = d.codex || [];
+      const kiro = d.kiro || [];
+      const skipped = d.skipped || [];
+      if (codex.length === 0 && kiro.length === 0) {
+        container.innerHTML = '<div class="message message-info"><p>' + escapeHtml(t('ninerouter.noAccounts')) + '</p></div>';
+        return;
+      }
+      let html = '<p class="text-xs muted-text">' + escapeHtml(t('ninerouter.pathLabel')) + ': <code>' + escapeHtml(d.path) + '</code></p>';
+      // Codex group
+      if (codex.length > 0) {
+        html += '<div class="account-category-header" style="margin-top:0.5rem;">' +
+          '<span class="account-category-icon"><i class="fa-solid fa-robot"></i></span>' +
+          '<span class="account-category-title">' + escapeHtml(t('category.codex')) + ' (' + codex.length + ')</span>' +
+          '</div>';
+        html += '<div class="ninerouter-list">';
+        codex.forEach((c, i) => {
+          const checked = c.hasToken ? 'checked' : '';
+          const disabled = c.hasToken ? '' : 'disabled';
+          html += '<label class="ninerouter-row' + (c.hasToken ? '' : ' muted-text') + '">' +
+            '<input type="checkbox" class="ninerouter-codex-cb" data-idx="' + i + '" ' + checked + ' ' + disabled + ' />' +
+            '<span class="ninerouter-name">' + escapeHtml(c.name || '(unnamed)') + '</span>' +
+            (c.chatgptAccountId ? '<span class="badge badge-info">ID: ' + escapeHtml(String(c.chatgptAccountId).slice(0, 8)) + '</span>' : '') +
+            (c.planType ? '<span class="badge badge-free">' + escapeHtml(c.planType) + '</span>' : '') +
+            (c.hasToken ? '' : '<span class="text-xs">' + escapeHtml(t('ninerouter.noToken')) + '</span>') +
+            '</label>';
+        });
+        html += '</div>';
+      }
+      // Kiro group
+      if (kiro.length > 0) {
+        html += '<div class="account-category-header" style="margin-top:0.75rem;">' +
+          '<span class="account-category-icon"><i class="fa-solid fa-cloud"></i></span>' +
+          '<span class="account-category-title">' + escapeHtml(t('category.kiro')) + ' (' + kiro.length + ')</span>' +
+          '</div>';
+        html += '<div class="ninerouter-list">';
+        kiro.forEach((k, i) => {
+          const checked = k.hasToken ? 'checked' : '';
+          const disabled = k.hasToken ? '' : 'disabled';
+          html += '<label class="ninerouter-row' + (k.hasToken ? '' : ' muted-text') + '">' +
+            '<input type="checkbox" class="ninerouter-kiro-cb" data-idx="' + i + '" ' + checked + ' ' + disabled + ' />' +
+            '<span class="ninerouter-name">' + escapeHtml(k.name || '(unnamed)') + '</span>' +
+            (k.profileArn ? '<span class="text-xs">' + escapeHtml(k.profileArn.split('/').pop()) + '</span>' : '') +
+            (k.hasToken ? '' : '<span class="text-xs">' + escapeHtml(t('ninerouter.noToken')) + '</span>') +
+            '</label>';
+        });
+        html += '</div>';
+      }
+      // Skipped providers
+      if (skipped.length > 0) {
+        html += '<p class="text-xs muted-text" style="margin-top:0.5rem;">' + escapeHtml(t('ninerouter.skipped') + ': ' + skipped.join(', ')) + '</p>';
+      }
+      html += '<div class="modal-footer" style="margin-top:0.75rem;">' +
+        '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+        '<button class="btn btn-primary" id="import9RouterBtn" type="button">' + escapeHtml(t('ninerouter.importSelected')) + '</button>' +
+        '</div>';
+      container.innerHTML = html;
+      $('import9RouterBtn').addEventListener('click', importFrom9Router);
+    } catch (e) {
+      container.innerHTML = '<div class="message message-error"><p>' + escapeHtml(t('common.failed') + ': ' + (e.message || e)) + '</p></div>';
+    }
+  }
+  async function importFrom9Router() {
+    const importCodex = Array.from(qsa('.ninerouter-codex-cb')).some(cb => cb.checked);
+    const importKiro = Array.from(qsa('.ninerouter-kiro-cb')).some(cb => cb.checked);
+    const btn = $('import9RouterBtn');
+    btn.disabled = true; btn.textContent = t('common.loading') || '...';
+    try {
+      const res = await api('/auth/import-9router', { method: 'POST', body: JSON.stringify({ importCodex, importKiro, refreshKiro: true }) });
+      const d = await res.json();
+      if (d.success) {
+        closeModal(); loadAccounts(); loadStats();
+        const ok = d.importedCount || 0;
+        const skipped = d.skippedCount || 0;
+        let msg = t('ninerouter.importDone') + ': ' + ok + ' imported';
+        if (skipped > 0) msg += ', ' + skipped + ' skipped';
+        // Surface any per-account errors
+        const errors = (d.imported || []).filter(x => x.status === 'error');
+        if (errors.length > 0) {
+          msg += ' ⚠️ ' + errors.length + ' errors';
+        }
+        toastPrimary(msg, { duration: 8000 });
+      } else toastError(d.error || t('common.failed'));
+    } catch (e) {
+      toastError(t('common.failed') + ': ' + (e.message || e));
+    } finally {
+      btn.disabled = false; btn.textContent = t('ninerouter.importSelected');
+    }
+  }
+
   function updateLocalFields() {
     const p = $('localProvider').value;
     $('localClientGroup').classList.toggle('hidden', p === 'Google' || p === 'Github');

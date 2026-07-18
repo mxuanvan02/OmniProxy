@@ -52,10 +52,10 @@ func TestParseTomlLine(t *testing.T) {
 		},
 		{
 			name:           "section header",
-			line:           "[model_providers.superkiro]",
+			line:           "[model_providers.omniproxy]",
 			section:        "",
 			expectedType:   LineSection,
-			expectedKey:    "model_providers.superkiro",
+			expectedKey:    "model_providers.omniproxy",
 			expectedActive: true,
 		},
 		{
@@ -172,11 +172,11 @@ func TestMergeCodexConfigEmpty(t *testing.T) {
 	if !strings.Contains(content, `model = "claude-sonnet-4.5"`) {
 		t.Error("Missing model setting")
 	}
-	if !strings.Contains(content, `model_provider = "superkiro"`) {
+	if !strings.Contains(content, `model_provider = "omniproxy"`) {
 		t.Error("Missing model_provider setting")
 	}
-	if !strings.Contains(content, "[model_providers.superkiro]") {
-		t.Error("Missing superkiro section")
+	if !strings.Contains(content, "[model_providers.omniproxy]") {
+		t.Error("Missing omniproxy section")
 	}
 	if !strings.Contains(content, `base_url = "http://localhost:8080/v1"`) {
 		t.Error("Missing base_url")
@@ -236,7 +236,7 @@ model = "gpt-4o-mini"
 	if !strings.Contains(content, `model = "claude-sonnet-4.5"`) {
 		t.Error("New model missing")
 	}
-	if !strings.Contains(content, `model_provider = "superkiro"`) {
+	if !strings.Contains(content, `model_provider = "omniproxy"`) {
 		t.Error("New provider missing")
 	}
 
@@ -251,9 +251,9 @@ model = "gpt-4o-mini"
 		t.Error("trust_level should be preserved")
 	}
 
-	// SuperKiro section should exist
-	if !strings.Contains(content, "[model_providers.superkiro]") {
-		t.Error("SuperKiro section missing")
+	// OmniProxy section should exist
+	if !strings.Contains(content, "[model_providers.omniproxy]") {
+		t.Error("OmniProxy section missing")
 	}
 
 	// Old subagent should be commented, new one added
@@ -269,10 +269,10 @@ func TestMergeCodexConfigIdempotent(t *testing.T) {
 	os.MkdirAll(codexDir, 0755)
 
 	existingConfig := `model = "claude-sonnet-4.5"
-model_provider = "superkiro"
+model_provider = "omniproxy"
 
-[model_providers.superkiro]
-name = "SuperKiro"
+[model_providers.omniproxy]
+name = "OmniProxy"
 base_url = "http://localhost:8080/v1"
 wire_api = "responses"
 
@@ -369,7 +369,7 @@ trusted_hash = "sha256:abc123"
 	if !strings.Contains(content, `model = "claude-sonnet-4.5"`) {
 		t.Error("New model missing")
 	}
-	if !strings.Contains(content, `model_provider = "superkiro"`) {
+	if !strings.Contains(content, `model_provider = "omniproxy"`) {
 		t.Error("New provider missing")
 	}
 
@@ -390,8 +390,8 @@ trusted_hash = "sha256:abc123"
 		t.Error("TUI section should be preserved")
 	}
 
-	// SuperKiro section should exist
-	if !strings.Contains(content, "[model_providers.superkiro]") {
-		t.Error("SuperKiro section should be added")
+	// OmniProxy section should exist
+	if !strings.Contains(content, "[model_providers.omniproxy]") {
+		t.Error("OmniProxy section should be added")
 	}
 }

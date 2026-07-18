@@ -1,6 +1,6 @@
 'use strict';
 
-// SuperKiro Usage Page — real-time topology, chart, and tables
+// OmniProxy Usage Page — real-time topology, chart, and tables
 // Ported from 9Router's React-based usage page to vanilla JS
 
 // ─── State ───────────────────────────────────────────────
@@ -344,8 +344,8 @@ function renderTopology() {
     return Math.max(40, Math.ceil(textW + 6));
   });
 
-  // Center node width: fit "SuperKiro" + badge space
-  const centerTextW = estimateTextWidth("SuperKiro", centerFontSize);
+  // Center node width: fit "OmniProxy" + badge space
+  const centerTextW = estimateTextWidth("OmniProxy", centerFontSize);
   const centerTextPad = 20;
   const centerBadgeSpace = activeSet.size > 0 ? 28 : 0;
   const centerNodeW = Math.max(80, Math.ceil(centerTextW + centerTextPad + centerBadgeSpace));
@@ -466,7 +466,7 @@ function renderTopology() {
       'fill="none" stroke="' + (isActive ? '#22c55e' : 'var(--foreground)') + '" stroke-width="' + (isActive ? '2.5' : '2') + '"' +
       (isActive ? ' filter="url(#activeGlow)"' : '') + '/>';
     // Avatar circle with initial
-    // Name text — centered in node like SuperKiro
+    // Name text — centered in node like OmniProxy
     svg += '<text x="' + ax + '" y="' + (ay + 4) + '" text-anchor="middle" fill="var(--foreground)" font-size="' + nodeFontSize + '" font-weight="500">' + escHtml(displayName) + '</text>';
     // Active indicator
     if (isActive) {
@@ -484,12 +484,12 @@ function renderTopology() {
     svg += '</g>';
   }
 
-  // Center SuperKiro node
+  // Center OmniProxy node
   svg += '<g class="usage-topo-center">';
-  svg += '<title>' + (typeof t === 'function' ? t('usage.superKiroRouter') : 'SuperKiro Router') + '</title>';
+  svg += '<title>' + (typeof t === 'function' ? t('usage.superKiroRouter') : 'OmniProxy Router') + '</title>';
   svg += '<rect x="' + (cx - centerNodeW / 2) + '" y="' + (cy - centerNodeH / 2) + '" width="' + centerNodeW + '" height="' + centerNodeH + '" ' +
     'fill="none" stroke="var(--primary)" stroke-width="2.5" rx="12" ry="12"/>';
-  svg += '<text x="' + cx + '" y="' + (cy + 5) + '" text-anchor="middle" fill="var(--foreground)" font-size="' + centerFontSize + '" font-weight="700">' + (typeof t === 'function' ? t('usage.superKiro') : 'SuperKiro') + '</text>';
+  svg += '<text x="' + cx + '" y="' + (cy + 5) + '" text-anchor="middle" fill="var(--foreground)" font-size="' + centerFontSize + '" font-weight="700">' + (typeof t === 'function' ? t('usage.superKiro') : 'OmniProxy') + '</text>';
   if (activeSet.size > 0) {
     const badgeX = cx + centerNodeW / 2 - 10;
     const badgeW = 20;

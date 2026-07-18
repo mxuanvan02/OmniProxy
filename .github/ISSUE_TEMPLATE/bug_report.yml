@@ -110,15 +110,15 @@ body:
       label: Environment / 环境信息 / Môi trường
       description: Please complete the following information. / 请补全下列信息。 / Vui lòng điền các thông tin sau.
       placeholder: |
-        - Version: v1.1.1 / ghcr.io/quorinex/superkiro:latest / commit 1f54f29
+        - Version: v1.1.1 / ghcr.io/mxuanvan02/omniproxy:latest / commit 1f54f29
         - Deployment: Docker Compose / docker run / built from source
         - OS: Ubuntu 22.04 / Windows 11 / macOS 14
 
-        - 版本：v1.1.1 / ghcr.io/quorinex/superkiro:latest / commit 1f54f29
+        - 版本：v1.1.1 / ghcr.io/mxuanvan02/omniproxy:latest / commit 1f54f29
         - 部署方式：Docker Compose / docker run / 源码编译
         - 操作系统：Ubuntu 22.04 / Windows 11 / macOS 14
 
-        - Phiên bản: v1.1.1 / ghcr.io/quorinex/superkiro:latest / commit 1f54f29
+        - Phiên bản: v1.1.1 / ghcr.io/mxuanvan02/omniproxy:latest / commit 1f54f29
         - Triển khai: Docker Compose / docker run / build từ mã nguồn
         - Hệ điều hành: Ubuntu 22.04 / Windows 11 / macOS 14
 

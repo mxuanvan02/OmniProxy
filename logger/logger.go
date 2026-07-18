@@ -1,4 +1,4 @@
-// Package logger provides a lightweight leveled logger for SuperKiro.
+// Package logger provides a lightweight leveled logger for OmniProxy.
 //
 // Levels (from most to least verbose):
 //

@@ -1,12 +1,12 @@
 <p align="center">
-  <a href="https://github.com/lenhanpham/SuperKiro">
+  <a href="https://github.com/mxuanvan02/OmniProxy">
     <picture>
-      <img src="web/icon.svg" alt="SuperKiro" style="width: 25%;">
+      <img src="web/icon.svg" alt="OmniProxy" style="width: 25%;">
     </picture>
   </a>
 </p>
 
-# SuperKiro
+# OmniProxy
 <div align="center">
   <a href="https://go.dev/">
     <img src="https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go" alt="Go Version">
@@ -30,9 +30,9 @@
 
 
 <p align="center">
-  <a href="https://github.com/lenhanpham/SuperKiro">
+  <a href="https://github.com/mxuanvan02/OmniProxy">
     <picture>
-      <img src="resources/webui.jpg" alt="SuperKiro" style="width: 75%;">
+      <img src="resources/webui.jpg" alt="OmniProxy" style="width: 75%;">
     </picture>
   </a>
 </p>
@@ -59,8 +59,8 @@ Không phải tất cả IDE, công cụ CLI và Agent đều được kiểm tr
 ### Docker Compose (Khuyến nghị)
 
 ```bash
-git clone https://github.com/lenhanpham/SuperKiro.git
-cd SuperKiro
+git clone https://github.com/mxuanvan02/OmniProxy.git
+cd OmniProxy
 mkdir -p data
 docker-compose up -d
 ```
@@ -69,21 +69,21 @@ docker-compose up -d
 
 ```bash
 docker run -d \
-  --name superkiro \
+  --name omniproxy \
   -p 8080:8080 \
   -e ADMIN_PASSWORD=your_secure_password \
   -v /path/to/data:/app/data \
   --restart unless-stopped \
-  ghcr.io/lenhanpham/superkiro:latest
+  ghcr.io/mxuanvan02/omniproxy:latest
 ```
 
 ### Build từ mã nguồn
 
 ```bash
-git clone https://github.com/lenhanpham/SuperKiro.git
-cd SuperKiro
-go build -o superkiro .
-./superkiro
+git clone https://github.com/mxuanvan02/OmniProxy.git
+cd OmniProxy
+go build -o omniproxy .
+./omniproxy
 ```
 
 ### Triển khai trên Zeabur
@@ -160,7 +160,7 @@ Chào đón thảo luận thân thiện. Nếu gặp vấn đề, hãy thử h�
 
 ## Ghi nhận
 
-- SuperKiro là dự án fork từ Kiro-Go và được phát triển dựa trên [Kiro-Go](https://github.com/Quorinex/Kiro-Go) 
+- OmniProxy là dự án fork từ Kiro-Go và được phát triển dựa trên [Kiro-Go](https://github.com/Quorinex/Kiro-Go) 
 
 ## Tuyên bố miễn trừ
 

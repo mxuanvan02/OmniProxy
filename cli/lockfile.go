@@ -11,9 +11,9 @@ import (
 
 func PIDPath(configPath string) string {
 	if exe, err := os.Executable(); err == nil {
-		return filepath.Join(filepath.Dir(exe), "data", "superkiro.pid")
+		return filepath.Join(filepath.Dir(exe), "data", "omniproxy.pid")
 	}
-	return filepath.Join(filepath.Dir(configPath), "superkiro.pid")
+	return filepath.Join(filepath.Dir(configPath), "omniproxy.pid")
 }
 
 func CheckAndKillExisting(pidPath string) bool {
@@ -34,7 +34,7 @@ func CheckAndKillExisting(pidPath string) bool {
 		return false
 	}
 
-	fmt.Printf("  Killing existing SuperKiro (PID: %d)...\n", pid)
+	fmt.Printf("  Killing existing OmniProxy (PID: %d)...\n", pid)
 
 	platformSendTermination(pid)
 	time.Sleep(500 * time.Millisecond)
@@ -45,7 +45,7 @@ func CheckAndKillExisting(pidPath string) bool {
 	}
 
 	os.Remove(pidPath)
-	fmt.Println("  SuperKiro is killed.")
+	fmt.Println("  OmniProxy is killed.")
 	return true
 }
 

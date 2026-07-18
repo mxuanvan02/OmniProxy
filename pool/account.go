@@ -3,7 +3,7 @@
 package pool
 
 import (
-	"superkiro/config"
+	"omniproxy/config"
 	"strings"
 	"sync"
 	"sync/atomic"

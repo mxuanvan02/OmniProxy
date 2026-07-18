@@ -68,6 +68,12 @@ type Account struct {
 	// Bearer key. Empty for native Kiro/AWS accounts.
 	BaseURL string `json:"baseUrl,omitempty"`
 
+	// ChatGPTAccountID is the chatgpt_account_id extracted from the Codex
+	// OAuth access token's JWT payload. Required for AuthMethod == "codex":
+	// OpenAI's /v1/responses endpoint routes by this header
+	// (chatgpt-account-id) when using a ChatGPT subscription login.
+	ChatGPTAccountID string `json:"chatgptAccountId,omitempty"`
+
 	// Priority weight for load balancing (higher = more requests)
 	Weight int `json:"weight,omitempty"` // 0 or 1 = normal, 2+ = higher priority
 
@@ -133,6 +139,22 @@ type Account struct {
 	ExtKeyMasked        string  `json:"extKeyMasked,omitempty"`
 	ExtLastUsedAt       int64   `json:"extLastUsedAt,omitempty"`
 	ExtCreditsCheckedAt int64   `json:"extCreditsCheckedAt,omitempty"`
+
+	// Codex (ChatGPT subscription) usage tracking.
+	// Populated from JWT claims at login/import and from x-codex-*
+	// response headers on each request. AuthMethod == "codex" only.
+	CodexPlanType            string `json:"codexPlanType,omitempty"`            // "free", "plus", "team", "pro"
+	CodexActiveLimit         string `json:"codexActiveLimit,omitempty"`         // "premium", "standard"
+	CodexEmail               string `json:"codexEmail,omitempty"`               // email from JWT profile
+	CodexName                string `json:"codexName,omitempty"`                // display name from JWT
+	CodexPrimaryUsedPercent  int    `json:"codexPrimaryUsedPercent,omitempty"`  // 0-100
+	CodexSecondaryUsedPercent int   `json:"codexSecondaryUsedPercent,omitempty"` // 0-100
+	CodexPrimaryWindowMinutes int    `json:"codexPrimaryWindowMinutes,omitempty"` // rolling window (e.g. 10080 = 7d)
+	CodexPrimaryResetAt      int64  `json:"codexPrimaryResetAt,omitempty"`      // Unix seconds
+	CodexSecondaryResetAt    int64  `json:"codexSecondaryResetAt,omitempty"`    // Unix seconds
+	CodexCreditsBalance      int    `json:"codexCreditsBalance,omitempty"`      // purchased credits remaining
+	CodexCreditsUnlimited    bool   `json:"codexCreditsUnlimited,omitempty"`    // unlimited credits flag
+	CodexUsageCheckedAt      int64  `json:"codexUsageCheckedAt,omitempty"`      // last header capture timestamp
 }
 
 // PromptFilterRule defines a single custom prompt sanitization rule.
@@ -661,6 +683,63 @@ func UpdateAccountProfileArn(id, profileArn string) error {
 	for i, a := range cfg.Accounts {
 		if a.ID == id {
 			cfg.Accounts[i].ProfileArn = profileArn
+			return Save()
+		}
+	}
+	return nil
+}
+
+// UpdateAccountChatGPTAccountID persists a refreshed chatgpt_account_id onto
+// a Codex-subscription account. The account_id is extracted from each new
+// access-token JWT and may rotate if OpenAI re-issues the user's account.
+func UpdateAccountChatGPTAccountID(id, accountID string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			cfg.Accounts[i].ChatGPTAccountID = accountID
+			return Save()
+		}
+	}
+	return nil
+}
+
+// UpdateAccountCodexUsage stores Codex rate-limit / usage headers captured
+// from the upstream /v1/responses response. Called after every Codex request.
+func UpdateAccountCodexUsage(id string, planType, activeLimit string,
+	primaryPct, secondaryPct, primaryWindow int,
+	primaryResetAt, secondaryResetAt int64,
+	creditsBalance int, creditsUnlimited bool) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			cfg.Accounts[i].CodexPlanType = planType
+			cfg.Accounts[i].CodexActiveLimit = activeLimit
+			cfg.Accounts[i].CodexPrimaryUsedPercent = primaryPct
+			cfg.Accounts[i].CodexSecondaryUsedPercent = secondaryPct
+			cfg.Accounts[i].CodexPrimaryWindowMinutes = primaryWindow
+			cfg.Accounts[i].CodexPrimaryResetAt = primaryResetAt
+			cfg.Accounts[i].CodexSecondaryResetAt = secondaryResetAt
+			cfg.Accounts[i].CodexCreditsBalance = creditsBalance
+			cfg.Accounts[i].CodexCreditsUnlimited = creditsUnlimited
+			cfg.Accounts[i].CodexUsageCheckedAt = time.Now().Unix()
+			return Save()
+		}
+	}
+	return nil
+}
+
+// UpdateAccountCodexProfile stores JWT-extracted profile fields (email, name,
+// plan_type) for a Codex account. Called at OAuth login / import time.
+func UpdateAccountCodexProfile(id, email, name, planType string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			cfg.Accounts[i].CodexEmail = email
+			cfg.Accounts[i].CodexName = name
+			cfg.Accounts[i].CodexPlanType = planType
 			return Save()
 		}
 	}

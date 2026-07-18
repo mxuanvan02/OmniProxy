@@ -1,4 +1,4 @@
-// Package cli provides the interactive terminal interface for SuperKiro.
+// Package cli provides the interactive terminal interface for OmniProxy.
 package cli
 
 import (
@@ -8,10 +8,10 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"superkiro/config"
-	"superkiro/logger"
-	"superkiro/pool"
-	"superkiro/proxy"
+	"omniproxy/config"
+	"omniproxy/logger"
+	"omniproxy/pool"
+	"omniproxy/proxy"
 	"net/http"
 	"syscall"
 )
@@ -22,10 +22,10 @@ func ShowMenu(addr string, pidPath string, shutdown func()) {
 	showMenu(addr, pidPath, shutdown)
 }
 
-// RunDaemon starts SuperKiro in background daemon mode, logging to a file,
+// RunDaemon starts OmniProxy in background daemon mode, logging to a file,
 // and blocks until a termination signal is received.
 func RunDaemon(configPath string) {
-	logFile := filepath.Join(filepath.Dir(configPath), "superkiro.log")
+	logFile := filepath.Join(filepath.Dir(configPath), "omniproxy.log")
 	f, err := os.OpenFile(logFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to open log file: %v\n", err)
@@ -69,7 +69,7 @@ func RunDaemon(configPath string) {
 	}()
 
 	WritePID(pidPath)
-	logger.Infof("SuperKiro started in background on http://%s (PID: %d)", addr, os.Getpid())
+	logger.Infof("OmniProxy started in background on http://%s (PID: %d)", addr, os.Getpid())
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)

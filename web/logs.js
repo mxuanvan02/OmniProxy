@@ -1,6 +1,6 @@
 'use strict';
 
-// SuperKiro Logs Page — live-tail the proxy log via SSE, with level filter + search.
+// OmniProxy Logs Page — live-tail the proxy log via SSE, with level filter + search.
 
 let logsState = {
   eventSource: null,

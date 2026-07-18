@@ -1,3 +1,3 @@
-go build -o superkiro . 
+go build -o omniproxy . 
 
  

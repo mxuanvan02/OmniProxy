@@ -2,7 +2,7 @@ package pool
 
 import (
 	"errors"
-	"superkiro/config"
+	"omniproxy/config"
 	"path/filepath"
 	"testing"
 	"time"

@@ -1704,6 +1704,105 @@ img.brand-icon {
 }
 
 /* Account cards */
+.account-category-group {
+  margin-bottom: 1rem;
+}
+.account-category-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.25rem;
+  margin-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.account-category-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-secondary);
+}
+.account-category-title {
+  flex: 1;
+}
+.account-category-count {
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: var(--text-muted);
+  background: var(--surface-2);
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+}
+/* 9router import preview rows */
+/* Add Account modal — category sections */
+.add-category-section {
+  margin-bottom: 1rem;
+}
+.add-category-section:last-of-type {
+  margin-bottom: 0.5rem;
+}
+.add-category-header {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.25rem;
+  margin-bottom: 0.5rem;
+  border-bottom: 1px solid var(--border);
+}
+.add-category-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+}
+.add-category-title {
+  font-size: 0.9375rem;
+  font-weight: 700;
+  color: var(--text);
+}
+.add-category-desc {
+  flex: 1;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  text-align: right;
+}
+.ninerouter-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-top: 0.25rem;
+}
+.ninerouter-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.625rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-size: 0.8125rem;
+}
+.ninerouter-row:hover {
+  border-color: var(--accent);
+}
+.ninerouter-row.muted-text {
+  opacity: 0.55;
+}
+.ninerouter-name {
+  flex: 1;
+  font-weight: 500;
+}
 .account-card {
   background: var(--card);
   border: 1px solid var(--border);
@@ -1884,6 +1983,41 @@ img.brand-icon {
 }
 .usage-fill.critical {
   background: var(--destructive);
+}
+/* Codex usage bar (detail panel) */
+.codex-usage-bar {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+  width: 120px;
+  height: 18px;
+  background: var(--muted);
+  border-radius: 9999px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  vertical-align: middle;
+}
+.codex-usage-fill {
+  height: 100%;
+  background: var(--success);
+  transition: width 0.3s;
+}
+.codex-usage-fill.warning {
+  background: var(--warning);
+}
+.codex-usage-fill.critical {
+  background: var(--destructive);
+}
+.codex-usage-label {
+  position: absolute;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 0.625rem;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 18px;
+  text-shadow: 0 0 4px rgba(0,0,0,0.3);
 }
 .usage-text {
   display: flex;

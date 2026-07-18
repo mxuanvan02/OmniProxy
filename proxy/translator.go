@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"superkiro/config"
+	"omniproxy/config"
 	"time"
 
 	"github.com/google/uuid"

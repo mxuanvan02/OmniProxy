@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>SuperKiro</title>
+  <title>OmniProxy</title>
   <link rel="icon" type="image/x-icon" href="/admin/favicon.ico" />
   <script src="/admin/vendor/tailwindcss-browser/index.global.js"></script>
   <link rel="stylesheet" href="/admin/vendor/fontawesome/css/all.min.css" />
@@ -41,9 +41,9 @@
     </div>
     <header class="login-topbar">
       <div class="login-topbar-inner">
-        <div class="brand" aria-label="SuperKiro" data-i18n-aria-label="app.title">
+        <div class="brand" aria-label="OmniProxy" data-i18n-aria-label="app.title">
           <img class="brand-icon" src="/admin/favicon.ico" alt="" />
-          <span class="brand-text">SuperKiro</span>
+          <span class="brand-text">OmniProxy</span>
         </div>
         <div class="topbar-actions">
           <div class="lang-switch" id="loginLangSwitch" role="group" aria-label="" data-i18n-aria-label="lang.label">
@@ -97,7 +97,7 @@
         <div class="brand-wrap">
           <div class="brand">
             <img class="brand-icon" src="/admin/favicon.ico" alt="" />
-            <span class="brand-text">SuperKiro</span>
+            <span class="brand-text">OmniProxy</span>
           </div>
         </div>
         <nav class="header-nav" aria-label="" data-i18n-aria-label="aria.sections">
@@ -321,6 +321,12 @@
             </div>
             <div class="toolbar-spacer"></div>
             <input type="text" id="filterSearch" class="w-56!" data-i18n-placeholder="filter.search" />
+            <select id="filterCategorySelect" class="w-36!" data-i18n-aria-label="filter.category">
+              <option value="all" data-i18n="filter.allCategories"></option>
+              <option value="kiro" data-i18n="category.kiro"></option>
+              <option value="codex" data-i18n="category.codex"></option>
+              <option value="external" data-i18n="category.external"></option>
+            </select>
             <select id="filterStatusSelect" class="w-32!" data-i18n-aria-label="filter.status">
               <option value="all" data-i18n="filter.all"></option>
               <option value="enabled" data-i18n="filter.enabled"></option>
@@ -622,7 +628,7 @@
             <img class="footer-icon" src="/admin/favicon.ico" alt="" />
             <div class="footer-copy">
               <div class="footer-title-row">
-                <span class="footer-title">SuperKiro</span>
+                <span class="footer-title">OmniProxy</span>
                 <span class="footer-version" id="versionBadge" aria-label=""
                   data-i18n-aria-label="aria.currentVersion"></span>
                 <span class="footer-version-status" id="statusBadge" data-i18n-title="status.running" title="">
@@ -642,7 +648,7 @@
                 <i class="fa-solid fa-rotate" aria-hidden="true"></i>
                 <span data-i18n="update.check" data-update-label></span>
               </button>
-              <a class="footer-link" href="https://github.com/lenhanpham/SuperKiro" target="_blank" rel="noopener">
+              <a class="footer-link" href="https://github.com/mxuanvan02/OmniProxy" target="_blank" rel="noopener">
                 <i class="fa-brands fa-github" aria-hidden="true"></i>
                 <span data-i18n="footer.github"></span>
               </a>
@@ -650,7 +656,7 @@
           </div>
         </div>
         <div class="footer-meta">
-          <span>© <span id="footerYear"></span> SuperKiro</span>
+          <span>© <span id="footerYear"></span> OmniProxy</span>
         </div>
       </div>
     </footer>
