@@ -1065,6 +1065,8 @@ let customSelectRefreshQueued = false;
       else if (a === 'loadModels') loadModels(id);
       else if (a === 'refreshModels') refreshAccountModels(id);
       else if (a === 'refreshCredits') refreshAccountCredits(id);
+      else if (a === 'refreshToken') refreshAccountToken(id);
+      else if (a === 'refresh') refreshAccount(id);
     });
   }
 

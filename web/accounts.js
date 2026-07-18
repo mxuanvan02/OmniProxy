@@ -109,6 +109,26 @@ let testModalRunning = false;
     if (s.includes('PRO')) return '<span class="badge badge-pro">' + escapeHtml(formatSubscriptionLabel(type)) + '</span>';
     return '<span class="badge badge-free">' + escapeHtml(formatSubscriptionLabel(type)) + '</span>';
   }
+  // getCodexPlanBadge returns a colored badge for the Codex plan type
+  // (free/plus/team/pro). Mirrors the Kiro subscription badge styling so
+  // Codex cards have a comparable tier indicator.
+  function getCodexPlanBadge(plan) {
+    if (!plan) return '';
+    var p = String(plan).toLowerCase();
+    var cls = 'badge-free';
+    if (p === 'pro') cls = 'badge-pro';
+    else if (p === 'team') cls = 'badge-proplus';
+    else if (p === 'plus') cls = 'badge-info';
+    return '<span class="badge ' + cls + '">' + escapeHtml(formatCodexPlan(plan)) + '</span>';
+  }
+  // getCodexLimitBadge returns a badge for the Codex active limit
+  // (premium/standard). Shown alongside the plan badge on Codex cards.
+  function getCodexLimitBadge(limit) {
+    if (!limit) return '';
+    var l = String(limit).toLowerCase();
+    var cls = l === 'premium' ? 'badge-pro' : 'badge-free';
+    return '<span class="badge ' + cls + '">' + escapeHtml(limit) + '</span>';
+  }
   function getTrialBadge(a) {
     if (a.trialStatus === 'ACTIVE' && a.trialUsageLimit > 0) {
       return '<span class="badge badge-trial">' + escapeHtml(t('accounts.trial')) + '</span>';
@@ -311,9 +331,14 @@ let testModalRunning = false;
       const userSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
       const copySvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
 
-      // Codex accounts: show chatgpt_account_id + plan badge if present.
-      const codexBadge = isCodex && a.chatgptAccountId ?
-        '<span class="badge badge-info">ID: ' + escapeHtml(String(a.chatgptAccountId).slice(0, 8)) + '</span>' : '';
+      // Codex accounts: show plan + active-limit + chatgpt_account_id badges.
+      // These mirror the Kiro subscription badge so Codex cards have a
+      // comparable tier indicator at a glance.
+      const codexBadge = isCodex ?
+        (getCodexPlanBadge(a.codexPlanType) +
+         getCodexLimitBadge(a.codexActiveLimit) +
+         (a.chatgptAccountId ? '<span class="badge badge-info">ID: ' + escapeHtml(String(a.chatgptAccountId).slice(0, 8)) + '</span>' : ''))
+        : '';
 
       return '' +
         '<div class="account-card' + (isSelected ? ' selected' : '') + '" data-id="' + idAttr + '">' +
@@ -371,17 +396,24 @@ let testModalRunning = false;
           '<div class="account-usage"><div class="usage-label">' + escapeHtml(t('accounts.extCredits')) +
           ' <button class="btn btn-icon btn-sm btn-ghost" data-action="refreshCredits" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.refreshCredits')) + '">' + refreshSvg + '</button>' +
           '</div><div class="usage-text"><span>' + escapeHtml(t('accounts.extCreditsNoLimit')) + '</span></div></div>' : '') +
-        (isCodex && (a.codexPrimaryUsedPercent || a.codexUsageCheckedAt) ?
+        (isCodex && (a.codexPrimaryUsedPercent || a.codexSecondaryUsedPercent || a.codexUsageCheckedAt) ?
           '<div class="account-usage">' +
           '<div class="usage-label">' + escapeHtml(t('detail.codexUsage')) +
-          (a.codexPlanType ? ' <span class="badge badge-info">' + escapeHtml(formatCodexPlan(a.codexPlanType)) + '</span>' : '') +
-          (a.codexActiveLimit ? ' <span class="badge badge-info">' + escapeHtml(a.codexActiveLimit) + '</span>' : '') +
+          ' <button class="btn btn-icon btn-sm btn-ghost" data-action="refresh" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.refresh')) + '">' + refreshSvg + '</button>' +
           '</div>' +
           (a.codexPrimaryUsedPercent ?
             '<div class="usage-bar"><div class="usage-fill ' + (a.codexPrimaryUsedPercent >= 90 ? 'critical' : a.codexPrimaryUsedPercent >= 70 ? 'high' : '') + '" data-usage-pct="' + escapeAttr(a.codexPrimaryUsedPercent) + '"></div></div>' +
-            '<div class="usage-text"><span>' + escapeHtml(t('detail.codexPrimaryUsed')) + '</span><span>' + a.codexPrimaryUsedPercent + '%</span></div>'
+            '<div class="usage-text"><span>' + escapeHtml(t('detail.codexPrimaryUsed')) + (a.codexPrimaryResetAt ? ' · ' + escapeHtml(formatResetTime(a.codexPrimaryResetAt)) : '') + '</span><span>' + a.codexPrimaryUsedPercent + '%</span></div>'
             : '<div class="usage-text"><span>' + escapeHtml(t('detail.codexUsageHint')) + '</span></div>') +
+          (a.codexSecondaryUsedPercent ?
+            '<div class="usage-bar" style="margin-top:0.25rem"><div class="usage-fill ' + (a.codexSecondaryUsedPercent >= 90 ? 'critical' : a.codexSecondaryUsedPercent >= 70 ? 'high' : '') + '" data-usage-pct="' + escapeAttr(a.codexSecondaryUsedPercent) + '"></div></div>' +
+            '<div class="usage-text"><span>' + escapeHtml(t('detail.codexSecondaryUsed')) + (a.codexSecondaryResetAt ? ' · ' + escapeHtml(formatResetTime(a.codexSecondaryResetAt)) : '') + '</span><span>' + a.codexSecondaryUsedPercent + '%</span></div>'
+            : '') +
           '</div>' : '') +
+        (isCodex && !a.codexPrimaryUsedPercent && !a.codexUsageCheckedAt ?
+          '<div class="account-usage"><div class="usage-label">' + escapeHtml(t('detail.codexUsage')) +
+          ' <button class="btn btn-icon btn-sm btn-ghost" data-action="refresh" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.refresh')) + '">' + refreshSvg + '</button>' +
+          '</div><div class="usage-text"><span>' + escapeHtml(t('detail.codexUsageHint')) + '</span></div></div>' : '') +
         '<div class="account-stats">' +
         '<div class="account-stat"><div class="account-stat-value">' + (a.requestCount || 0) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.requests')) + '</div></div>' +
         '<div class="account-stat"><div class="account-stat-value">' + formatNum(a.totalTokens || 0) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.tokens')) + '</div></div>' +
@@ -397,12 +429,40 @@ let testModalRunning = false;
     try {
       const res = await api('/accounts/' + id + '/refresh', { method: 'POST' });
       const d = await res.json();
-      if (d.success) loadAccounts();
-      else toastError(t('accounts.refreshFailed') + ': ' + (d.error || ''));
+      if (d.success) {
+        loadAccounts();
+        if (d.message) toast(t('accounts.refreshed') + ': ' + d.message, 'success');
+      } else {
+        toastError(t('accounts.refreshFailed') + ': ' + (d.error || ''));
+      }
     } catch (e) {
       toastError(t('accounts.refreshFailed'));
     }
     if (card) card.classList.remove('loading');
+  }
+  // refreshAccountToken forces an OAuth refresh-token flow for the account.
+  // Used by the "Refresh token" button in the detail panel. Returns true
+  // on success so the caller can reload the detail modal with fresh data.
+  async function refreshAccountToken(id) {
+    const dismiss = toast(t('detail.refreshToken') + '…', 'info', { duration: 0 });
+    try {
+      const res = await api('/accounts/' + id + '/refresh-token', { method: 'POST' });
+      const d = await res.json();
+      dismiss();
+      if (d.success) {
+        toast(t('detail.tokenRefreshed'), 'success');
+        await loadAccounts();
+        // Reopen detail modal with fresh data
+        const a = accountsData.find(x => x.id === id);
+        if (a) showDetail(id);
+        return true;
+      }
+      toastError(t('detail.tokenRefreshFailed') + ': ' + (d.error || ''));
+    } catch (e) {
+      dismiss();
+      toastError(t('detail.tokenRefreshFailed'));
+    }
+    return false;
   }
   async function toggleAccount(id, enabled) {
     await api('/accounts/' + id, { method: 'PUT', body: JSON.stringify({ enabled }) });
@@ -642,6 +702,7 @@ let testModalRunning = false;
 
       (a.authMethod === 'codex' ?
         '<div class="detail-section"><h4>' + escapeHtml(t('detail.codexUsage')) +
+        ' <button class="btn btn-sm btn-outline" data-detail-action="refresh" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.refreshUsage')) + '</button>' +
         '</h4><div class="detail-grid">' +
         detailItem(t('detail.codexPlanType'), formatCodexPlan(a.codexPlanType)) +
         detailItem(t('detail.codexActiveLimit'), a.codexActiveLimit || '-') +
@@ -654,6 +715,7 @@ let testModalRunning = false;
         detailItem(t('detail.codexSecondaryUsed'), formatUsageBar(a.codexSecondaryUsedPercent || 0)) +
         detailItem(t('detail.codexPrimaryWindow'), formatWindowMinutes(a.codexPrimaryWindowMinutes || 0)) +
         detailItem(t('detail.codexPrimaryResetAt'), formatResetTime(a.codexPrimaryResetAt)) +
+        detailItem(t('detail.codexSecondaryResetAt'), formatResetTime(a.codexSecondaryResetAt)) +
         '</div>' +
         '<div class="detail-grid" style="margin-top:0.5rem">' +
         detailItem(t('detail.codexCreditsBalance'), a.codexCreditsBalance || 0) +
@@ -663,22 +725,47 @@ let testModalRunning = false;
         '<p class="help-block">' + escapeHtml(t('detail.codexUsageHint')) + '</p>' +
         '</div>' : '') +
 
+      // Token section — shown for all account types. Includes a manual
+      // "Refresh token" button that forces the OAuth refresh-token flow
+      // regardless of expiry, plus the last-refreshed timestamp.
+      '<div class="detail-section"><h4>' + escapeHtml(t('detail.tokenSection')) +
+      ' <button class="btn btn-sm btn-outline" data-detail-action="refreshToken" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.refreshToken')) + '</button>' +
+      '</h4><div class="detail-grid">' +
+      detailItem(t('detail.tokenExpiry'), formatTokenExpiry(a.expiresAt)) +
+      (a.expiresAt ? detailItem(t('detail.tokenExpiryAbs'), new Date(a.expiresAt * 1000).toLocaleString()) : '') +
+      (a.tokenRefreshedAt ? detailItem(t('detail.tokenRefreshedAt'), new Date(a.tokenRefreshedAt * 1000).toLocaleString()) : '') +
+      '</div></div>' +
+
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.proxyURL')) + '</h4><div class="machine-id-row">' +
       '<input type="text" id="proxyURLInput" value="' + escapeAttr(a.proxyURL || '') + '" placeholder="socks5://host:port" />' +
       '<button class="btn btn-sm btn-primary" data-detail-action="saveProxyURL" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
       '</div><p class="help-block">' + escapeHtml(t('detail.proxyHint')) + '</p></div>' +
 
-      '<div class="detail-section"><h4>' + escapeHtml(t('detail.subscription')) + '</h4><div class="detail-grid">' +
-      detailItem(t('detail.subscriptionType'), a.subscriptionTitle || (a.subscriptionType ? formatSubscriptionLabel(a.subscriptionType) : '-')) +
-      detailItem(t('detail.tokenExpiry'), formatTokenExpiry(a.expiresAt)) +
-      detailItem(t('detail.mainQuota'), (a.usageCurrent != null ? a.usageCurrent.toFixed(1) : 0) + ' / ' + (a.usageLimit != null ? a.usageLimit.toFixed(0) : 0)) +
-      detailItem(t('detail.resetDate'), a.nextResetDate || '-') +
-      (a.trialUsageLimit > 0 ?
-        detailItem(t('detail.trialQuota'), (a.trialUsageCurrent != null ? a.trialUsageCurrent.toFixed(1) : 0) + ' / ' + a.trialUsageLimit.toFixed(0)) +
-        detailItem(t('detail.trialStatus'), a.trialStatus || '-') +
-        detailItem(t('detail.trialExpiry'), '-')
-        : '') +
-      '</div></div>' +
+      // Subscription section — Codex accounts show Codex-specific info
+      // (plan, active limit, credits) instead of the empty Kiro quota
+      // fields. Kiro/external accounts keep the original layout.
+      (a.authMethod === 'codex' ?
+        '<div class="detail-section"><h4>' + escapeHtml(t('detail.subscription')) + '</h4><div class="detail-grid">' +
+        detailItem(t('detail.codexPlanType'), formatCodexPlan(a.codexPlanType)) +
+        detailItem(t('detail.codexActiveLimit'), a.codexActiveLimit || '-') +
+        detailItem(t('detail.codexEmail'), a.codexEmail || '-') +
+        detailItem(t('detail.codexName'), a.codexName || '-') +
+        detailItem(t('detail.codexChatGPTId'), a.chatgptAccountId || '-') +
+        detailItem(t('detail.codexCreditsBalance'), a.codexCreditsBalance || 0) +
+        detailItem(t('detail.codexCreditsUnlimited'), a.codexCreditsUnlimited ? '✓' : '✗') +
+        '</div></div>'
+        :
+        '<div class="detail-section"><h4>' + escapeHtml(t('detail.subscription')) + '</h4><div class="detail-grid">' +
+        detailItem(t('detail.subscriptionType'), a.subscriptionTitle || (a.subscriptionType ? formatSubscriptionLabel(a.subscriptionType) : '-')) +
+        detailItem(t('detail.tokenExpiry'), formatTokenExpiry(a.expiresAt)) +
+        detailItem(t('detail.mainQuota'), (a.usageCurrent != null ? a.usageCurrent.toFixed(1) : 0) + ' / ' + (a.usageLimit != null ? a.usageLimit.toFixed(0) : 0)) +
+        detailItem(t('detail.resetDate'), a.nextResetDate || '-') +
+        (a.trialUsageLimit > 0 ?
+          detailItem(t('detail.trialQuota'), (a.trialUsageCurrent != null ? a.trialUsageCurrent.toFixed(1) : 0) + ' / ' + a.trialUsageLimit.toFixed(0)) +
+          detailItem(t('detail.trialStatus'), a.trialStatus || '-') +
+          detailItem(t('detail.trialExpiry'), '-')
+          : '') +
+        '</div></div>') +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.statistics')) + '</h4><div class="detail-grid">' +
       detailItem(t('detail.requestCount'), a.requestCount || 0) +

@@ -54,6 +54,11 @@ type Account struct {
 	MachineId    string `json:"machineId,omitempty"`    // UUID machine identifier for request tracking
 	ProfileArn   string `json:"profileArn,omitempty"`   // CodeWhisperer/Kiro profile ARN for generation requests
 
+	// TokenRefreshedAt records the last time the access token was refreshed
+	// (via OAuth refresh-token flow). Used by the admin UI to show "last
+	// refreshed" alongside token expiry. Zero when never refreshed.
+	TokenRefreshedAt int64 `json:"tokenRefreshedAt,omitempty"`
+
 	// Enterprise external IdP metadata (used when AuthMethod == "external_idp")
 	TokenEndpoint string `json:"tokenEndpoint,omitempty"` // IdP token endpoint URL for refresh
 	IssuerURL     string `json:"issuerUrl,omitempty"`     // IdP issuer URL (from OIDC discovery)
@@ -768,6 +773,7 @@ func UpdateAccountToken(id, accessToken, refreshToken string, expiresAt int64) e
 				cfg.Accounts[i].RefreshToken = refreshToken
 			}
 			cfg.Accounts[i].ExpiresAt = expiresAt
+			cfg.Accounts[i].TokenRefreshedAt = time.Now().Unix()
 			return Save()
 		}
 	}

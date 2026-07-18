@@ -1498,6 +1498,66 @@ func (h *Handler) apiRefreshAllAccountsModels(w http.ResponseWriter, r *http.Req
 	})
 }
 
+// apiRefreshAccountToken POST /admin/api/accounts/{id}/refresh-token
+// Forces an OAuth refresh-token flow for the account, regardless of token
+// expiry. Returns the new expiry + refresh timestamp so the admin UI can
+// show "last refreshed" and the new countdown. Works for all account types
+// that have a refresh_token (Kiro, Codex, external_idp).
+func (h *Handler) apiRefreshAccountToken(w http.ResponseWriter, r *http.Request, id string) {
+	accounts := config.GetAccounts()
+	var account *config.Account
+	for i := range accounts {
+		if accounts[i].ID == id {
+			account = &accounts[i]
+			break
+		}
+	}
+	if account == nil {
+		w.WriteHeader(404)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+	if account.RefreshToken == "" {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account has no refresh token"})
+		return
+	}
+	// get latest token from pool at runtime
+	if latest := h.pool.GetByID(id); latest != nil {
+		account.AccessToken = latest.AccessToken
+		account.RefreshToken = latest.RefreshToken
+		account.ExpiresAt = latest.ExpiresAt
+		account.ProfileArn = latest.ProfileArn
+	}
+	newAccess, newRefresh, newExpires, profileArn, _, _, err := auth.RefreshAccountToken(account)
+	if err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
+		return
+	}
+	account.AccessToken = newAccess
+	if newRefresh != "" {
+		account.RefreshToken = newRefresh
+	}
+	account.ExpiresAt = newExpires
+	config.UpdateAccountToken(id, newAccess, newRefresh, newExpires)
+	h.pool.UpdateToken(id, newAccess, newRefresh, newExpires)
+	if profileArn != "" {
+		account.ProfileArn = profileArn
+		config.UpdateAccountProfileArn(id, profileArn)
+	}
+	// For Codex accounts, re-extract chatgpt_account_id from the new JWT
+	// since it may rotate when OpenAI re-issues the access token.
+	if isCodexAccount(account) {
+		refreshCodexAccountID(account)
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":           true,
+		"expiresAt":         newExpires,
+		"tokenRefreshedAt":  time.Now().Unix(),
+	})
+}
+
 func mergeUniqueModels(existing []ModelInfo, incoming []ModelInfo) []ModelInfo {
 	if len(incoming) == 0 {
 		return existing
@@ -3391,6 +3451,9 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/credits") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/credits")
 		h.apiRefreshAccountCredits(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/refresh-token") && r.Method == "POST":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/refresh-token")
+		h.apiRefreshAccountToken(w, r, id)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/models") && r.Method == "GET":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/models")
 		h.apiGetAccountModels(w, r, id)
@@ -5100,6 +5163,7 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"codexCreditsBalance":       a.CodexCreditsBalance,
 			"codexCreditsUnlimited":     a.CodexCreditsUnlimited,
 			"codexUsageCheckedAt":       a.CodexUsageCheckedAt,
+			"tokenRefreshedAt":          a.TokenRefreshedAt,
 		}
 	}
 	json.NewEncoder(w).Encode(result)
