@@ -499,7 +499,7 @@ func Get() *Config {
 func GetBoolSetting(key string, fallback bool) bool {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
-	if cfg.KVSettings == nil {
+	if cfg == nil || cfg.KVSettings == nil {
 		return fallback
 	}
 	v, ok := cfg.KVSettings[key]
@@ -518,7 +518,7 @@ func GetBoolSetting(key string, fallback bool) bool {
 func GetStringSetting(key, fallback string) string {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
-	if cfg.KVSettings == nil {
+	if cfg == nil || cfg.KVSettings == nil {
 		return fallback
 	}
 	v, ok := cfg.KVSettings[key]
@@ -534,8 +534,13 @@ func GetStringSetting(key, fallback string) string {
 }
 
 // SetBoolSetting stores a bool in KVSettings and persists.
+// No-op when config is not initialised (e.g. unit tests that bypass Init).
 func SetBoolSetting(key string, val bool) {
 	cfgLock.Lock()
+	if cfg == nil {
+		cfgLock.Unlock()
+		return
+	}
 	if cfg.KVSettings == nil {
 		cfg.KVSettings = make(map[string]interface{})
 	}
@@ -545,8 +550,13 @@ func SetBoolSetting(key string, val bool) {
 }
 
 // SetStringSetting stores a string in KVSettings and persists.
+// No-op when config is not initialised (e.g. unit tests that bypass Init).
 func SetStringSetting(key, val string) {
 	cfgLock.Lock()
+	if cfg == nil {
+		cfgLock.Unlock()
+		return
+	}
 	if cfg.KVSettings == nil {
 		cfg.KVSettings = make(map[string]interface{})
 	}

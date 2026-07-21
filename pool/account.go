@@ -281,6 +281,16 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 	n := len(p.accounts)
 	seen := make(map[string]bool)
 
+	// Strategy mode: when cost-optimized or reset-aware is configured AND the
+	// pool has >= strategyMinPoolSize unique accounts, we collect all filter-
+	// passing candidates and pick the best one by score instead of returning
+	// the first round-robin hit. This avoids wasting requests on accounts
+	// near quota exhaustion / reset. Round-robin (default) keeps the original
+	// early-return behaviour for zero overhead.
+	useStrategy := p.strategyShouldApply()
+	var preferredCandidates []config.Account
+	var allCandidates []config.Account
+
 	// Provider-aware routing: when the requested model is a Claude model
 	// (claude-*), prefer External OpenAI-compatible accounts that actually
 	// serve it. Codex accounts do not serve Claude models — without this
@@ -338,8 +348,17 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 				continue
 			}
 			if picked := tryPass(acc); picked != nil {
+				if useStrategy {
+					preferredCandidates = append(preferredCandidates, *picked)
+					continue
+				}
 				return picked
 			}
+		}
+		// Strategy mode: if we collected preferred candidates, pick the best
+		// one by score and return it without falling through to Phase 2.
+		if useStrategy && len(preferredCandidates) > 0 {
+			return pickByStrategy(preferredCandidates, now)
 		}
 	}
 
@@ -371,7 +390,16 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 			seen[acc.ID] = true
 			continue
 		}
+		if useStrategy {
+			allCandidates = append(allCandidates, *acc)
+			continue
+		}
 		return acc
+	}
+
+	// Strategy mode: pick the best-scoring candidate from Phase 2.
+	if useStrategy && len(allCandidates) > 0 {
+		return pickByStrategy(allCandidates, now)
 	}
 
 	// Fallback: no immediately-available account. Return the enabled account that
@@ -858,6 +886,17 @@ func (p *AccountPool) MarkOverLimit(id string) {
 	p.cooldowns[id] = time.Now().Add(time.Hour)
 	p.mu.Unlock()
 	p.Reload()
+}
+
+// ClearCooldown removes the account-level cooldown and all per-model locks
+// for the given account so the pool can pick it immediately. Used by the
+// reset-quota admin endpoint to make an account fully available without
+// waiting for the natural cooldown expiry.
+func (p *AccountPool) ClearCooldown(id string) {
+	p.mu.Lock()
+	delete(p.cooldowns, id)
+	delete(p.modelLocks, id)
+	p.mu.Unlock()
 }
 
 // UpdateToken updates the account token

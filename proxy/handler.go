@@ -1559,6 +1559,138 @@ func (h *Handler) apiRefreshAllAccounts(w http.ResponseWriter, r *http.Request) 
 	})
 }
 
+// apiResetAccountQuota POST /admin/api/accounts/{id}/reset-quota
+// Clears the Codex primary/secondary usage counters and reset timestamps so
+// the pool treats the account as fully available again. Useful when an
+// operator knows the upstream quota has been reset (e.g. after a billing
+// cycle change) and wants to skip waiting for the natural cooldown.
+//
+// Only meaningful for Codex accounts — Kiro accounts have their quota
+// refreshed via /refresh, and External OpenAI accounts via /credits.
+func (h *Handler) apiResetAccountQuota(w http.ResponseWriter, r *http.Request, id string) {
+	accounts := config.GetAccounts()
+	var account *config.Account
+	for i := range accounts {
+		if accounts[i].ID == id {
+			account = &accounts[i]
+			break
+		}
+	}
+	if account == nil {
+		w.WriteHeader(404)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+
+	if !isCodexAccount(account) {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "reset-quota is only supported for Codex accounts"})
+		return
+	}
+
+	account.CodexPrimaryUsedPercent = 0
+	account.CodexPrimaryResetAt = 0
+	account.CodexPrimaryWindowMinutes = 0
+	account.CodexSecondaryUsedPercent = 0
+	account.CodexSecondaryResetAt = 0
+	account.CodexUsageCheckedAt = 0
+	// Clear any in-memory cooldown so the pool picks this account immediately.
+	h.pool.ClearCooldown(account.ID)
+	// Re-enable if it was disabled by the quota-exhaustion path.
+	if !account.Enabled && account.BanStatus == "ACTIVE" {
+		account.Enabled = true
+	}
+	if err := config.UpdateAccount(account.ID, *account); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to persist quota reset: " + err.Error()})
+		return
+	}
+	// Reload the pool so the weighted slice reflects the now-available account.
+	h.pool.Reload()
+	logger.Infof("[apiResetAccountQuota] Reset Codex quota for %s — account is now fully available", account.Email)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success": true,
+		"message": fmt.Sprintf("Quota reset for %s — account available immediately", account.Email),
+	})
+}
+
+// apiReauthAllBanned POST /admin/api/accounts/reauth-all-banned
+// Iterates every banned Codex account, force-clears the ban, refreshes its
+// OAuth token, and re-fetches usage. Returns a summary of how many accounts
+// were recovered, still banned, or failed (e.g. refresh token also expired).
+//
+// This is the bulk equivalent of pressing "Refresh" on each banned Codex
+// account one by one. Non-Codex banned accounts are skipped — their recovery
+// flow differs (Kiro accounts need re-login via SSO, External OpenAI accounts
+// need their credentials re-imported).
+func (h *Handler) apiReauthAllBanned(w http.ResponseWriter, r *http.Request) {
+	accounts := config.GetAccounts()
+	recovered, stillBanned, failed, skipped := 0, 0, 0, 0
+	for i := range accounts {
+		a := &accounts[i]
+		if a.BanStatus == "" || a.BanStatus == "ACTIVE" {
+			continue
+		}
+		if !isCodexAccount(a) {
+			skipped++
+			continue
+		}
+		// Force-unban + re-enable.
+		a.BanStatus = "ACTIVE"
+		a.BanReason = ""
+		a.BanTime = 0
+		a.Enabled = true
+		// Try to refresh the OAuth token — if the refresh token is also dead,
+		// the account needs a full re-login via /auth/codex/login.
+		if a.RefreshToken != "" {
+			newAT, newRT, newExp, _, _, _, err := auth.RefreshAccountToken(a)
+			if err != nil {
+				failed++
+				// Re-mark as banned so the UI still shows it needs re-auth.
+				a.BanStatus = "BANNED"
+				a.BanReason = truncateErrBody([]byte(err.Error()))
+				a.BanTime = time.Now().Unix()
+				a.Enabled = false
+				_ = config.UpdateAccount(a.ID, *a)
+				logger.Warnf("[apiReauthAllBanned] %s token refresh failed: %v — needs manual re-login", a.Email, err)
+				continue
+			}
+			a.AccessToken = newAT
+			if newRT != "" {
+				a.RefreshToken = newRT
+			}
+			a.ExpiresAt = newExp
+			_ = config.UpdateAccountToken(a.ID, newAT, newRT, newExp)
+			h.pool.UpdateToken(a.ID, newAT, newRT, newExp)
+		}
+		// Refresh profile + usage so the UI shows fresh data.
+		refreshCodexAccountID(a)
+		_ = h.fetchAndCacheAccountModels(a)
+		if usageErr := fetchCodexUsage(a); usageErr != nil {
+			logger.Warnf("[apiReauthAllBanned] %s usage fetch failed: %v", a.Email, usageErr)
+		}
+		// If usage fetch reports the account is still rate-limited, that is
+		// NOT a ban — leave it enabled, the pool will skip it via isQuotaBlocked.
+		if a.BanStatus == "BANNED" {
+			stillBanned++
+		} else {
+			recovered++
+		}
+		_ = config.UpdateAccount(a.ID, *a)
+	}
+	h.pool.Reload()
+	logger.Infof("[apiReauthAllBanned] Bulk re-auth complete — recovered=%d stillBanned=%d failed=%d skipped=%d",
+		recovered, stillBanned, failed, skipped)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":     true,
+		"recovered":   recovered,
+		"stillBanned": stillBanned,
+		"failed":      failed,
+		"skipped":     skipped,
+		"message":     fmt.Sprintf("Recovered %d, still banned %d, failed %d, skipped %d", recovered, stillBanned, failed, skipped),
+	})
+}
+
 // apiRefreshAccountToken POST /admin/api/accounts/{id}/refresh-token
 // Forces an OAuth refresh-token flow for the account, regardless of token
 // expiry. Returns the new expiry + refresh timestamp so the admin UI can
@@ -3770,12 +3902,17 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiRefreshAllAccountsModels(w, r)
 	case path == "/accounts/refresh-all" && r.Method == "POST":
 		h.apiRefreshAllAccounts(w, r)
+	case path == "/accounts/reauth-all-banned" && r.Method == "POST":
+		h.apiReauthAllBanned(w, r)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/models/refresh") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/models/refresh")
 		h.apiRefreshAccountModels(w, r, id)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/refresh") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/refresh")
 		h.apiRefreshAccount(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/reset-quota") && r.Method == "POST":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/reset-quota")
+		h.apiResetAccountQuota(w, r, id)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/test") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/test")
 		h.apiTestAccount(w, r, id)
@@ -3975,6 +4112,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetCompressionStats(w, r)
 	case path == "/compression/config" && r.Method == "PATCH":
 		h.apiUpdateCompressionConfig(w, r)
+	case path == "/pool/strategy" && r.Method == "GET":
+		h.apiGetPoolStrategy(w, r)
+	case path == "/pool/strategy" && r.Method == "PATCH":
+		h.apiUpdatePoolStrategy(w, r)
 	case path == "/logs" && r.Method == "GET":
 		h.apiGetLogs(w, r)
 	case path == "/logs/stream" && r.Method == "GET":

@@ -1023,6 +1023,7 @@ function renderUsageTabs() {
     '<button class="usage-tab-btn' + (usageState.activeTab === 'details' ? ' active' : '') + '" data-tab="details">' + (typeof t === 'function' ? t('usage.details') : 'Details') + '</button>' +
     '<button class="usage-tab-btn' + (usageState.activeTab === 'cache' ? ' active' : '') + '" data-tab="cache">Cache</button>' +
     '<button class="usage-tab-btn' + (usageState.activeTab === 'compression' ? ' active' : '') + '" data-tab="compression">Compression</button>' +
+    '<button class="usage-tab-btn' + (usageState.activeTab === 'pool' ? ' active' : '') + '" data-tab="pool">Pool</button>' +
     '</div>';
 
   container.querySelectorAll('.usage-tab-btn').forEach(btn => {
@@ -1042,6 +1043,7 @@ function renderActiveTab() {
   const detailsEl = document.getElementById('usageDetailsContent');
   const cacheEl = document.getElementById('usageCacheContent');
   const compEl = document.getElementById('usageCompressionContent');
+  const poolEl = document.getElementById('usagePoolContent');
   if (!overviewEl || !detailsEl) return;
 
   // Hide all
@@ -1049,6 +1051,7 @@ function renderActiveTab() {
   detailsEl.classList.add('hidden');
   if (cacheEl) cacheEl.classList.add('hidden');
   if (compEl) compEl.classList.add('hidden');
+  if (poolEl) poolEl.classList.add('hidden');
 
   if (usageState.activeTab === 'overview') {
     overviewEl.classList.remove('hidden');
@@ -1062,6 +1065,9 @@ function renderActiveTab() {
   } else if (usageState.activeTab === 'compression') {
     disconnectUsageSSE();
     fetchCompressionStats();
+  } else if (usageState.activeTab === 'pool') {
+    disconnectUsageSSE();
+    fetchPoolStrategy();
   } else {
     detailsEl.classList.remove('hidden');
     disconnectUsageSSE();
@@ -1674,4 +1680,82 @@ function escHtml(s) {
 }
 function escAttr(s) {
   return escHtml(s).replace(/"/g, '&quot;');
+}
+
+// ─── Pool Strategy Tab ───────────────────────────────────
+let poolStrategyState = { data: null };
+
+async function fetchPoolStrategy() {
+  const container = document.getElementById('usagePoolContent');
+  if (!container) return;
+  container.innerHTML = '<div class="usage-loading">Loading pool strategy...</div>';
+  try {
+    const res = await api('/pool/strategy');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    poolStrategyState.data = await res.json();
+    renderPoolStrategyTab();
+  } catch (e) {
+    container.innerHTML = '<div class="usage-error">Failed to load: ' + escapeHtml(String(e)) + '</div>';
+  }
+}
+
+function renderPoolStrategyTab() {
+  const container = document.getElementById('usagePoolContent');
+  if (!container || !poolStrategyState.data) return;
+  const d = poolStrategyState.data;
+  const current = d.strategy || 'round-robin';
+  const minSize = d.minPoolSize || 20;
+  const leadMin = d.resetAwareLeadMin || 30;
+  const options = d.availableOptions || ['round-robin', 'cost-optimized', 'reset-aware'];
+
+  const descFor = (s) => {
+    switch (s) {
+      case 'round-robin': return 'Default weighted round-robin. Best for small/medium pools with even quota. Zero overhead.';
+      case 'cost-optimized': return 'Prefer accounts with most remaining quota (lowest CodexPrimaryUsedPercent / highest ExtCreditsRemaining). Activates only when pool has ≥ ' + minSize + ' accounts. Reduces mid-stream 429s.';
+      case 'reset-aware': return 'Avoid accounts whose quota window resets within ' + leadMin + ' min. Falls back to cost-optimized ranking among safe accounts. Activates only when pool has ≥ ' + minSize + ' accounts.';
+      default: return '';
+    }
+  };
+
+  const cards = options.map(opt => {
+    const active = opt === current;
+    return `
+      <div class="comp-toggle-row" style="cursor:pointer;${active ? 'border-color:#7c3aed;background:rgba(124,58,237,0.05)' : ''}" data-strategy="${escAttr(opt)}">
+        <div class="comp-toggle-info">
+          <div class="comp-toggle-label">${escHtml(opt)}${active ? ' <span style="color:#7c3aed;font-size:0.75rem">(active)</span>' : ''}</div>
+          <div class="comp-toggle-desc">${escHtml(descFor(opt))}</div>
+        </div>
+        <input type="radio" name="poolStrategy" value="${escAttr(opt)}" ${active ? 'checked' : ''} style="accent-color:#7c3aed"/>
+      </div>`;
+  }).join('');
+
+  container.innerHTML = `
+    <div class="comp-page">
+      <div class="comp-section">
+        <div class="comp-section-title">Pool Routing Strategy</div>
+        <div style="margin-bottom:12px;color:var(--text-muted,#888);font-size:0.85rem">
+          Controls how the proxy selects an upstream account for each request.
+          Strategies only activate when the pool has ≥ ${minSize} unique accounts;
+          smaller pools always use round-robin (no overhead).
+          Cache-sticky pinning always wins over the strategy — a cache hit saves
+          more quota than any strategy choice.
+        </div>
+        ${cards}
+      </div>
+    </div>`;
+
+  container.querySelectorAll('[data-strategy]').forEach(row => {
+    row.addEventListener('click', async function () {
+      const strategy = this.dataset.strategy;
+      if (strategy === current) return;
+      try {
+        const res = await api('/pool/strategy', { method: 'PATCH', body: JSON.stringify({ strategy }) });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        showToast('Pool strategy: ' + strategy);
+        fetchPoolStrategy();
+      } catch (e) {
+        showToast('Failed: ' + e);
+      }
+    });
+  });
 }
