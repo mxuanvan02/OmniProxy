@@ -214,8 +214,11 @@
       <!-- Usage tab -->
       <div id="tabUsage" class="tab-content hidden">
         <div class="usage-page">
-          <!-- Tabs -->
-          <div id="usageTabs"></div>
+          <!-- Tabs + live indicator -->
+          <div class="usage-tabs-row">
+            <div id="usageTabs"></div>
+            <div id="usageLiveIndicator" class="usage-live-indicator" onclick="toggleAutoRefresh()" title="Click to pause/resume auto-refresh"></div>
+          </div>
 
           <!-- Tab: Overview -->
           <div id="usageOverviewContent">

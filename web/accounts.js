@@ -369,6 +369,7 @@ let testModalRunning = false;
         (a.refreshToken ? '<button class="btn btn-icon btn-sm btn-ghost" data-action="refreshToken" data-id="' + idAttr + '" title="' + escapeAttr(t('detail.refreshToken')) + '">' + keySvg + '</button>' : '') +
         '<button class="btn btn-icon btn-sm btn-ghost" data-action="detail" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.detail')) + '">' + userSvg + '</button>' +
         '<button class="btn btn-icon btn-sm btn-ghost" data-action="copyJSON" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.copyJSON')) + '">' + copySvg + '</button>' +
+        (banned && isCodex ? '<button class="btn btn-sm btn-warning" data-action="reauth" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.reauth')) + '">' + escapeHtml(t('accounts.reauth')) + '</button>' : '') +
         (banned ? '' :
           '<button class="btn btn-sm ' + (a.enabled ? 'btn-outline' : 'btn-primary') + '" data-action="toggle" data-id="' + idAttr + '" data-enabled="' + (!a.enabled) + '">' +
           escapeHtml(a.enabled ? t('accounts.disable') : t('accounts.enable')) +
@@ -406,6 +407,7 @@ let testModalRunning = false;
           '<div class="account-usage">' +
           '<div class="usage-label">' + escapeHtml(t('detail.codexUsage')) +
           ' <button class="btn btn-icon btn-sm btn-ghost" data-action="refresh" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.refresh')) + '">' + refreshSvg + '</button>' +
+          (a.codexPrimaryUsedPercent >= 100 ? ' <button class="btn btn-xs btn-outline" data-action="resetQuota" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.resetQuota')) + '">' + escapeHtml(t('accounts.resetQuota')) + '</button>' : '') +
           '</div>' +
           (a.codexPrimaryUsedPercent ?
             '<div class="usage-bar"><div class="usage-fill ' + (a.codexPrimaryUsedPercent >= 90 ? 'critical' : a.codexPrimaryUsedPercent >= 70 ? 'high' : '') + '" data-usage-pct="' + escapeAttr(a.codexPrimaryUsedPercent) + '"></div></div>' +
@@ -473,6 +475,82 @@ let testModalRunning = false;
   async function toggleAccount(id, enabled) {
     await api('/accounts/' + id, { method: 'PUT', body: JSON.stringify({ enabled }) });
     loadAccounts();
+  }
+  // resetAccountQuota clears the Codex primary/secondary usage counters so
+  // the pool treats the account as fully available again. Only meaningful
+  // for Codex accounts whose codexPrimaryUsedPercent has hit 100.
+  async function resetAccountQuota(id, card) {
+    const ok = await confirmAction(t('accounts.confirmResetQuota'), {
+      title: t('accounts.resetQuota'),
+      confirmText: t('common.confirm'),
+      variant: 'primary'
+    });
+    if (!ok) return;
+    if (card) card.classList.add('loading');
+    try {
+      const res = await api('/accounts/' + id + '/reset-quota', { method: 'POST' });
+      const d = await res.json();
+      if (d.success) {
+        toast(d.message || t('accounts.resetQuotaDone'), 'success');
+        loadAccounts(); loadStats();
+      } else {
+        toastError((d.error || t('common.failed')));
+      }
+    } catch (e) {
+      toastError(t('common.failed'));
+    }
+    if (card) card.classList.remove('loading');
+  }
+  // reauthAccount force-clears the ban, refreshes the OAuth token, and
+  // re-fetches usage for a single banned Codex account. If the refresh
+  // token is also dead, the account needs a full re-login via the Add
+  // Account → Codex Login flow.
+  async function reauthAccount(id, btn) {
+    const ok = await confirmAction(t('accounts.confirmReauth'), {
+      title: t('accounts.reauth'),
+      confirmText: t('accounts.reauth'),
+      variant: 'warning'
+    });
+    if (!ok) return;
+    if (btn) { btn.disabled = true; btn.textContent = t('common.loading') || '...'; }
+    try {
+      // apiRefreshAccount already force-unbans + refreshes token + usage
+      const res = await api('/accounts/' + id + '/refresh', { method: 'POST' });
+      const d = await res.json();
+      if (d.success) {
+        toast(d.message || t('accounts.reauthDone'), 'success');
+        loadAccounts(); loadStats();
+      } else {
+        toastError((d.error || t('accounts.reauthFailed')));
+      }
+    } catch (e) {
+      toastError(t('accounts.reauthFailed'));
+    }
+    if (btn) { btn.disabled = false; btn.textContent = t('accounts.reauth'); }
+  }
+  // reauthAllBanned bulk-recovers every banned Codex account in one call.
+  async function reauthAllBanned() {
+    const ok = await confirmAction(t('accounts.confirmReauthAll'), {
+      title: t('accounts.reauthAll'),
+      confirmText: t('accounts.reauthAll'),
+      variant: 'warning'
+    });
+    if (!ok) return;
+    const dismiss = toast(t('accounts.reauthAllProcessing'), 'info', { duration: 0 });
+    try {
+      const res = await api('/accounts/reauth-all-banned', { method: 'POST' });
+      const d = await res.json();
+      dismiss();
+      if (d.success) {
+        toast(d.message || t('accounts.reauthAllDone'), 'success');
+        loadAccounts(); loadStats();
+      } else {
+        toastError((d.error || t('common.failed')));
+      }
+    } catch (e) {
+      dismiss();
+      toastError(t('common.failed'));
+    }
   }
   async function deleteAccount(id) {
     const ok = await confirmAction(t('accounts.confirmDelete'), {

@@ -32,6 +32,12 @@ let cacheState = {
   period: '24h',
 };
 
+// Auto-refresh: refetch the active tab's data periodically so numbers
+// update in real time without a manual reload.
+const AUTO_REFRESH_INTERVAL_MS = 5000;
+let autoRefreshEnabled = true;
+let lastRefreshAt = 0;
+
 let topoZoom = 1;
 let topoPanX = 0;
 let topoPanY = 0;
@@ -160,6 +166,86 @@ function disconnectUsageSSE() {
     usageState.eventSource.close();
     usageState.eventSource = null;
   }
+}
+
+// ─── Auto-refresh ────────────────────────────────────────
+// Refetch the active tab's data so headline numbers update in real time.
+// Details tab is skipped (user is paginating / filtering).
+function refreshActiveTab() {
+  if (!autoRefreshEnabled) return;
+  const tab = usageState.activeTab;
+  if (tab === 'overview') {
+    fetchUsageStats(usageState.period);
+    fetchUsageChart(usageState.period);
+  } else if (tab === 'cache') {
+    fetchCacheStats();
+  } else if (tab === 'compression') {
+    refreshCompressionStatsOnly();
+  } else if (tab === 'pool') {
+    fetchPoolStrategy();
+  }
+  // 'details' intentionally skipped — auto-refresh would reset pagination.
+  lastRefreshAt = Date.now();
+  updateLiveIndicator();
+}
+
+// Compression: refresh only the stats numbers, leave toggles/inputs untouched
+// so user interaction (typing URL, clicking toggles) is not disrupted.
+async function refreshCompressionStatsOnly() {
+  try {
+    const res = await api('/compression/stats');
+    if (!res.ok) return;
+    compressionState.data = await res.json();
+    const section = document.getElementById('compStatsSection');
+    if (section) section.innerHTML = renderCompressionStatsHtml(compressionState.data);
+  } catch (e) { /* silent — next tick retries */ }
+}
+
+function renderCompressionStatsHtml(d) {
+  const s = (d && d.stats) || {};
+  const tokensIn = s.toolTokensIn || 0;
+  const tokensOut = s.toolTokensOut || 0;
+  const toolSaved = tokensIn - tokensOut;
+  const toolSavedPct = tokensIn > 0 ? (toolSaved / tokensIn * 100) : 0;
+  return `
+    <div class="usage-overview-grid">
+      <div class="usage-overview-card">
+        <div class="usage-overview-card-value">${s.toolCompressed || 0}</div>
+        <div class="usage-overview-card-label">Tool Outputs Compressed</div>
+      </div>
+      <div class="usage-overview-card">
+        <div class="usage-overview-card-value" style="color:#22c55e">${fmtTokens(toolSaved)}</div>
+        <div class="usage-overview-card-label">Tool Tokens Saved</div>
+      </div>
+      <div class="usage-overview-card">
+        <div class="usage-overview-card-value" style="color:#22c55e">${fmtPct(toolSavedPct)}</div>
+        <div class="usage-overview-card-label">Tool Savings</div>
+      </div>
+      <div class="usage-overview-card">
+        <div class="usage-overview-card-value">${s.headroomReqs || 0}</div>
+        <div class="usage-overview-card-label">Headroom Requests</div>
+      </div>
+      <div class="usage-overview-card">
+        <div class="usage-overview-card-value">${s.cavemanReqs || 0}</div>
+        <div class="usage-overview-card-label">Caveman Requests</div>
+      </div>
+    </div>`;
+}
+
+function updateLiveIndicator() {
+  const el = document.getElementById('usageLiveIndicator');
+  if (!el) return;
+  const dot = autoRefreshEnabled ? '<span class="live-dot live-dot-on"></span>' : '<span class="live-dot live-dot-off"></span>';
+  const label = autoRefreshEnabled
+    ? (typeof t === 'function' ? t('usage.liveAuto') : 'Live')
+    : (typeof t === 'function' ? t('usage.livePaused') : 'Paused');
+  el.innerHTML = dot + '<span class="live-label">' + label + '</span>';
+}
+
+function toggleAutoRefresh() {
+  autoRefreshEnabled = !autoRefreshEnabled;
+  updateLiveIndicator();
+  if (autoRefreshEnabled) refreshActiveTab();
 }
 
 // ─── Topology (SVG) ──────────────────────────────────────
@@ -1096,12 +1182,6 @@ function renderCompressionTab() {
   const container = document.getElementById('usageCompressionContent');
   if (!container || !compressionState.data) return;
   const d = compressionState.data;
-  const s = d.stats || {};
-
-  const tokensIn = s.toolTokensIn || 0;
-  const tokensOut = s.toolTokensOut || 0;
-  const toolSaved = tokensIn - tokensOut;
-  const toolSavedPct = tokensIn > 0 ? (toolSaved / tokensIn * 100) : 0;
 
   const toggle = (key, label, desc) => `
     <div class="comp-toggle-row">
@@ -1141,28 +1221,7 @@ function renderCompressionTab() {
 
       <div class="comp-section">
         <div class="comp-section-title">Statistics</div>
-        <div class="usage-overview-grid">
-          <div class="usage-overview-card">
-            <div class="usage-overview-card-value">${s.toolCompressed || 0}</div>
-            <div class="usage-overview-card-label">Tool Outputs Compressed</div>
-          </div>
-          <div class="usage-overview-card">
-            <div class="usage-overview-card-value" style="color:#22c55e">${fmtTokens(toolSaved)}</div>
-            <div class="usage-overview-card-label">Tool Tokens Saved</div>
-          </div>
-          <div class="usage-overview-card">
-            <div class="usage-overview-card-value" style="color:#22c55e">${fmtPct(toolSavedPct)}</div>
-            <div class="usage-overview-card-label">Tool Savings</div>
-          </div>
-          <div class="usage-overview-card">
-            <div class="usage-overview-card-value">${s.headroomReqs || 0}</div>
-            <div class="usage-overview-card-label">Headroom Requests</div>
-          </div>
-          <div class="usage-overview-card">
-            <div class="usage-overview-card-value">${s.cavemanReqs || 0}</div>
-            <div class="usage-overview-card-label">Caveman Requests</div>
-          </div>
-        </div>
+        <div id="compStatsSection">${renderCompressionStatsHtml(d)}</div>
       </div>
     </div>`;
 
@@ -1645,7 +1704,10 @@ function initUsagePage() {
   if (usageState.refreshTimer) clearInterval(usageState.refreshTimer);
   usageState.refreshTimer = setInterval(() => {
     updateTimeAgoEls();
-  }, 10000);
+    refreshActiveTab();
+  }, AUTO_REFRESH_INTERVAL_MS);
+  lastRefreshAt = Date.now();
+  updateLiveIndicator();
   
   // Reset topology first-seen tracking
   topoFirstSeen = {};
