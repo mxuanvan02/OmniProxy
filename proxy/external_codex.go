@@ -22,6 +22,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	cryptoRand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -1159,4 +1160,151 @@ func codexSubscriptionModels() []ModelInfo {
 		out = append(out, m)
 	}
 	return out
+}
+
+// ─── Codex Bank Reset Quota (rate-limit-reset-credits) ──────────────────
+//
+// ChatGPT/Codex accounts occasionally get a "Bank Reset Quota" credit —
+// a one-shot token that resets the account's rate-limit windows. 9router
+// exposes this as the "Codex reset credit available" button. The flow is:
+//
+//  1. GET /backend-api/wham/usage → response.rate_limit_reset_credits
+//     contains { available_count: N, ... }.
+//  2. If available_count > 0, the operator can consume a credit:
+//     POST /backend-api/wham/rate-limit-reset-credits/consume
+//     body: { redeem_request_id: <random uuid> }
+//     → response: { code: "reset"|"no_credit", windows_reset: N }
+//
+// On success, the account's primary/secondary usage counters are reset
+// upstream, and we clear our local cached counters so the pool picks the
+// account immediately.
+
+// codexResetCreditsAvailable queries the upstream wham/usage endpoint and
+// returns the number of available bank-reset credits (0 if none or error).
+func codexResetCreditsAvailable(account *config.Account) (int, error) {
+	if account == nil || !isCodexAccount(account) {
+		return 0, fmt.Errorf("not a codex account")
+	}
+	accessToken := strings.TrimSpace(account.AccessToken)
+	if accessToken == "" {
+		return 0, fmt.Errorf("no access token")
+	}
+	accountID := strings.TrimSpace(account.ChatGPTAccountID)
+	if accountID == "" {
+		accountID = auth.ExtractCodexAccountIDPublic(accessToken)
+		if accountID == "" {
+			return 0, fmt.Errorf("no chatgpt_account_id")
+		}
+	}
+	endpoint := codexBaseURL(account) + "/backend-api/wham/usage"
+	req, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return 0, fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("chatgpt-account-id", accountID)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "codex_cli_rs/0.0.0 omniproxy/1.0")
+
+	client := GetClientForProxy(ResolveAccountProxyURL(account))
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("do: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateErrBody(body))
+	}
+	var parsed struct {
+		RateLimitResetCredits struct {
+			AvailableCount int `json:"available_count"`
+		} `json:"rate_limit_reset_credits"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return 0, fmt.Errorf("parse: %w", err)
+	}
+	return parsed.RateLimitResetCredits.AvailableCount, nil
+}
+
+// codexConsumeResetCredit consumes one bank-reset credit upstream. On
+// success (code == "reset" and windows_reset > 0), the caller should
+// clear local Codex usage counters so the pool picks the account.
+//
+// Returns (windowsReset, error). windowsReset == 0 with nil error means
+// the upstream reported "no_credit" — the operator has no credits left.
+func codexConsumeResetCredit(account *config.Account) (int, error) {
+	if account == nil || !isCodexAccount(account) {
+		return 0, fmt.Errorf("not a codex account")
+	}
+	accessToken := strings.TrimSpace(account.AccessToken)
+	if accessToken == "" {
+		return 0, fmt.Errorf("no access token")
+	}
+	accountID := strings.TrimSpace(account.ChatGPTAccountID)
+	if accountID == "" {
+		accountID = auth.ExtractCodexAccountIDPublic(accessToken)
+		if accountID == "" {
+			return 0, fmt.Errorf("no chatgpt_account_id")
+		}
+	}
+	// Generate a unique redeem_request_id (UUID v4 shape). The upstream
+	// dedupes on this id, so a retry with the same id is idempotent.
+	redeemID := generateCodexRedeemID()
+	reqBody, _ := json.Marshal(map[string]string{"redeem_request_id": redeemID})
+	endpoint := codexBaseURL(account) + "/backend-api/wham/rate-limit-reset-credits/consume"
+	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(reqBody))
+	if err != nil {
+		return 0, fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("chatgpt-account-id", accountID)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "codex_cli_rs/0.0.0 omniproxy/1.0")
+
+	client := GetClientForProxy(ResolveAccountProxyURL(account))
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("do: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateErrBody(body))
+	}
+	var parsed struct {
+		Code         string `json:"code"`
+		WindowsReset int    `json:"windows_reset"`
+		Message      string `json:"message"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return 0, fmt.Errorf("parse: %w", err)
+	}
+	if parsed.Code == "no_credit" {
+		return 0, nil // not an error — operator knows no credits left
+	}
+	if parsed.Code != "reset" || parsed.WindowsReset == 0 {
+		msg := parsed.Message
+		if msg == "" {
+			msg = string(body)
+		}
+		return 0, fmt.Errorf("reset failed: code=%s windows_reset=%d msg=%s", parsed.Code, parsed.WindowsReset, msg)
+	}
+	return parsed.WindowsReset, nil
+}
+
+// generateCodexRedeemID returns a UUID v4-shaped string for the
+// redeem_request_id field. We use crypto/rand so the id is unpredictable
+// (the upstream dedupes on it).
+func generateCodexRedeemID() string {
+	var b [16]byte
+	if _, err := cryptoRand.Read(b[:]); err != nil {
+		// Fallback to time-based — extremely unlikely.
+		return fmt.Sprintf("%016x", time.Now().UnixNano())
+	}
+	// Set version (4) and variant bits per RFC 4122.
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }

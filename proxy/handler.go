@@ -1614,18 +1614,150 @@ func (h *Handler) apiResetAccountQuota(w http.ResponseWriter, r *http.Request, i
 	})
 }
 
+// apiGetResetCreditsAvailable GET /admin/api/accounts/{id}/reset-credits/available
+// Queries the upstream Codex wham/usage endpoint and returns the number of
+// bank-reset credits the account currently has available. The UI uses this
+// to show a "Reset Credit available" button only when available_count > 0.
+func (h *Handler) apiGetResetCreditsAvailable(w http.ResponseWriter, r *http.Request, id string) {
+	accounts := config.GetAccounts()
+	var account *config.Account
+	for i := range accounts {
+		if accounts[i].ID == id {
+			account = &accounts[i]
+			break
+		}
+	}
+	if account == nil {
+		w.WriteHeader(404)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+	if !isCodexAccount(account) {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "reset-credits is only supported for Codex accounts"})
+		return
+	}
+	// Ensure token is fresh before querying upstream.
+	if err := h.ensureValidToken(account); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
+		return
+	}
+	available, err := codexResetCreditsAvailable(account)
+	if err != nil {
+		w.WriteHeader(502)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"available": available,
+	})
+}
+
+// apiResetAccountCredits POST /admin/api/accounts/{id}/reset-credits
+// Consumes one Codex bank-reset credit upstream. On success, clears local
+// Codex usage counters so the pool picks the account immediately. This is
+// the "Bank Reset Quota" button — it only works if the account actually
+// has a credit available upstream (rate_limit_reset_credits.available_count > 0).
+func (h *Handler) apiResetAccountCredits(w http.ResponseWriter, r *http.Request, id string) {
+	accounts := config.GetAccounts()
+	var account *config.Account
+	for i := range accounts {
+		if accounts[i].ID == id {
+			account = &accounts[i]
+			break
+		}
+	}
+	if account == nil {
+		w.WriteHeader(404)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+	if !isCodexAccount(account) {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "reset-credits is only supported for Codex accounts"})
+		return
+	}
+	if err := h.ensureValidToken(account); err != nil {
+		w.WriteHeader(500)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
+		return
+	}
+	// First check if the account actually has a credit available. This
+	// avoids burning a consume request (and getting a no_credit response)
+	// when the operator clicks the button on an account with no credits.
+	available, err := codexResetCreditsAvailable(account)
+	if err != nil {
+		w.WriteHeader(502)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to check available credits: " + err.Error()})
+		return
+	}
+	if available <= 0 {
+		w.WriteHeader(409)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":  false,
+			"error":    "No bank-reset credits available for this account",
+			"available": 0,
+		})
+		return
+	}
+	// Consume one credit upstream.
+	windowsReset, err := codexConsumeResetCredit(account)
+	if err != nil {
+		w.WriteHeader(502)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to consume reset credit: " + err.Error()})
+		return
+	}
+	if windowsReset == 0 {
+		// Upstream reported no_credit (race: another client consumed it
+		// between our check and consume).
+		w.WriteHeader(409)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":  false,
+			"error":    "No bank-reset credits available (consumed by another client)",
+			"available": 0,
+		})
+		return
+	}
+	// Success — clear local Codex usage counters so the pool picks the
+	// account immediately, and re-enable if it was disabled by the
+	// quota-exhaustion path.
+	account.CodexPrimaryUsedPercent = 0
+	account.CodexPrimaryResetAt = 0
+	account.CodexPrimaryWindowMinutes = 0
+	account.CodexSecondaryUsedPercent = 0
+	account.CodexSecondaryResetAt = 0
+	account.CodexUsageCheckedAt = 0
+	h.pool.ClearCooldown(account.ID)
+	if !account.Enabled && (account.BanStatus == "" || account.BanStatus == "ACTIVE") {
+		account.Enabled = true
+	}
+	if err := config.UpdateAccount(account.ID, *account); err != nil {
+		logger.Errorf("[apiResetAccountCredits] Failed to persist cleared counters for %s: %v", account.Email, err)
+	}
+	h.pool.Reload()
+	logger.Infof("[apiResetAccountCredits] Consumed 1 bank-reset credit for %s — %d windows reset upstream",
+		account.Email, windowsReset)
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":       true,
+		"windowsReset":  windowsReset,
+		"available":     available - 1,
+		"message":       fmt.Sprintf("Bank reset credit consumed for %s — %d rate-limit windows reset", account.Email, windowsReset),
+	})
+}
+
 // apiReauthAllBanned POST /admin/api/accounts/reauth-all-banned
-// Iterates every banned Codex account, force-clears the ban, refreshes its
-// OAuth token, and re-fetches usage. Returns a summary of how many accounts
-// were recovered, still banned, or failed (e.g. refresh token also expired).
+// Iterates every banned Codex account, refreshes its OAuth token, and
+// re-fetches usage. Does NOT clear the ban — a banned account is only
+// unbanned by a successful test request (apiTestAccount). This endpoint
+// just refreshes tokens + usage so the operator can see fresh data and
+// decide which accounts to test. Non-Codex banned accounts are skipped.
 //
-// This is the bulk equivalent of pressing "Refresh" on each banned Codex
-// account one by one. Non-Codex banned accounts are skipped — their recovery
-// flow differs (Kiro accounts need re-login via SSO, External OpenAI accounts
-// need their credentials re-imported).
+// After this call returns, the operator should press "Test" on each
+// account; successful tests will clear the ban automatically.
 func (h *Handler) apiReauthAllBanned(w http.ResponseWriter, r *http.Request) {
 	accounts := config.GetAccounts()
-	recovered, stillBanned, failed, skipped := 0, 0, 0, 0
+	refreshed, failed, skipped := 0, 0, 0
 	for i := range accounts {
 		a := &accounts[i]
 		if a.BanStatus == "" || a.BanStatus == "ACTIVE" {
@@ -1635,23 +1767,12 @@ func (h *Handler) apiReauthAllBanned(w http.ResponseWriter, r *http.Request) {
 			skipped++
 			continue
 		}
-		// Force-unban + re-enable.
-		a.BanStatus = "ACTIVE"
-		a.BanReason = ""
-		a.BanTime = 0
-		a.Enabled = true
 		// Try to refresh the OAuth token — if the refresh token is also dead,
 		// the account needs a full re-login via /auth/codex/login.
 		if a.RefreshToken != "" {
 			newAT, newRT, newExp, _, _, _, err := auth.RefreshAccountToken(a)
 			if err != nil {
 				failed++
-				// Re-mark as banned so the UI still shows it needs re-auth.
-				a.BanStatus = "BANNED"
-				a.BanReason = truncateErrBody([]byte(err.Error()))
-				a.BanTime = time.Now().Unix()
-				a.Enabled = false
-				_ = config.UpdateAccount(a.ID, *a)
 				logger.Warnf("[apiReauthAllBanned] %s token refresh failed: %v — needs manual re-login", a.Email, err)
 				continue
 			}
@@ -1663,31 +1784,25 @@ func (h *Handler) apiReauthAllBanned(w http.ResponseWriter, r *http.Request) {
 			_ = config.UpdateAccountToken(a.ID, newAT, newRT, newExp)
 			h.pool.UpdateToken(a.ID, newAT, newRT, newExp)
 		}
-		// Refresh profile + usage so the UI shows fresh data.
+		// Refresh profile + usage so the UI shows fresh data. Do NOT
+		// clear ban — operator must press "Test" to verify recovery.
 		refreshCodexAccountID(a)
 		_ = h.fetchAndCacheAccountModels(a)
 		if usageErr := fetchCodexUsage(a); usageErr != nil {
 			logger.Warnf("[apiReauthAllBanned] %s usage fetch failed: %v", a.Email, usageErr)
 		}
-		// If usage fetch reports the account is still rate-limited, that is
-		// NOT a ban — leave it enabled, the pool will skip it via isQuotaBlocked.
-		if a.BanStatus == "BANNED" {
-			stillBanned++
-		} else {
-			recovered++
-		}
 		_ = config.UpdateAccount(a.ID, *a)
+		refreshed++
 	}
 	h.pool.Reload()
-	logger.Infof("[apiReauthAllBanned] Bulk re-auth complete — recovered=%d stillBanned=%d failed=%d skipped=%d",
-		recovered, stillBanned, failed, skipped)
+	logger.Infof("[apiReauthAllBanned] Bulk token+usage refresh complete — refreshed=%d failed=%d skipped=%d (ban NOT cleared; press Test to verify)",
+		refreshed, failed, skipped)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":     true,
-		"recovered":   recovered,
-		"stillBanned": stillBanned,
-		"failed":      failed,
-		"skipped":     skipped,
-		"message":     fmt.Sprintf("Recovered %d, still banned %d, failed %d, skipped %d", recovered, stillBanned, failed, skipped),
+		"success":   true,
+		"refreshed": refreshed,
+		"failed":    failed,
+		"skipped":   skipped,
+		"message":   fmt.Sprintf("Refreshed token+usage for %d accounts. Press Test on each to clear ban. Failed: %d, skipped: %d.", refreshed, failed, skipped),
 	})
 }
 
@@ -3913,6 +4028,12 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/reset-quota") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/reset-quota")
 		h.apiResetAccountQuota(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/reset-credits") && r.Method == "POST":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/reset-credits")
+		h.apiResetAccountCredits(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/reset-credits/available") && r.Method == "GET":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/reset-credits/available")
+		h.apiGetResetCreditsAvailable(w, r, id)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/test") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/test")
 		h.apiTestAccount(w, r, id)
@@ -8599,10 +8720,29 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
+	// Test succeeded — if the account was previously banned, clear the ban
+	// because the account can actually serve requests. This is the only
+	// path that clears a ban: a successful real upstream request proves the
+	// account is healthy again.
+	wasBanned := account.BanStatus != "" && account.BanStatus != "ACTIVE"
+	if wasBanned || !account.Enabled {
+		account.BanStatus = "ACTIVE"
+		account.BanReason = ""
+		account.BanTime = 0
+		account.Enabled = true
+		if err := config.UpdateAccount(account.ID, *account); err != nil {
+			logger.Errorf("[apiTestAccount] Failed to persist ban-clear for %s: %v", account.Email, err)
+		} else if wasBanned {
+			logger.Infof("[apiTestAccount] Test succeeded — cleared ban for %s", account.Email)
+		}
+		h.pool.Reload()
+	}
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"reply":   content,
-		"model":   req.Model,
+		"success":     true,
+		"reply":       content,
+		"model":       req.Model,
+		"banCleared":  wasBanned,
 	})
 }
 
@@ -8681,15 +8821,12 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 	// live usage data (rate-limit %, credits) via a minimal request so
 	// the admin UI shows real-time token usage.
 	if isCodexAccount(account) {
-		// Force unban for Codex too (operator pressed refresh).
-		if account.BanStatus != "" && account.BanStatus != "ACTIVE" {
-			logger.Infof("[apiRefreshAccount] Force-unban Codex %s (was %s)", account.Email, account.BanStatus)
-			account.BanStatus = "ACTIVE"
-			account.BanReason = ""
-			account.BanTime = 0
-			account.Enabled = true
-			_ = config.UpdateAccount(account.ID, *account)
-		} else if !account.Enabled {
+		// NOTE: Do NOT clear ban here. A banned account should only be
+		// unbanned by a successful test request (apiTestAccount), which
+		// proves the account can actually serve traffic. Refresh only
+		// updates token + usage data; if the account is still banned,
+		// the operator should press "Test" to verify recovery.
+		if !account.Enabled && (account.BanStatus == "" || account.BanStatus == "ACTIVE") {
 			account.Enabled = true
 			_ = config.UpdateAccount(account.ID, *account)
 		}
@@ -8718,10 +8855,11 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
-	// Force unban: operator pressed "Refresh" — clear any prior BANNED/DISABLED
-	// status and re-enable before retrying. If the account is truly still
-	// suspended, the GetUsageLimits call below will re-mark it BANNED. This
-	// lets operators recover from stale ban states without manual toggling.
+	// Kiro accounts: clear ban before retrying usage. GetUsageLimits below
+	// will re-mark BANNED if the account is truly still suspended. This is
+	// safe because Kiro's usage API returns a definitive ban/suspend flag,
+	// unlike Codex where the only reliable probe is a real chat request.
+	// (Codex accounts are handled in the branch above and do NOT unban here.)
 	if account.BanStatus != "" && account.BanStatus != "ACTIVE" {
 		logger.Infof("[apiRefreshAccount] Force-unban %s (was %s), retrying", account.Email, account.BanStatus)
 		account.BanStatus = "ACTIVE"
@@ -9026,11 +9164,24 @@ func (h *Handler) apiGetAccountModelsCached(w http.ResponseWriter, r *http.Reque
 
 // ==================== Static file serving ====================
 
+// setNoCacheHeaders ensures the browser always fetches the latest version
+// of admin web assets (HTML/JS/CSS). Without this, browsers cache
+// usage.js / index.html aggressively and serve stale code after a server
+// upgrade, which causes tabs to show empty content or call endpoints
+// that no longer exist.
+func setNoCacheHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Pragma", "no-cache")
+	w.Header().Set("Expires", "0")
+}
+
 func (h *Handler) serveAdminPage(w http.ResponseWriter, r *http.Request) {
+	setNoCacheHeaders(w)
 	http.ServeFile(w, r, filepath.Join(h.webDir, "index.html"))
 }
 
 func (h *Handler) serveStaticFile(w http.ResponseWriter, r *http.Request) {
+	setNoCacheHeaders(w)
 	path := strings.TrimPrefix(r.URL.Path, "/admin/")
 	http.ServeFile(w, r, filepath.Join(h.webDir, path))
 }

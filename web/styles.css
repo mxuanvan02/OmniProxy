@@ -4923,6 +4923,16 @@ img.brand-icon {
 .quota-block-btn.is-loading .fa-arrows-rotate {
   animation: quota-spin 0.8s linear infinite;
 }
+.quota-block-btn-warning {
+  border-color: #f59e0b;
+  color: #d97706;
+  background: rgba(245, 158, 11, 0.08);
+}
+.quota-block-btn-warning:hover:not(:disabled) {
+  border-color: #d97706;
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.18);
+}
 
 /* Skeleton loading block */
 .quota-block-skeleton {

@@ -85,8 +85,14 @@ type quotaRow struct {
 
 // apiGetQuotaOverview GET /admin/api/quota/overview
 // Returns aggregate quota by provider + per-account breakdown.
+//
+// Uses h.pool.GetAllAccounts() instead of config.GetAccounts() so the
+// per-account token/request counters reflect live in-memory stats (the
+// running source of truth), not the persisted config which is only
+// flushed periodically. This makes the Quota page update in real time
+// as requests flow through the proxy.
 func (h *Handler) apiGetQuotaOverview(w http.ResponseWriter, r *http.Request) {
-	accounts := config.GetAccounts()
+	accounts := h.pool.GetAllAccounts()
 
 	providerSummaries := map[string]*quotaProviderSummary{
 		"kiro":     {Provider: "kiro", Label: "Kiro / CodeWhisperer"},

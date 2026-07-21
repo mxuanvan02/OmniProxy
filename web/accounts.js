@@ -374,7 +374,7 @@ let testModalRunning = false;
           '<button class="btn btn-sm ' + (a.enabled ? 'btn-outline' : 'btn-primary') + '" data-action="toggle" data-id="' + idAttr + '" data-enabled="' + (!a.enabled) + '">' +
           escapeHtml(a.enabled ? t('accounts.disable') : t('accounts.enable')) +
           '</button>') +
-        '<button class="btn btn-sm btn-secondary" data-action="test" data-id="' + idAttr + '" id="test-' + idAttr + '">' + escapeHtml(t('accounts.test')) + '</button>' +
+        '<button class="btn btn-sm ' + (banned ? 'btn-primary' : 'btn-secondary') + '" data-action="test" data-id="' + idAttr + '" id="test-' + idAttr + '" title="' + escapeAttr(banned ? t('accounts.testToClearBan') : t('accounts.test')) + '">' + escapeHtml(banned ? t('accounts.testRecover') : t('accounts.test')) + '</button>' +
         '<button class="btn btn-sm btn-danger" data-action="delete" data-id="' + idAttr + '">' + escapeHtml(t('accounts.delete')) + '</button>' +
         '</div>' +
         '</div>' +
@@ -501,10 +501,9 @@ let testModalRunning = false;
     }
     if (card) card.classList.remove('loading');
   }
-  // reauthAccount force-clears the ban, refreshes the OAuth token, and
-  // re-fetches usage for a single banned Codex account. If the refresh
-  // token is also dead, the account needs a full re-login via the Add
-  // Account → Codex Login flow.
+  // reauthAccount refreshes the OAuth token + usage for a single banned
+  // Codex account. It does NOT clear the ban — only a successful Test
+  // request can do that. Use this to refresh stale tokens before testing.
   async function reauthAccount(id, btn) {
     const ok = await confirmAction(t('accounts.confirmReauth'), {
       title: t('accounts.reauth'),
@@ -514,7 +513,7 @@ let testModalRunning = false;
     if (!ok) return;
     if (btn) { btn.disabled = true; btn.textContent = t('common.loading') || '...'; }
     try {
-      // apiRefreshAccount already force-unbans + refreshes token + usage
+      // apiRefreshAccount refreshes token + usage but does NOT clear ban.
       const res = await api('/accounts/' + id + '/refresh', { method: 'POST' });
       const d = await res.json();
       if (d.success) {
@@ -1177,6 +1176,12 @@ let testModalRunning = false;
       const d = await res.json();
       if (d.success) {
         addTestLog(t('accounts.testLog.success', email, elapsed, d.reply), 'ok');
+        // If the test cleared a ban, log it and reload to reflect the
+        // new ACTIVE badge + enabled state immediately.
+        if (d.banCleared) {
+          addTestLog(t('accounts.testLog.banCleared', email), 'ok');
+          loadAccounts();
+        }
       } else {
         addTestLog(t('accounts.testLog.failed', email, elapsed, d.error || t('common.unknownError')), 'err');
         // If the account was banned during the test, reload accounts to reflect

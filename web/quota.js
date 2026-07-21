@@ -80,6 +80,10 @@ function escapeHtml(s) {
 
 // ─── API ─────────────────────────────────────────────────
 async function loadQuotaData() {
+  // Skip if a load is already in flight (5s timer can overlap with a
+  // slow prior request). The next tick will pick up fresh data.
+  if (quotaState.loading) return;
+  quotaState.loading = true;
   // Show skeleton on first load (no data yet)
   const isFirstLoad = !quotaState.data;
   if (isFirstLoad) {
@@ -97,6 +101,8 @@ async function loadQuotaData() {
   } catch (e) {
     console.error('[Quota] load failed:', e);
     $('quotaProviderPills').innerHTML = '<span class="quota-error" style="padding:4px">Load failed</span>';
+  } finally {
+    quotaState.loading = false;
   }
 }
 
@@ -298,13 +304,23 @@ function renderAccountBlock(a) {
   // Per-block action buttons
   // - Refresh: available for all accounts (refreshes usage/quota from provider)
   // - Credits: only for External OpenAI-compatible accounts (checks credit balance)
+  // - Bank Reset Quota: only for Codex accounts — consumes a bank-reset
+  //   credit upstream to clear rate-limit windows. Button is always shown
+  //   for Codex accounts; clicking it checks available credits first and
+  //   shows a toast if none are available.
   const isExternal = (a.provider || '').toLowerCase().includes('external');
+  const isCodex = (a.provider || '').toLowerCase().includes('codex') || a.codexPlanType;
   const refreshIcon = 'fa-solid fa-rotate';
   const refreshLabel = typeof t === 'function' ? t('quota.refreshAccount') : 'Refresh';
   const creditsLabel = typeof t === 'function' ? t('quota.checkCredits') : 'Credits';
+  const resetCreditLabel = typeof t === 'function' ? t('quota.bankResetQuota') : 'Bank Reset';
   const creditsBtn = isExternal ? `
       <button class="quota-block-btn" data-action="check-credits" data-account-id="${escapeHtml(a.id)}" title="${escapeHtml(creditsLabel)}">
         <i class="fa-solid fa-coins"></i> <span>${escapeHtml(creditsLabel)}</span>
+      </button>` : '';
+  const resetCreditBtn = isCodex ? `
+      <button class="quota-block-btn quota-block-btn-warning" data-action="bank-reset" data-account-id="${escapeHtml(a.id)}" title="${escapeHtml(resetCreditLabel)}">
+        <i class="fa-solid fa-bolt"></i> <span>${escapeHtml(resetCreditLabel)}</span>
       </button>` : '';
   const actionsHtml = `
     <div class="quota-block-actions">
@@ -312,6 +328,7 @@ function renderAccountBlock(a) {
         <i class="${refreshIcon}"></i> <span>${escapeHtml(refreshLabel)}</span>
       </button>
       ${creditsBtn}
+      ${resetCreditBtn}
     </div>`;
 
   return `
@@ -459,7 +476,7 @@ function wireToolbarEvents() {
   const next = $('quotaNextPage');
   if (next) next.onclick = () => { quotaState.page++; renderAccountBlocks(); };
 
-  // Per-block action buttons (refresh quota / check credits)
+  // Per-block action buttons (refresh quota / check credits / bank reset)
   document.querySelectorAll('.quota-block-btn[data-action]').forEach(btn => {
     btn.onclick = async () => {
       if (btn.classList.contains('is-loading')) return;
@@ -470,13 +487,54 @@ function wireToolbarEvents() {
       try {
         if (action === 'refresh-quota') {
           await api(`/accounts/${accountId}/refresh`, { method: 'POST' });
+          await loadQuotaData();
         } else if (action === 'check-credits') {
           await api(`/accounts/${accountId}/credits`, { method: 'POST' });
+          await loadQuotaData();
+        } else if (action === 'bank-reset') {
+          // First check if the account has any bank-reset credits available.
+          const checkRes = await api(`/accounts/${accountId}/reset-credits/available`);
+          const checkData = await checkRes.json();
+          if (!checkData.available || checkData.available <= 0) {
+            if (typeof toastError === 'function') {
+              toastError(typeof t === 'function' ? t('quota.bankResetNone') : 'No bank-reset credits available');
+            } else {
+              alert('No bank-reset credits available for this account');
+            }
+            return;
+          }
+          // Confirm before consuming — this is a one-shot upstream action.
+          const msg = typeof t === 'function'
+            ? t('quota.confirmBankReset', String(checkData.available))
+            : `Consume 1 of ${checkData.available} bank-reset credit(s)? This resets the rate-limit windows upstream.`;
+          if (typeof confirmAction === 'function') {
+            const ok = await confirmAction(msg, {
+              title: typeof t === 'function' ? t('quota.bankResetQuota') : 'Bank Reset',
+              confirmText: typeof t === 'function' ? t('common.confirm') : 'Confirm',
+              variant: 'warning',
+            });
+            if (!ok) return;
+          } else if (!confirm(msg)) {
+            return;
+          }
+          const res = await api(`/accounts/${accountId}/reset-credits`, { method: 'POST' });
+          const d = await res.json();
+          if (d.success) {
+            if (typeof toast === 'function') {
+              toast(d.message || (typeof t === 'function' ? t('quota.bankResetDone') : 'Bank reset done'), 'success');
+            }
+            await loadQuotaData();
+          } else {
+            if (typeof toastError === 'function') {
+              toastError(d.error || (typeof t === 'function' ? t('quota.bankResetFailed') : 'Bank reset failed'));
+            }
+          }
         }
-        // Reload quota overview to reflect updated data
-        await loadQuotaData();
       } catch (e) {
         console.error('[Quota] block action failed:', action, e);
+        if (typeof toastError === 'function') {
+          toastError(String(e.message || e));
+        }
       } finally {
         btn.classList.remove('is-loading');
         btn.disabled = false;
@@ -499,28 +557,24 @@ function renderQuotaPage() {
 
 // ─── Lifecycle ───────────────────────────────────────────
 function initQuotaPage() {
-  if (quotaState.loading) return;
-  quotaState.loading = true;
+  // loadQuotaData now manages quotaState.loading internally; just trigger
+  // an immediate load + start the 5s refresh timer.
   setRefreshBtnLoading(true);
-  loadQuotaData().finally(() => {
-    quotaState.loading = false;
-    setRefreshBtnLoading(false);
-  });
+  loadQuotaData().finally(() => setRefreshBtnLoading(false));
 
   if (quotaState.refreshTimer) clearInterval(quotaState.refreshTimer);
+  // 5s refresh so token/request counters update in real time as traffic
+  // flows through the proxy. The backend reads live in-memory pool stats
+  // (not persisted config), so each poll reflects the latest counters.
   quotaState.refreshTimer = setInterval(() => {
     if (!$('tabQuota').classList.contains('hidden')) loadQuotaData();
-  }, 60000);
+  }, 5000);
 
   const btn = $('quotaRefreshBtn');
   if (btn) btn.onclick = () => {
     if (quotaState.loading) return;
-    quotaState.loading = true;
     setRefreshBtnLoading(true);
-    loadQuotaData().finally(() => {
-      quotaState.loading = false;
-      setRefreshBtnLoading(false);
-    });
+    loadQuotaData().finally(() => setRefreshBtnLoading(false));
   };
 }
 
