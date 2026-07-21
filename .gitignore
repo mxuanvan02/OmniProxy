@@ -2,6 +2,7 @@
 /data/
 
 # Compiled binary
+/omniproxy
 /superkiro
 
 # Editor / OS
@@ -20,5 +21,6 @@ omniproxy_backup_*
 *.new
 superkiro-linux-*
 omniproxy-linux-*
-/omniproxy
-/superkiro
+
+# Personal ops scripts (not published to public repo)
+scripts/sync-*.sh

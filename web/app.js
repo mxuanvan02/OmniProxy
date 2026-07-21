@@ -760,7 +760,7 @@ let customSelectRefreshQueued = false;
       if (!currentVersion) await loadVersion();
       const current = currentVersion.replace(/^v/i, '');
       if (!current) throw new Error('Current version missing');
-      const res = await fetch('https://raw.githubusercontent.com/lenhanpham/OmniProxy/main/version.json?t=' + Date.now());
+      const res = await fetch('https://raw.githubusercontent.com/mxuanvan02/OmniProxy/main/version.json?t=' + Date.now());
       if (!res.ok) throw new Error('Fetch failed');
       const d = await res.json();
       const latest = (d.version || '').replace(/^v/i, '');
@@ -942,6 +942,7 @@ let customSelectRefreshQueued = false;
     $('exportBtn').addEventListener('click', showExportModal);
     $('refreshAllModelsBtn').addEventListener('click', refreshAllModels);
     $('refreshAllAccountsBtn').addEventListener('click', refreshAllAccounts);
+    $('reauthAllBannedBtn').addEventListener('click', reauthAllBanned);
     $('addAccountBtn').addEventListener('click', () => showModal('add'));
 
     // Available models card → toggle panel
@@ -983,6 +984,8 @@ let customSelectRefreshQueued = false;
       else if (action === 'delete') deleteAccount(id);
       else if (action === 'refreshCredits') refreshAccountCredits(id, btn.closest('.account-card'));
       else if (action === 'refreshToken') refreshAccountToken(id);
+      else if (action === 'resetQuota') resetAccountQuota(id, btn.closest('.account-card'));
+      else if (action === 'reauth') reauthAccount(id, btn);
     });
   }
 

@@ -9,7 +9,7 @@
 # OmniProxy
 <div align="center">
   <a href="https://go.dev/">
-    <img src="https://img.shields.io/badge/Go-1.21+-00ADD8?style=flat&logo=go" alt="Go Version">
+    <img src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go" alt="Go Version">
   </a>
   <a href="https://www.docker.com/">
     <img src="https://img.shields.io/badge/Docker-Ready-2496ED?style=flat&logo=docker" alt="Docker">
@@ -17,9 +17,15 @@
   <a href="LICENSE">
     <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
   </a>
+  <a href="https://github.com/mxuanvan02/OmniProxy/releases">
+    <img src="https://img.shields.io/github/v/release/mxuanvan02/OmniProxy?display_name=tag&sort=semver" alt="Release">
+  </a>
+  <a href="https://github.com/mxuanvan02/OmniProxy/stargazers">
+    <img src="https://img.shields.io/github/stars/mxuanvan02/OmniProxy" alt="Stars">
+  </a>
 </div>
 <div align="center">
-  <p>Chuyển đổi tài khoản Kiro thành dịch vụ API tương thích OpenAI / Anthropic.</p>
+  <p>Chuyển đổi tài khoản Kiro / Codex thành dịch vụ API tương thích OpenAI &amp; Anthropic.</p>
 </div>
 <div align="center">
   <a href="README.md">English</a> | <a href="README_CN.md">中文</a> | Tiếng Việt
@@ -39,8 +45,9 @@
 
 ## Tính năng
 
+### API cốt lõi
+
 - **Tương thích API** — Anthropic `/v1/messages`, OpenAI `/v1/chat/completions` & `/v1/responses`, SSE streaming
-- **Nhóm đa tài khoản** — cân bằng tải round-robin, chuyển đổi dự phòng endpoint, chuỗi combo fallback
 - **12 phương thức xác thực** — AWS Builder ID, IAM Identity Center (Enterprise SSO), SSO Token, Social Login (Google/GitHub), Kiro CLI import, Kiro SSO 3 bước đăng nhập qua trình duyệt, AWS SSO Cache, Kiro Local Cache, Credentials JSON, Kiro Web Cookie, API Key (ksk_), Refresh Token
 - **Tự động làm mới Token** — thông tin xác thực luôn hợp lệ
 - **Lọc prompt** — thay thế system prompt Claude Code CLI bằng phiên bản backend gọn nhẹ, loại bỏ nhiễu môi trường, dấu phân cách; quy tắc regex tùy chỉnh (admin panel)
@@ -49,6 +56,32 @@
 - **Theo dõi sử dụng** — tín dụng, token, số lượng request, cảnh báo vượt hạn mức
 - **Chế độ Thinking** — cấu hình hậu tố kích hoạt, định dạng đầu ra (reasoning_content / thinking / think)
 - **Web admin panel** — quản lý tài khoản, cài đặt, i18n (EN / CN / VN)
+
+### Nhóm đa tài khoản
+
+- **Cân bằng tải round-robin** — phân phối có trọng số
+- **Chuyển đổi dự phòng endpoint** — tự động khi lỗi, chuỗi combo fallback
+- **Routing theo provider** — model Claude route đến tài khoản external OpenAI-compatible, model GPT route đến tài khoản Codex
+- **Cooldown theo model** — lỗi quota/auth chỉ khóa model đó, không ảnh hưởng model khác trên cùng tài khoản
+
+### Tối ưu Prompt Cache
+
+- **Cache key dựa trên instructions** — tất cả conversation dùng chung system prompt sẻ chia 1 cache entry, kể cả khác conversation/agent
+- **Cross-conversation sharing** — 10 agent cùng system prompt → 1 cache entry (thay vì 10)
+- **Cache warming async** — tài khoản mới được xoay sẽ nhận warmup request nền, request đầu tiên đã hit cache
+- **Warming dedup** — concurrent request cùng account+cacheKey không trigger warmup trùng
+- **Token threshold** — prompt ngắn (< 1024 tokens) bỏ qua warming để tiết kiệm quota
+- **Cache-sticky pinning** — request liên tiếp cùng conversation pin vào cùng account, giữ cache nóng
+
+### Chiến lược routing (20+ tài khoản)
+
+Cho pool lớn với quota/reset window không đều, 2 chiến lược tùy chọn tốt hơn round-robin:
+
+- **`cost-optimized`** — ưu tiên tài khoản còn nhiều quota nhất (CodexPrimaryUsedPercent thấp nhất / ExtCreditsRemaining cao nhất). Giảm 429 mid-stream.
+- **`reset-aware`** — tránh tài khoản có quota window reset trong 30 phút. Fallback cost-optimized ranking trong số tài khoản an toàn.
+- **`round-robin`** (mặc định) — zero overhead, phù hợp pool nhỏ/vừa quota đều.
+
+Chiến lược chỉ kích hoạt khi pool ≥ 20 tài khoản. Cache-sticky pinning luôn ưu tiên hơn chiến lược — cache hit tiết kiệm quota hơn bất kỳ choice nào. Cấu hình qua admin panel → Usage → tab Pool, hoặc `PATCH /admin/api/pool/strategy`.
 
 ## Lưu ý
 
@@ -158,9 +191,27 @@ Cài đặt có hiệu lực ngay lập tức, không cần khởi động lại
 
 Chào đón thảo luận thân thiện. Nếu gặp vấn đề, hãy thử hỏi Claude Code, Codex hoặc các công cụ tương tự trước — hầu hết vấn đề đều tự giải quyết được. Pull Request còn tuyệt hơn.
 
+Xem [CONTRIBUTING.md](CONTRIBUTING.md) cho hướng dẫn setup development.
+
+## Changelog
+
+Xem [CHANGELOG.md](CHANGELOG.md) cho lịch sử release và thay đổi đáng chú ý.
+
 ## Ghi nhận
 
-- OmniProxy là dự án fork từ Kiro-Go và được phát triển dựa trên [Kiro-Go](https://github.com/Quorinex/Kiro-Go) 
+OmniProxy là dự án fork từ [Kiro-Go](https://github.com/Quorinex/Kiro-Go) và được phát triển dựa trên nó. Dự án gốc cung cấp nền tảng quản lý tài khoản Kiro, làm mới token và lớp API tương thích OpenAI / Anthropic.
+
+Những bổ sung chính trong OmniProxy so với upstream:
+
+- Hỗ trợ tài khoản Codex (ChatGPT subscription) với theo dõi usage
+- Hỗ trợ external OpenAI-compatible provider
+- Cache key dựa trên instructions, sẻ chia cross-conversation
+- Cache warming async (dedup + token threshold)
+- Pool routing strategies (cost-optimized, reset-aware) cho pool 20+ tài khoản
+- Combo fallback chains, mỗi combo cấu hình strategy riêng
+- Web admin panel với i18n (EN / CN / VN)
+- Proxy riêng cho từng tài khoản (SOCKS5 / HTTP)
+- Hệ thống prompt filter với regex rules tùy chỉnh
 
 ## Tuyên bố miễn trừ
 
@@ -168,4 +219,4 @@ Chỉ dành cho mục đích giáo dục và nghiên cứu. Không liên kết v
 
 ## Giấy phép
 
-[MIT](LICENSE)
+[MIT](LICENSE) — Copyright (c) 2026 mxuanvan02

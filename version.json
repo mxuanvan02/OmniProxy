@@ -1,5 +1,5 @@
 {
-  "version": "0.1.6",
-  "changelog": "Windows only: Fixed crashed when users choose 2 to run in background",
+  "version": "0.3.0",
+  "changelog": "Pool routing strategies (cost-optimized, reset-aware) + instructions-based cache key with async warming + Codex/external provider support",
   "download": "https://github.com/mxuanvan02/OmniProxy"
 }

@@ -1,13 +1,13 @@
 blank_issues_enabled: false
 contact_links:
   - name: Self-diagnosis / 自行排查 / Tự chẩn đoán
-    url: https://github.com/lenhanpham/OmniProxy#readme
+    url: https://github.com/mxuanvan02/OmniProxy#readme
     about: |
       Review the README, configuration, and logs first; if anything remains unclear, an AI coding assistant (Claude Code, Codex, etc.) can help analyze them.
       请先查阅 README、确认配置并核对日志；如仍不明确，可借助 AI 编程助手（Claude Code、Codex 等）协助分析。
       Trước tiên hãy xem README, kiểm tra cấu hình và log; nếu vẫn chưa rõ, hãy dùng trợ lý AI (Claude Code, Codex, v.v.) để phân tích.
   - name: Search existing issues / 检索已有 issue / Tìm kiếm issue có sẵn
-    url: https://github.com/lenhanpham/OmniProxy/issues?q=is%3Aissue
+    url: https://github.com/mxuanvan02/OmniProxy/issues?q=is%3Aissue
     about: |
       Search both open and closed issues to confirm this has not been reported.
       检索全部 open 与 closed 的 issue，确认问题尚未被提交过。
