@@ -91,7 +91,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	}
 
 	openaiReq := &OpenAIRequest{
-		Model:    req.Model,
+		Model:    stripProviderPrefix(req.Model),
 		Messages: finalMessages,
 		Stream:   req.Stream,
 		Tools:    req.Tools,
@@ -141,9 +141,10 @@ func (h *Handler) handleResponsesNonStream(
 ) {
 	excluded := make(map[string]bool)
 	var lastErr error
+	cacheKey := payloadCacheKey(payload)
 
 	for attempt := 0; ; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account := h.pool.GetNextForModelWithCacheKey(model, excluded, cacheKey)
 		if account == nil {
 			break
 		}
@@ -160,6 +161,7 @@ func (h *Handler) handleResponsesNonStream(
 		var inputTokens, outputTokens int
 		var credits float64
 		var realInputTokens int
+		realCacheRead := 0
 
 		callback := &KiroStreamCallback{
 			OnText: func(text string, isThinking bool) {
@@ -175,9 +177,17 @@ func (h *Handler) handleResponsesNonStream(
 			OnContextUsage: func(pct float64) {
 				realInputTokens = int(pct * float64(h.contextWindowForModel(model)) / 100.0)
 			},
+			OnCacheRead: func(cachedTokens int) {
+				if cachedTokens > realCacheRead {
+					realCacheRead = cachedTokens
+				}
+			},
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointOpenAIResponses, model)
+		if isCodexAccount(account) {
+			h.warmAccountCache(account, payload, cacheKey)
+		}
 		err := dispatchChat(account, payload, callback)
 		if err != nil {
 			lastErr = err
@@ -185,6 +195,9 @@ func (h *Handler) handleResponsesNonStream(
 			// in-place with backoff before rotating to a different account.
 			if h.tryTransientRetry(account, payload, callback, err) {
 				h.pool.RecordSuccess(account.ID, model)
+		if cacheKey != "" {
+			h.pool.RecordCacheStickiness(cacheKey, account.ID)
+		}
 				goto responsesNonStreamSuccess
 			}
 			h.usageTracker.RemoveActive(account.ID)
@@ -213,11 +226,14 @@ func (h *Handler) handleResponsesNonStream(
 			outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 		}
 
-		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits)
+		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits, realCacheRead, 0, realCacheRead)
 		h.pool.RecordSuccess(account.ID, model)
+		if cacheKey != "" {
+			h.pool.RecordCacheStickiness(cacheKey, account.ID)
+		}
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
-		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req)
+		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, realCacheRead, req)
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions
 
@@ -242,7 +258,7 @@ func (h *Handler) handleResponsesNonStream(
 
 func buildResponsesObject(
 	id, model, content string, toolUses []KiroToolUse,
-	inputTokens, outputTokens int, req *ResponsesRequest,
+	inputTokens, outputTokens, cachedTokens int, req *ResponsesRequest,
 ) *ResponsesObject {
 	output := make([]ResponseOutputItem, 0, 1+len(toolUses))
 
@@ -284,6 +300,11 @@ func buildResponsesObject(
 		})
 	}
 
+	usage := ResponsesUsage{InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: inputTokens + outputTokens}
+	if cachedTokens > 0 {
+		usage.InputTokensDetails = &ResponsesInputTokensDetails{CachedTokens: cachedTokens}
+	}
+
 	return &ResponsesObject{
 		ID:                 id,
 		Object:             "response",
@@ -291,7 +312,7 @@ func buildResponsesObject(
 		Status:             "completed",
 		Model:              model,
 		Output:             output,
-		Usage:              ResponsesUsage{InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: inputTokens + outputTokens},
+		Usage:              usage,
 		PreviousResponseID: req.PreviousResponseID,
 		Metadata:           req.Metadata,
 	}
@@ -341,9 +362,11 @@ func (h *Handler) handleResponsesStream(
 	excluded := make(map[string]bool)
 	var lastErr error
 	responseStarted := false
+	realCacheRead := 0
+	cacheKey := payloadCacheKey(payload)
 
 	for attempt := 0; ; attempt++ {
-		account := h.pool.GetNextForModelExcluding(model, excluded)
+		account := h.pool.GetNextForModelWithCacheKey(model, excluded, cacheKey)
 		if account == nil {
 			break
 		}
@@ -494,6 +517,11 @@ func (h *Handler) handleResponsesStream(
 			OnContextUsage: func(pct float64) {
 				realInputTokens = int(pct * float64(h.contextWindowForModel(model)) / 100.0)
 			},
+			OnCacheRead: func(cachedTokens int) {
+				if cachedTokens > realCacheRead {
+					realCacheRead = cachedTokens
+				}
+			},
 		}
 
 	h.usageTracker.TrackActive(account.ID, endpointOpenAIResponses, model)
@@ -504,6 +532,7 @@ func (h *Handler) handleResponsesStream(
 		effectiveCallback := callback
 		if isCodexAccount(account) {
 			effectiveCallback = newCodexCoalescer(callback)
+			h.warmAccountCache(account, payload, cacheKey)
 		}
 		err := dispatchChat(account, payload, effectiveCallback)
 		var finalContent string
@@ -515,6 +544,9 @@ func (h *Handler) handleResponsesStream(
 			// the response.created event).
 			if !responseStarted && h.tryTransientRetry(account, payload, effectiveCallback, err) {
 				h.pool.RecordSuccess(account.ID, model)
+		if cacheKey != "" {
+			h.pool.RecordCacheStickiness(cacheKey, account.ID)
+		}
 				goto responsesStreamSuccess
 			}
 			if !responseStarted {
@@ -588,11 +620,14 @@ func (h *Handler) handleResponsesStream(
 			outputTokens = estimateOpenAIOutputTokens(finalContent, reasoning, toolUses)
 		}
 
-		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits)
+		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits, realCacheRead, 0, realCacheRead)
 		h.pool.RecordSuccess(account.ID, model)
+		if cacheKey != "" {
+			h.pool.RecordCacheStickiness(cacheKey, account.ID)
+		}
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
-		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, req)
+		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, realCacheRead, req)
 		respObj.CreatedAt = createdAt
 		respObj.StoredInput = storedInput
 		respObj.Instructions = req.Instructions

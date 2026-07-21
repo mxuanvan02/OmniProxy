@@ -30,18 +30,21 @@ const (
 
 // RequestRecord is a single usage event captured during a proxy request.
 type RequestRecord struct {
-	Timestamp    string  `json:"timestamp"`
-	Model        string  `json:"model"`
-	Provider     string  `json:"provider"`
-	AccountID    string  `json:"accountId"`
-	AccountName  string  `json:"accountName"`
-	InputTokens  int     `json:"inputTokens"`
-	OutputTokens int     `json:"outputTokens"`
-	Cost         float64 `json:"cost"`
-	Status       string  `json:"status"`
-	Endpoint     string  `json:"endpoint"`
-	APIKeyID     string  `json:"apiKeyId,omitempty"`
-	Error        string  `json:"error,omitempty"`
+	Timestamp          string  `json:"timestamp"`
+	Model              string  `json:"model"`
+	Provider           string  `json:"provider"`
+	AccountID          string  `json:"accountId"`
+	AccountName        string  `json:"accountName"`
+	InputTokens        int     `json:"inputTokens"`
+	OutputTokens       int     `json:"outputTokens"`
+	Cost               float64 `json:"cost"`
+	Status             string  `json:"status"`
+	Endpoint           string  `json:"endpoint"`
+	APIKeyID           string  `json:"apiKeyId,omitempty"`
+	Error              string  `json:"error,omitempty"`
+	CacheReadTokens    int     `json:"cacheReadTokens,omitempty"`
+	CacheCreateTokens  int     `json:"cacheCreateTokens,omitempty"`
+	CachedTokens       int     `json:"cachedTokens,omitempty"` // OpenAI-style cached prompt tokens
 }
 
 // PeriodSummary holds aggregated stats for a single time bucket.
@@ -55,6 +58,9 @@ type PeriodSummary struct {
 	PromptTokens     int     `json:"promptTokens"`
 	CompletionTokens int     `json:"completionTokens"`
 	Cost             float64 `json:"cost"`
+	CacheReadTokens  int     `json:"cacheReadTokens,omitempty"`
+	CacheCreateTokens int    `json:"cacheCreateTokens,omitempty"`
+	CachedTokens     int     `json:"cachedTokens,omitempty"`
 
 	ByModel    map[string]*PeriodSummary `json:"byModel,omitempty"`
 	ByAccount  map[string]*PeriodSummary `json:"byAccount,omitempty"`
@@ -68,6 +74,9 @@ type UsageStats struct {
 	TotalPromptTokens     int                       `json:"totalPromptTokens"`
 	TotalCompletionTokens int                       `json:"totalCompletionTokens"`
 	TotalCost             float64                   `json:"totalCost"`
+	TotalCacheReadTokens  int                       `json:"totalCacheReadTokens,omitempty"`
+	TotalCacheCreateTokens int                      `json:"totalCacheCreateTokens,omitempty"`
+	TotalCachedTokens     int                       `json:"totalCachedTokens,omitempty"`
 	ActiveRequests        []ActiveRequest           `json:"activeRequests"`
 	RecentRequests        []RequestRecord           `json:"recentRequests"`
 	ByModel               map[string]*PeriodSummary `json:"byModel"`
@@ -209,6 +218,15 @@ func (t *UsageTracker) Append(r RequestRecord) {
 	day.PromptTokens += r.InputTokens
 	day.CompletionTokens += r.OutputTokens
 	day.Cost += r.Cost
+	// Day-level cache totals must be updated here too, not just in
+	// addToSummaryMap — otherwise sumDailyTotalsLocked reads 0 for the
+	// headline TotalCacheReadTokens/TotalCachedTokens fields while the
+	// ByAccount/ByModel breakdowns (populated via addToSummaryMap) show
+	// the real values. This mismatch made the dashboard show "Cached
+	// Tokens 0" even when cache hits were being recorded.
+	day.CacheReadTokens += r.CacheReadTokens
+	day.CacheCreateTokens += r.CacheCreateTokens
+	day.CachedTokens += r.CachedTokens
 
 	// Per-day breakdowns so the By* tables survive past the ring buffer cap.
 	if day.ByModel == nil {
@@ -223,13 +241,13 @@ func (t *UsageTracker) Append(r RequestRecord) {
 	if day.ByEndpoint == nil {
 		day.ByEndpoint = make(map[string]*PeriodSummary)
 	}
-	addToSummaryMap(day.ByModel, r.Model, r.InputTokens, r.OutputTokens, r.Cost)
-	addToSummaryMap(day.ByAccount, r.AccountID, r.InputTokens, r.OutputTokens, r.Cost)
+	addToSummaryMap(day.ByModel, r.Model, r)
+	addToSummaryMap(day.ByAccount, r.AccountID, r)
 	if r.APIKeyID != "" {
-		addToSummaryMap(day.ByAPIKey, r.APIKeyID, r.InputTokens, r.OutputTokens, r.Cost)
+		addToSummaryMap(day.ByAPIKey, r.APIKeyID, r)
 	}
 	if r.Endpoint != "" {
-		addToSummaryMap(day.ByEndpoint, r.Endpoint, r.InputTokens, r.OutputTokens, r.Cost)
+		addToSummaryMap(day.ByEndpoint, r.Endpoint, r)
 	}
 	delete(t.activeReqs, r.AccountID)
 
@@ -438,7 +456,7 @@ func (t *UsageTracker) getAllRecordsLocked() []RequestRecord {
 // addToSummaryMap accumulates a single request into a breakdown map keyed by
 // model/account/apikey/endpoint. Used to build the per-day breakdowns stored on
 // each daily bucket so the By* tables are not capped by the ring buffer.
-func addToSummaryMap(m map[string]*PeriodSummary, key string, prompt, completion int, cost float64) {
+func addToSummaryMap(m map[string]*PeriodSummary, key string, r RequestRecord) {
 	if key == "" {
 		return
 	}
@@ -448,9 +466,12 @@ func addToSummaryMap(m map[string]*PeriodSummary, key string, prompt, completion
 		m[key] = s
 	}
 	s.Requests++
-	s.PromptTokens += prompt
-	s.CompletionTokens += completion
-	s.Cost += cost
+	s.PromptTokens += r.InputTokens
+	s.CompletionTokens += r.OutputTokens
+	s.Cost += r.Cost
+	s.CacheReadTokens += r.CacheReadTokens
+	s.CacheCreateTokens += r.CacheCreateTokens
+	s.CachedTokens += r.CachedTokens
 }
 
 // mergeSummaryInto folds one source breakdown map into a destination, summing
@@ -469,6 +490,9 @@ func mergeSummaryMapInto(dst, src map[string]*PeriodSummary) {
 		d.PromptTokens += s.PromptTokens
 		d.CompletionTokens += s.CompletionTokens
 		d.Cost += s.Cost
+		d.CacheReadTokens += s.CacheReadTokens
+		d.CacheCreateTokens += s.CacheCreateTokens
+		d.CachedTokens += s.CachedTokens
 	}
 }
 
@@ -490,6 +514,9 @@ func (t *UsageTracker) sumDailyTotalsLocked(stats *UsageStats, period string) {
 		stats.TotalPromptTokens += day.PromptTokens
 		stats.TotalCompletionTokens += day.CompletionTokens
 		stats.TotalCost += day.Cost
+		stats.TotalCacheReadTokens += day.CacheReadTokens
+		stats.TotalCacheCreateTokens += day.CacheCreateTokens
+		stats.TotalCachedTokens += day.CachedTokens
 
 		// Merge each day's per-dimension breakdown so the By* tables are also
 		// lifetime-accurate instead of capped at the ring buffer size. Legacy

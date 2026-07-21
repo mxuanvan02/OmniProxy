@@ -159,6 +159,7 @@ type Account struct {
 	CodexSecondaryResetAt    int64  `json:"codexSecondaryResetAt,omitempty"`    // Unix seconds
 	CodexCreditsBalance      int    `json:"codexCreditsBalance,omitempty"`      // purchased credits remaining
 	CodexCreditsUnlimited    bool   `json:"codexCreditsUnlimited,omitempty"`    // unlimited credits flag
+	CodexCreditsKnown        bool   `json:"codexCreditsKnown,omitempty"`        // true when upstream sent x-codex-credits-* headers (pay-as-you-go); false for ChatGPT Plus subscription (no credit balance)
 	CodexUsageCheckedAt      int64  `json:"codexUsageCheckedAt,omitempty"`      // last header capture timestamp
 }
 
@@ -227,6 +228,14 @@ type Config struct {
 	// solely because usageCurrent >= usageLimit.
 	AllowOverUsage bool `json:"allowOverUsage,omitempty"`
 
+	// CacheControlPassthrough forwards Anthropic-style cache_control breakpoints
+	// to external OpenAI-compatible providers that support prompt caching
+	// (e.g. Anthropic via OpenAI-compatible gateways). Default false — only
+	// enable after confirming the upstream provider honours cache_control,
+	// otherwise the field is ignored or rejected. Native Kiro/Codex paths
+	// are unaffected (Kiro does not accept cache_control).
+	CacheControlPassthrough bool `json:"cacheControlPassthrough,omitempty"`
+
 	// Proxy configuration: optional outbound proxy for Kiro API requests
 	// Format: "socks5://host:port", "socks5://user:pass@host:port",
 	//         "http://host:port",  "http://user:pass@host:port"
@@ -236,6 +245,13 @@ type Config struct {
 	// Kiro API HTTP timeout. Can be overridden by API_TIMEOUT_MS env var.
 	// Default: 300000 (5 minutes). Matches the CLI's API_TIMEOUT_MS convention.
 	KiroApiTimeoutMs int `json:"apiTimeoutMs,omitempty"`
+
+	// Stream idle timeout: max seconds without any data from upstream after
+	// the HTTP 200 response headers arrive. When exceeded, the connection is
+	// killed and the request rotates to another account (TTFB + per-chunk idle
+	// deadline). Default: 60s. Env override: STREAM_IDLE_TIMEOUT_SECONDS.
+	// Set to 0 to disable (falls back to the overall KiroApiTimeoutMs).
+	StreamIdleTimeoutSeconds int `json:"streamIdleTimeoutSeconds,omitempty"`
 
 	// SanitizeClaudeCodePrompt is kept for backward-compatible JSON loading only.
 	// Migrated to FilterClaudeCode on first load. Do not use directly.
@@ -286,6 +302,10 @@ type Config struct {
 	FailedRequests  int     `json:"failedRequests,omitempty"`  // Failed requests count
 	TotalTokens     int     `json:"totalTokens,omitempty"`     // Total tokens processed
 	TotalCredits    float64 `json:"totalCredits,omitempty"`    // Total credits consumed
+
+	// KVSettings stores arbitrary key-value settings (compression, headroom, caveman, etc.)
+	// Keys use camelCase. Bool values are stored as bool, strings as string.
+	KVSettings map[string]interface{} `json:"kvSettings,omitempty"`
 }
 
 // AccountInfo contains account metadata retrieved from Kiro API.
@@ -471,6 +491,68 @@ func Get() *Config {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
 	return cfg
+}
+
+// ─── KVSettings helpers (compression, headroom, caveman, etc.) ──────────────
+
+// GetBoolSetting reads a bool from KVSettings, returning fallback if missing.
+func GetBoolSetting(key string, fallback bool) bool {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg.KVSettings == nil {
+		return fallback
+	}
+	v, ok := cfg.KVSettings[key]
+	if !ok {
+		return fallback
+	}
+	switch b := v.(type) {
+	case bool:
+		return b
+	default:
+		return fallback
+	}
+}
+
+// GetStringSetting reads a string from KVSettings, returning fallback if missing.
+func GetStringSetting(key, fallback string) string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg.KVSettings == nil {
+		return fallback
+	}
+	v, ok := cfg.KVSettings[key]
+	if !ok {
+		return fallback
+	}
+	switch s := v.(type) {
+	case string:
+		return s
+	default:
+		return fallback
+	}
+}
+
+// SetBoolSetting stores a bool in KVSettings and persists.
+func SetBoolSetting(key string, val bool) {
+	cfgLock.Lock()
+	if cfg.KVSettings == nil {
+		cfg.KVSettings = make(map[string]interface{})
+	}
+	cfg.KVSettings[key] = val
+	cfgLock.Unlock()
+	_ = Save()
+}
+
+// SetStringSetting stores a string in KVSettings and persists.
+func SetStringSetting(key, val string) {
+	cfgLock.Lock()
+	if cfg.KVSettings == nil {
+		cfg.KVSettings = make(map[string]interface{})
+	}
+	cfg.KVSettings[key] = val
+	cfgLock.Unlock()
+	_ = Save()
 }
 
 func GetPassword() string {
@@ -711,10 +793,14 @@ func UpdateAccountChatGPTAccountID(id, accountID string) error {
 
 // UpdateAccountCodexUsage stores Codex rate-limit / usage headers captured
 // from the upstream /v1/responses response. Called after every Codex request.
+// creditsKnown reports whether the upstream actually sent x-codex-credits-*
+// headers: when false (ChatGPT Plus subscription, no pay-as-you-go balance),
+// the credits fields are left untouched so the UI can distinguish "no credit
+// info" from "0 credits remaining".
 func UpdateAccountCodexUsage(id string, planType, activeLimit string,
 	primaryPct, secondaryPct, primaryWindow int,
 	primaryResetAt, secondaryResetAt int64,
-	creditsBalance int, creditsUnlimited bool) error {
+	creditsBalance int, creditsUnlimited bool, creditsKnown bool) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	for i, a := range cfg.Accounts {
@@ -726,8 +812,13 @@ func UpdateAccountCodexUsage(id string, planType, activeLimit string,
 			cfg.Accounts[i].CodexPrimaryWindowMinutes = primaryWindow
 			cfg.Accounts[i].CodexPrimaryResetAt = primaryResetAt
 			cfg.Accounts[i].CodexSecondaryResetAt = secondaryResetAt
-			cfg.Accounts[i].CodexCreditsBalance = creditsBalance
-			cfg.Accounts[i].CodexCreditsUnlimited = creditsUnlimited
+			if creditsKnown {
+				cfg.Accounts[i].CodexCreditsBalance = creditsBalance
+				cfg.Accounts[i].CodexCreditsUnlimited = creditsUnlimited
+				cfg.Accounts[i].CodexCreditsKnown = true
+			} else {
+				cfg.Accounts[i].CodexCreditsKnown = false
+			}
 			cfg.Accounts[i].CodexUsageCheckedAt = time.Now().Unix()
 			return Save()
 		}
@@ -1086,6 +1177,31 @@ func GetKiroApiTimeout() time.Duration {
 	return 5 * time.Minute
 }
 
+// GetStreamIdleTimeout returns the max duration the proxy will wait for the
+// next byte from upstream after the HTTP 200 response headers arrive. When
+// exceeded, the connection is killed and the request rotates to another
+// account. This catches "200 OK but no data" hangs (dead-but-not-disabled
+// upstream accounts) far faster than the overall KiroApiTimeout.
+//
+// Priority: STREAM_IDLE_TIMEOUT_SECONDS env var > config file > default (60s).
+// Returns 0 to disable the idle reader (caller falls back to KiroApiTimeout).
+func GetStreamIdleTimeout() time.Duration {
+	if envVal := os.Getenv("STREAM_IDLE_TIMEOUT_SECONDS"); envVal != "" {
+		if sec, err := strconv.Atoi(envVal); err == nil && sec > 0 {
+			return time.Duration(sec) * time.Second
+		}
+		if sec, err := strconv.Atoi(envVal); err == nil && sec == 0 {
+			return 0 // explicit disable
+		}
+	}
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg != nil && cfg.StreamIdleTimeoutSeconds > 0 {
+		return time.Duration(cfg.StreamIdleTimeoutSeconds) * time.Second
+	}
+	return 60 * time.Second
+}
+
 // UpdateProxySettings updates the outbound proxy config
 func UpdateProxySettings(proxyURL string) error {
 	cfgLock.Lock()
@@ -1102,6 +1218,17 @@ func GetAllowOverUsage() bool {
 		return false
 	}
 	return cfg.AllowOverUsage
+}
+
+// GetCacheControlPassthrough returns whether cache_control breakpoints should
+// be forwarded to external OpenAI-compatible providers.
+func GetCacheControlPassthrough() bool {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return false
+	}
+	return cfg.CacheControlPassthrough
 }
 
 // UpdateAllowOverUsage sets the over-usage setting and persists the change.

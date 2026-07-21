@@ -613,6 +613,30 @@ let testModalRunning = false;
       toast(t('common.failed'), 'error');
     }
   }
+  async function refreshAllAccounts() {
+    const ok = await confirmAction(t('accounts.confirmRefreshAll'), {
+      title: t('accounts.refreshAll'),
+      confirmText: t('accounts.refreshAll')
+    });
+    if (!ok) return;
+    const dismiss = toast(t('accounts.refreshAll') + '…', 'info', { duration: 0 });
+    try {
+      const res = await api('/accounts/refresh-all', { method: 'POST' });
+      const d = await res.json();
+      dismiss();
+      loadAccounts();
+      const msg = d.message || t('accounts.refreshAllDone', d.refreshed || 0);
+      const banned = d.banned || 0;
+      if (banned > 0) {
+        toast(msg + ' (' + banned + ' banned)', 'warning');
+      } else {
+        toast(msg, 'success');
+      }
+    } catch (e) {
+      dismiss();
+      toast(t('common.failed'), 'error');
+    }
+  }
   async function refreshAccountModels(id) {
     const dismiss = toast(t('detail.refreshModelCache') + '…', 'info', { duration: 0 });
     try {
@@ -736,8 +760,11 @@ let testModalRunning = false;
         detailItem(t('detail.codexSecondaryResetAt'), formatResetTime(a.codexSecondaryResetAt)) +
         '</div>' +
         '<div class="detail-grid" style="margin-top:0.5rem">' +
-        detailItem(t('detail.codexCreditsBalance'), a.codexCreditsBalance || 0) +
-        detailItem(t('detail.codexCreditsUnlimited'), a.codexCreditsUnlimited ? '✓' : '✗') +
+        (a.codexCreditsKnown ?
+          detailItem(t('detail.codexCreditsBalance'), a.codexCreditsBalance || 0) +
+          detailItem(t('detail.codexCreditsUnlimited'), a.codexCreditsUnlimited ? '✓' : '✗')
+          : detailItem(t('detail.codexCreditsBalance'), t('detail.codexCreditsNA')) +
+            detailItem(t('detail.codexCreditsUnlimited'), t('detail.codexCreditsNA'))) +
         (a.codexUsageCheckedAt ? detailItem(t('detail.codexLastChecked'), new Date(a.codexUsageCheckedAt * 1000).toLocaleString()) : '') +
         '</div>' +
         '<p class="help-block">' + escapeHtml(t('detail.codexUsageHint')) + '</p>' +
@@ -745,9 +772,11 @@ let testModalRunning = false;
 
       // Token section — shown for all account types. Includes a manual
       // "Refresh token" button that forces the OAuth refresh-token flow
-      // regardless of expiry, plus the last-refreshed timestamp.
+      // regardless of expiry, plus the last-refreshed timestamp. External
+      // OpenAI-compatible providers use a static API key (no refresh token),
+      // so the button is hidden for them.
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.tokenSection')) +
-      ' <button class="btn btn-sm btn-outline" data-detail-action="refreshToken" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.refreshToken')) + '</button>' +
+      (!isExternal ? ' <button class="btn btn-sm btn-outline" data-detail-action="refreshToken" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.refreshToken')) + '</button>' : '') +
       '</h4><div class="detail-grid">' +
       detailItem(t('detail.tokenExpiry'), formatTokenExpiry(a.expiresAt)) +
       (a.expiresAt ? detailItem(t('detail.tokenExpiryAbs'), new Date(a.expiresAt * 1000).toLocaleString()) : '') +
@@ -1072,6 +1101,11 @@ let testModalRunning = false;
         addTestLog(t('accounts.testLog.success', email, elapsed, d.reply), 'ok');
       } else {
         addTestLog(t('accounts.testLog.failed', email, elapsed, d.error || t('common.unknownError')), 'err');
+        // If the account was banned during the test, reload accounts to reflect
+        // the new BANNED badge and disable state immediately.
+        if (d.banned || d.banStatus === 'BANNED') {
+          loadAccounts();
+        }
       }
     } catch (e) {
       addTestLog(t('accounts.testLog.error', email, e.message), 'err');

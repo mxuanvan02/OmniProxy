@@ -92,6 +92,8 @@ let customSelectRefreshQueued = false;
     args.forEach((arg, idx) => { text = text.replace('{' + idx + '}', arg); });
     return text;
   }
+  // Expose t() globally so dynamically-rendered modules (quota.js, usage.js) can use it
+  window.t = t;
   function applyTranslations() {
     qsa('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
     qsa('[data-i18n-placeholder]').forEach(el => { el.placeholder = t(el.dataset.i18nPlaceholder); });
@@ -705,17 +707,6 @@ let customSelectRefreshQueued = false;
     $('statFailed').textContent = d.failedRequests || 0;
     $('statTokens').textContent = formatNum(d.totalTokens || 0);
     $('statCredits').textContent = (d.totalCredits || 0).toFixed(1);
-    // Kiro-side quota aggregation (sum across all accounts)
-    const kiroCur = d.kiroUsageCurrent || 0;
-    const kiroLim = d.kiroUsageLimit || 0;
-    const kiroEl = $('statKiroQuota');
-    if (kiroEl) {
-      kiroEl.textContent = kiroCur.toFixed(0) + ' / ' + kiroLim.toFixed(0);
-    }
-    const kiroPctEl = $('statKiroQuotaPct');
-    if (kiroPctEl && kiroLim > 0) {
-      kiroPctEl.textContent = (kiroCur / kiroLim * 100).toFixed(1) + '%';
-    }
     // Available models
     const modelIds = d.modelIds || [];
     const modelCount = d.availableModels != null ? d.availableModels : modelIds.length;
@@ -856,6 +847,8 @@ let customSelectRefreshQueued = false;
     $('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.remove('hidden');
     if (tab === 'usage') { if (typeof initUsagePage === 'function') initUsagePage(); }
     else { if (typeof destroyUsagePage === 'function') destroyUsagePage(); }
+    if (tab === 'quota') { if (typeof initQuotaPage === 'function') initQuotaPage(); }
+    else { if (typeof destroyQuotaPage === 'function') destroyQuotaPage(); }
     if (tab === 'logs') { if (typeof initLogsPage === 'function') initLogsPage(); }
     else { if (typeof destroyLogsPage === 'function') destroyLogsPage(); }
     if (tab === 'accounts') { if (typeof loadCombos === 'function') loadCombos(); }
@@ -948,6 +941,7 @@ let customSelectRefreshQueued = false;
 
     $('exportBtn').addEventListener('click', showExportModal);
     $('refreshAllModelsBtn').addEventListener('click', refreshAllModels);
+    $('refreshAllAccountsBtn').addEventListener('click', refreshAllAccounts);
     $('addAccountBtn').addEventListener('click', () => showModal('add'));
 
     // Available models card → toggle panel

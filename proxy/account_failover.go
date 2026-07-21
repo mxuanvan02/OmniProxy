@@ -4,6 +4,7 @@ import (
 	"omniproxy/config"
 	"omniproxy/logger"
 	"strings"
+	"time"
 )
 
 // maxAccountRetryAttempts is no longer a fixed cap — the retry loops in handler.go
@@ -14,7 +15,11 @@ const maxAccountRetryAttempts = 128
 
 func isQuotaErrorMessage(msg string) bool {
 	msg = strings.ToLower(msg)
-	return strings.Contains(msg, "429") || strings.Contains(msg, "quota")
+	return strings.Contains(msg, "429") ||
+		strings.Contains(msg, "quota") ||
+		strings.Contains(msg, "credit limit") ||
+		strings.Contains(msg, "usage_limit") ||
+		strings.Contains(msg, "usage limit")
 }
 
 func isOverageErrorMessage(msg string) bool {
@@ -67,8 +72,9 @@ func isNetworkError(msg string) bool {
 		strings.Contains(lower, "dial tcp") ||
 		strings.Contains(lower, "dial udp") ||
 		strings.Contains(lower, "timeout exceeded") ||      // Go http.Client.Timeout
-		strings.Contains(lower, "client.timeout") ||         // Go http.Client error prefix
-		strings.Contains(lower, "context deadline exceeded") // Request context timeout
+		strings.Contains(lower, "client.timeout") ||        // Go http.Client error prefix
+		strings.Contains(lower, "context deadline exceeded") || // Request context timeout
+		strings.Contains(lower, "stream idle timeout") // idleTimeoutReader — upstream silent after 200
 }
 
 // hasStatusToken returns true when status appears in s with non-digit boundaries
@@ -97,15 +103,32 @@ func (h *Handler) disableAccount(account *config.Account, banStatus, banReason s
 	if account == nil {
 		return
 	}
-	// Auto-disable is intentionally disabled by operator policy. We only log
-	// the upstream failure so operators can investigate and manually toggle the
-	// account via the admin UI. This prevents transient upstream blips from
-	// permanently removing healthy accounts from the pool.
-	logger.Warnf("[AccountFailover] Would-disable %s (banStatus=%s, reason=%s) — auto-disable OFF, keeping account enabled", account.Email, banStatus, banReason)
+	// Persist the ban status so the admin UI reflects the real state.
+	// "temporarily is suspended" / "TEMPORARILY_SUSPENDED" are definitive AWS
+	// ban signals — the account is rejected upstream, not a transient blip.
+	account.BanStatus = banStatus
+	account.BanReason = truncateErrBody([]byte(banReason))
+	account.BanTime = time.Now().Unix()
+	account.Enabled = false
+	if err := config.UpdateAccount(account.ID, *account); err != nil {
+		logger.Errorf("[AccountFailover] Failed to persist %s status for %s: %v", banStatus, account.Email, err)
+	} else {
+		logger.Warnf("[AccountFailover] Marked %s as %s: %s", account.Email, banStatus, banReason)
+	}
 }
 
 func (h *Handler) disableAccountOverage(account *config.Account) {
 	if account == nil {
+		return
+	}
+
+	// Overages is a Kiro/AWS subscription concept — not applicable to
+	// external OpenAI-compatible providers or Codex (ChatGPT subscription)
+	// accounts. FetchOverageStatus would hit q.external.amazonaws.com and
+	// fail with a DNS error. Skip the refresh for non-Kiro accounts; the
+	// overage-like error is logged upstream and treated as a soft cooldown.
+	if isExternalAccount(account) || isCodexAccount(account) {
+		logger.Warnf("[AccountFailover] Skipping overage refresh for non-Kiro account %s (overage-like error: soft cooldown only)", account.Email)
 		return
 	}
 
@@ -138,11 +161,12 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error, model
 	case isSuspensionErrorMessage(errMsg):
 		// The "temporarily suspended" / "account suspended" patterns are Kiro/
 		// AWS-specific upstream messages. External OpenAI-compatible providers
-		// may return errors that happen to contain "suspended" without meaning
-		// the account is banned — never auto-disable external accounts on this
-		// pattern; treat as a soft cooldown so operators can investigate.
-		if isExternalAccount(account) {
-			logger.Warnf("[AccountFailover] External provider %s returned suspension-like error (not auto-banning): %v", account.Email, err)
+		// and Codex (ChatGPT subscription) accounts may return errors that
+		// happen to contain "suspended" without meaning the account is banned
+		// — never auto-disable non-Kiro accounts on this pattern; treat as a
+		// soft cooldown so operators can investigate.
+		if isExternalAccount(account) || isCodexAccount(account) {
+			logger.Warnf("[AccountFailover] Non-Kiro account %s returned suspension-like error (not auto-banning): %v", account.Email, err)
 			h.pool.RecordError(account.ID, false, model)
 		} else {
 			h.disableAccount(account, "BANNED", "AWS temporarily suspended - unusual user activity detected")

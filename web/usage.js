@@ -25,6 +25,13 @@ let usageState = {
   activeTab: 'overview',
 };
 
+// Cache sub-tab state
+let cacheState = {
+  loading: false,
+  data: null,
+  period: '24h',
+};
+
 let topoZoom = 1;
 let topoPanX = 0;
 let topoPanY = 0;
@@ -621,10 +628,16 @@ function renderOverviewCards() {
     return;
   }
 
+  const cacheRead = stats.totalCacheReadTokens || 0;
+  const cacheCreate = stats.totalCacheCreateTokens || 0;
+  const cachedTokens = stats.totalCachedTokens || 0;
+  const totalCached = cacheRead + cacheCreate + cachedTokens;
+
   container.innerHTML =
     '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.totalRequests') : 'Total Requests') + '</div><div class="overview-card-value">' + fmtNum(stats.totalRequests) + '</div></div>' +
     '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.inputTokens') : 'Input Tokens') + '</div><div class="overview-card-value text-primary">' + fmtTokenFull(stats.totalPromptTokens) + '</div></div>' +
     '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.outputTokens') : 'Output Tokens') + '</div><div class="overview-card-value text-success">' + fmtTokenFull(stats.totalCompletionTokens) + '</div></div>' +
+    '<div class="usage-card overview-card"><div class="overview-card-title">Cached Tokens</div><div class="overview-card-value" style="color:#16a34a">' + fmtTokenFull(totalCached) + '</div></div>' +
     '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.estimatedCost') : 'Est. Cost') + '</div><div class="overview-card-value text-warning">~' + fmtCost(stats.totalCost) + '</div><div class="overview-card-sub">' + (typeof t === 'function' ? t('usage.costDisclaimer') : 'Estimated, not actual billing') + '</div></div>';
 }
 
@@ -812,14 +825,20 @@ function renderUsageTable() {
   const sortField = usageState.sortBy[tableView] || 'requests';
   const sortOrder = usageState.sortOrder[tableView] || 'desc';
 
-  let rows = Object.entries(groupMap).map(([key, val]) => ({
+  let rows = Object.entries(groupMap).map(([key, val]) => {
+    const cr = val.cacheReadTokens || 0;
+    const cc = val.cacheCreateTokens || 0;
+    const ct = val.cachedTokens || 0;
+    return {
     key,
     requests: val.requests || 0,
     promptTokens: val.promptTokens || 0,
     completionTokens: val.completionTokens || 0,
     totalTokens: (val.promptTokens || 0) + (val.completionTokens || 0),
     cost: val.cost || 0,
-  }));
+    cachedTokens: cr + cc + ct,
+  };
+  });
 
   rows.sort((a, b) => {
     let va = a[sortField] || 0;
@@ -837,14 +856,16 @@ function renderUsageTable() {
     acc.completionTokens += r.completionTokens;
     acc.totalTokens += r.totalTokens;
     acc.cost += r.cost;
+    acc.cachedTokens += r.cachedTokens;
     return acc;
-  }, { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, cost: 0 });
+  }, { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, cost: 0, cachedTokens: 0 });
 
   const valueColumns = viewMode === 'tokens'
     ? [
         { field: 'promptTokens', label: (typeof t === 'function' ? t('usage.inputTokensCol') : 'Input Tokens'), align: 'right' },
         { field: 'completionTokens', label: (typeof t === 'function' ? t('usage.outputTokensCol') : 'Output Tokens'), align: 'right' },
         { field: 'totalTokens', label: (typeof t === 'function' ? t('usage.totalTokens') : 'Total Tokens'), align: 'right' },
+        { field: 'cachedTokens', label: 'Cached Tokens', align: 'right' },
       ]
     : [
         { field: 'promptTokens', label: (typeof t === 'function' ? t('usage.inputCost') : 'Input Cost'), align: 'right' },
@@ -885,7 +906,8 @@ function renderUsageTable() {
       html +=
         '<td class="text-right text-text-muted">' + fmtTokenFull(row.promptTokens) + '</td>' +
         '<td class="text-right text-text-muted">' + fmtTokenFull(row.completionTokens) + '</td>' +
-        '<td class="text-right">' + fmtTokenFull(row.totalTokens) + '</td>';
+        '<td class="text-right">' + fmtTokenFull(row.totalTokens) + '</td>' +
+        '<td class="text-right" style="color:#16a34a">' + (row.cachedTokens ? fmtTokenFull(row.cachedTokens) : '—') + '</td>';
     } else {
       html +=
         '<td class="text-right text-text-muted">' + fmtCost(row.promptTokens ? (row.promptTokens / (row.promptTokens + row.completionTokens) * row.cost) : 0) + '</td>' +
@@ -904,7 +926,8 @@ function renderUsageTable() {
     html +=
       '<td class="text-right text-text-muted"><strong>' + fmtTokenFull(totalRow.promptTokens) + '</strong></td>' +
       '<td class="text-right text-text-muted"><strong>' + fmtTokenFull(totalRow.completionTokens) + '</strong></td>' +
-      '<td class="text-right"><strong>' + fmtTokenFull(totalRow.totalTokens) + '</strong></td>';
+      '<td class="text-right"><strong>' + fmtTokenFull(totalRow.totalTokens) + '</strong></td>' +
+      '<td class="text-right" style="color:#16a34a"><strong>' + (totalRow.cachedTokens ? fmtTokenFull(totalRow.cachedTokens) : '—') + '</strong></td>';
   } else {
     html +=
       '<td class="text-right text-text-muted"><strong>' + fmtCost(totalRow.promptTokens ? (totalRow.promptTokens / (totalRow.promptTokens + totalRow.completionTokens) * totalRow.cost) : 0) + '</strong></td>' +
@@ -998,6 +1021,8 @@ function renderUsageTabs() {
     '<div class="usage-tabs-bar">' +
     '<button class="usage-tab-btn' + (usageState.activeTab === 'overview' ? ' active' : '') + '" data-tab="overview">' + (typeof t === 'function' ? t('usage.overview') : 'Overview') + '</button>' +
     '<button class="usage-tab-btn' + (usageState.activeTab === 'details' ? ' active' : '') + '" data-tab="details">' + (typeof t === 'function' ? t('usage.details') : 'Details') + '</button>' +
+    '<button class="usage-tab-btn' + (usageState.activeTab === 'cache' ? ' active' : '') + '" data-tab="cache">Cache</button>' +
+    '<button class="usage-tab-btn' + (usageState.activeTab === 'compression' ? ' active' : '') + '" data-tab="compression">Compression</button>' +
     '</div>';
 
   container.querySelectorAll('.usage-tab-btn').forEach(btn => {
@@ -1015,22 +1040,312 @@ function renderUsageTabs() {
 function renderActiveTab() {
   const overviewEl = document.getElementById('usageOverviewContent');
   const detailsEl = document.getElementById('usageDetailsContent');
+  const cacheEl = document.getElementById('usageCacheContent');
+  const compEl = document.getElementById('usageCompressionContent');
   if (!overviewEl || !detailsEl) return;
+
+  // Hide all
+  overviewEl.classList.add('hidden');
+  detailsEl.classList.add('hidden');
+  if (cacheEl) cacheEl.classList.add('hidden');
+  if (compEl) compEl.classList.add('hidden');
 
   if (usageState.activeTab === 'overview') {
     overviewEl.classList.remove('hidden');
-    detailsEl.classList.add('hidden');
     renderPeriodSelector();
     fetchUsageStats(usageState.period);
     fetchUsageChart(usageState.period);
     connectUsageSSE();
+  } else if (usageState.activeTab === 'cache') {
+    disconnectUsageSSE();
+    fetchCacheStats();
+  } else if (usageState.activeTab === 'compression') {
+    disconnectUsageSSE();
+    fetchCompressionStats();
   } else {
-    overviewEl.classList.add('hidden');
     detailsEl.classList.remove('hidden');
     disconnectUsageSSE();
     fetchRequestDetails();
   }
 }
+
+// ─── Compression Tab ─────────────────────────────────────
+let compressionState = { data: null };
+
+async function fetchCompressionStats() {
+  const container = document.getElementById('usageCompressionContent');
+  if (!container) return;
+  container.innerHTML = '<div class="usage-loading">Loading compression stats...</div>';
+  try {
+    const res = await api('/compression/stats');
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    compressionState.data = await res.json();
+    renderCompressionTab();
+  } catch (e) {
+    container.innerHTML = '<div class="usage-error">Failed to load: ' + escapeHtml(String(e)) + '</div>';
+  }
+}
+
+function renderCompressionTab() {
+  const container = document.getElementById('usageCompressionContent');
+  if (!container || !compressionState.data) return;
+  const d = compressionState.data;
+  const s = d.stats || {};
+
+  const tokensIn = s.toolTokensIn || 0;
+  const tokensOut = s.toolTokensOut || 0;
+  const toolSaved = tokensIn - tokensOut;
+  const toolSavedPct = tokensIn > 0 ? (toolSaved / tokensIn * 100) : 0;
+
+  const toggle = (key, label, desc) => `
+    <div class="comp-toggle-row">
+      <div class="comp-toggle-info">
+        <div class="comp-toggle-label">${label}</div>
+        <div class="comp-toggle-desc">${desc}</div>
+      </div>
+      <label class="comp-switch">
+        <input type="checkbox" data-key="${key}" ${d[key] ? 'checked' : ''}/>
+        <span class="comp-slider"></span>
+      </label>
+    </div>`;
+
+  container.innerHTML = `
+    <div class="comp-page">
+      <div class="comp-section">
+        <div class="comp-section-title">Compression Features</div>
+        ${toggle('toolOutputEnabled', 'Tool Output Compression (RTK)', 'Compresses git diff, grep, ls, and repetitive tool output to reduce input tokens.')}
+        ${toggle('cavemanEnabled', 'Caveman (Terse Output)', 'Injects a system prompt suffix biasing the model toward ultra-terse responses (65-87% fewer output tokens).')}
+        ${toggle('ponytailEnabled', 'Ponytail (Minimal Code)', 'Injects a system prompt suffix enforcing YAGNI: smallest correct change, reuse stdlib, no over-engineering.')}
+        ${toggle('headroomEnabled', 'Headroom (Prompt Compression)', 'Routes requests through Headroom (localhost:8787) for ML-based prompt compression before forwarding upstream.')}
+      </div>
+
+      <div class="comp-section" id="compCavemanLevelRow" style="${d.cavemanEnabled ? '' : 'display:none'}">
+        <div class="comp-section-title">Caveman Level</div>
+        <div class="comp-level-row">
+          <button class="comp-level-btn${d.cavemanLevel === 'light' ? ' active' : ''}" data-level="light">Light (1-2 sentence answers)</button>
+          <button class="comp-level-btn${d.cavemanLevel === 'full' ? ' active' : ''}" data-level="full">Full (ultra-terse, symbols over words)</button>
+        </div>
+      </div>
+
+      <div class="comp-section" id="compHeadroomURLRow" style="${d.headroomEnabled ? '' : 'display:none'}">
+        <div class="comp-section-title">Headroom URL</div>
+        <input type="text" id="compHeadroomURL" class="comp-input" value="${escapeHtml(d.headroomURL || '')}" placeholder="http://localhost:8787"/>
+        <button class="btn-primary" id="compSaveHeadroomURL" style="margin-top:8px">Save URL</button>
+      </div>
+
+      <div class="comp-section">
+        <div class="comp-section-title">Statistics</div>
+        <div class="usage-overview-grid">
+          <div class="usage-overview-card">
+            <div class="usage-overview-card-value">${s.toolCompressed || 0}</div>
+            <div class="usage-overview-card-label">Tool Outputs Compressed</div>
+          </div>
+          <div class="usage-overview-card">
+            <div class="usage-overview-card-value" style="color:#22c55e">${fmtTokens(toolSaved)}</div>
+            <div class="usage-overview-card-label">Tool Tokens Saved</div>
+          </div>
+          <div class="usage-overview-card">
+            <div class="usage-overview-card-value" style="color:#22c55e">${fmtPct(toolSavedPct)}</div>
+            <div class="usage-overview-card-label">Tool Savings</div>
+          </div>
+          <div class="usage-overview-card">
+            <div class="usage-overview-card-value">${s.headroomReqs || 0}</div>
+            <div class="usage-overview-card-label">Headroom Requests</div>
+          </div>
+          <div class="usage-overview-card">
+            <div class="usage-overview-card-value">${s.cavemanReqs || 0}</div>
+            <div class="usage-overview-card-label">Caveman Requests</div>
+          </div>
+        </div>
+      </div>
+    </div>`;
+
+  // Wire toggles
+  container.querySelectorAll('.comp-switch input[type="checkbox"]').forEach(cb => {
+    cb.addEventListener('change', async function () {
+      const key = this.dataset.key;
+      const val = this.checked;
+      const body = {};
+      body[key] = val;
+      try {
+        await api('/compression/config', { method: 'PATCH', body: JSON.stringify(body) });
+        showToast(key + ' ' + (val ? 'enabled' : 'disabled'));
+        fetchCompressionStats();
+      } catch (e) {
+        showToast('Failed: ' + e);
+        this.checked = !val;
+      }
+    });
+  });
+
+  // Wire caveman level buttons
+  container.querySelectorAll('.comp-level-btn').forEach(btn => {
+    btn.addEventListener('click', async function () {
+      const level = this.dataset.level;
+      try {
+        await api('/compression/config', { method: 'PATCH', body: JSON.stringify({ cavemanLevel: level }) });
+        showToast('Caveman level: ' + level);
+        fetchCompressionStats();
+      } catch (e) { showToast('Failed: ' + e); }
+    });
+  });
+
+  // Wire headroom URL save
+  const saveBtn = document.getElementById('compSaveHeadroomURL');
+  if (saveBtn) {
+    saveBtn.addEventListener('click', async function () {
+      const url = document.getElementById('compHeadroomURL').value.trim();
+      try {
+        await api('/compression/config', { method: 'PATCH', body: JSON.stringify({ headroomURL: url }) });
+        showToast('Headroom URL saved');
+      } catch (e) { showToast('Failed: ' + e); }
+    });
+  }
+}
+
+// ─── Cache Tab ───────────────────────────────────────────
+async function fetchCacheStats() {
+  const container = document.getElementById('usageCacheContent');
+  if (!container) return;
+  container.innerHTML = '<div class="usage-loading">Loading cache stats...</div>';
+  try {
+    const res = await api('/cache/stats?period=' + encodeURIComponent(cacheState.period));
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    cacheState.data = await res.json();
+    renderCacheTab();
+  } catch (e) {
+    container.innerHTML = '<div class="usage-error">Failed to load cache stats: ' + escapeHtml(String(e)) + '</div>';
+  }
+}
+
+function renderCacheTab() {
+  const container = document.getElementById('usageCacheContent');
+  if (!container || !cacheState.data) return;
+  const c = cacheState.data;
+
+  const hitRatio = c.hitRatio || 0;
+  const savingsPct = c.savingsPct || 0;
+  const tokensSaved = c.tokensSaved || 0;
+  const totalInput = c.totalInput || 0;
+  const cacheRead = c.cacheRead || 0;
+  const cacheCreate = c.cacheCreate || 0;
+  const cachedTokens = c.cachedTokens || 0;
+  const uncached = c.uncached || 0;
+
+  // Period selector
+  const periods = ['24h', '7d', '30d', 'all'];
+  const periodBar = '<div class="usage-period-bar" style="margin-bottom:16px">' +
+    periods.map(p => `<button class="usage-period-btn${cacheState.period === p ? ' active' : ''}" data-period="${p}">${p}</button>`).join('') +
+    '</div>';
+
+  // Summary cards
+  const cards = [
+    { label: 'Cache Hit Ratio', value: fmtPct(hitRatio), color: '#22c55e' },
+    { label: 'Token Savings', value: fmtPct(savingsPct), color: '#3b82f6' },
+    { label: 'Tokens Saved', value: fmtTokens(tokensSaved), color: '#22c55e' },
+    { label: 'Total Input', value: fmtTokens(totalInput), color: '' },
+    { label: 'Cache Read (Claude)', value: fmtTokens(cacheRead), color: '#22c55e' },
+    { label: 'Cache Create (Claude)', value: fmtTokens(cacheCreate), color: '#f59e0b' },
+    { label: 'Cached (OpenAI)', value: fmtTokens(cachedTokens), color: '#22c55e' },
+    { label: 'Uncached', value: fmtTokens(uncached), color: '#6b7280' },
+  ];
+
+  const cardsHtml = '<div class="usage-overview-grid">' + cards.map(card => `
+    <div class="usage-overview-card">
+      <div class="usage-overview-card-value" style="${card.color ? 'color:' + card.color : ''}">${card.value}</div>
+      <div class="usage-overview-card-label">${card.label}</div>
+    </div>`).join('') + '</div>';
+
+  // Visual bar: cache composition
+  const total = cacheRead + cacheCreate + cachedTokens + uncached;
+  const barHtml = total > 0 ? `
+    <div class="usage-card" style="margin-top:16px;padding:16px">
+      <div class="usage-card-title" style="margin-bottom:12px">Cache Composition</div>
+      <div class="cache-composition-bar">
+        <div class="cache-seg cache-seg-read" style="width:${(cacheRead/total*100).toFixed(1)}%" title="Cache Read: ${fmtTokens(cacheRead)}"></div>
+        <div class="cache-seg cache-seg-create" style="width:${(cacheCreate/total*100).toFixed(1)}%" title="Cache Create: ${fmtTokens(cacheCreate)}"></div>
+        <div class="cache-seg cache-seg-cached" style="width:${(cachedTokens/total*100).toFixed(1)}%" title="Cached (OpenAI): ${fmtTokens(cachedTokens)}"></div>
+        <div class="cache-seg cache-seg-uncached" style="width:${(uncached/total*100).toFixed(1)}%" title="Uncached: ${fmtTokens(uncached)}"></div>
+      </div>
+      <div class="cache-legend">
+        <span class="cache-legend-item"><span class="cache-dot cache-dot-read"></span> Read (${fmtPct(cacheRead/total*100)})</span>
+        <span class="cache-legend-item"><span class="cache-dot cache-dot-create"></span> Create (${fmtPct(cacheCreate/total*100)})</span>
+        <span class="cache-legend-item"><span class="cache-dot cache-dot-cached"></span> OpenAI Cached (${fmtPct(cachedTokens/total*100)})</span>
+        <span class="cache-legend-item"><span class="cache-dot cache-dot-uncached"></span> Uncached (${fmtPct(uncached/total*100)})</span>
+      </div>
+    </div>` : '';
+
+  // Per-account cache table
+  const accountRows = Object.entries(c.byAccount || {})
+    .filter(([_, s]) => s.cacheRead > 0 || s.cacheCreate > 0 || s.cachedTokens > 0)
+    .map(([id, s]) => {
+      const name = (c.accountNames && c.accountNames[id]) || id.slice(0, 8);
+      const acctSaved = (s.cacheRead || 0) + (s.cachedTokens || 0);
+      const acctTotal = s.promptTokens || 0;
+      const acctRatio = acctTotal > 0 ? (acctSaved / acctTotal * 100) : 0;
+      return `<tr>
+        <td>${escapeHtml(name)}</td>
+        <td>${fmtTokens(s.promptTokens)}</td>
+        <td style="color:#22c55e">${fmtTokens(s.cacheRead)}</td>
+        <td style="color:#f59e0b">${fmtTokens(s.cacheCreate)}</td>
+        <td style="color:#22c55e">${fmtTokens(s.cachedTokens)}</td>
+        <td style="color:#22c55e">${fmtPct(acctRatio)}</td>
+        <td>${s.requests}</td>
+      </tr>`;
+    }).join('');
+
+  const accountTable = accountRows ? `
+    <div class="usage-card" style="margin-top:16px">
+      <div class="usage-card-title" style="padding:16px 16px 0">Cache by Account</div>
+      <table class="usage-table" style="width:100%">
+        <thead><tr>
+          <th>Account</th><th>Input</th><th>Cache Read</th><th>Cache Create</th><th>Cached (OpenAI)</th><th>Save %</th><th>Requests</th>
+        </tr></thead>
+        <tbody>${accountRows}</tbody>
+      </table>
+    </div>` : '<div class="usage-card" style="margin-top:16px;padding:16px;color:var(--muted-foreground)">No cache activity yet. Cache hits appear here after Claude/OpenAI requests with prompt caching.</div>';
+
+  // Per-model cache table
+  const modelRows = Object.entries(c.byModel || {})
+    .filter(([_, s]) => s.cacheRead > 0 || s.cacheCreate > 0 || s.cachedTokens > 0)
+    .map(([model, s]) => {
+      const mSaved = (s.cacheRead || 0) + (s.cachedTokens || 0);
+      const mTotal = s.promptTokens || 0;
+      const mRatio = mTotal > 0 ? (mSaved / mTotal * 100) : 0;
+      return `<tr>
+        <td>${escapeHtml(model)}</td>
+        <td>${fmtTokens(s.promptTokens)}</td>
+        <td style="color:#22c55e">${fmtTokens(s.cacheRead)}</td>
+        <td style="color:#f59e0b">${fmtTokens(s.cacheCreate)}</td>
+        <td style="color:#22c55e">${fmtTokens(s.cachedTokens)}</td>
+        <td style="color:#22c55e">${fmtPct(mRatio)}</td>
+        <td>${s.requests}</td>
+      </tr>`;
+    }).join('');
+
+  const modelTable = modelRows ? `
+    <div class="usage-card" style="margin-top:16px">
+      <div class="usage-card-title" style="padding:16px 16px 0">Cache by Model</div>
+      <table class="usage-table" style="width:100%">
+        <thead><tr>
+          <th>Model</th><th>Input</th><th>Cache Read</th><th>Cache Create</th><th>Cached (OpenAI)</th><th>Save %</th><th>Requests</th>
+        </tr></thead>
+        <tbody>${modelRows}</tbody>
+      </table>
+    </div>` : '';
+
+  container.innerHTML = periodBar + cardsHtml + barHtml + accountTable + modelTable;
+
+  // Wire period buttons
+  container.querySelectorAll('.usage-period-btn').forEach(btn => {
+    btn.addEventListener('click', function () {
+      cacheState.period = this.dataset.period;
+      fetchCacheStats();
+    });
+  });
+}
+
+function fmtPct(n) { return (n || 0).toFixed(1) + '%'; }
 
 // ─── Request Details Tab ─────────────────────────────────
 async function fetchRequestDetails() {

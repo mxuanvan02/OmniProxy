@@ -18,7 +18,7 @@ const defaultPromptCacheTTL = 5 * time.Minute
 // matching and storage to avoid reporting unrealistic 100% cache hits on
 // short requests.
 const defaultMinCacheableTokens = 1024
-const opusMinCacheableTokens = 4096
+const opusMinCacheableTokens = 2048
 
 type promptCacheUsage struct {
 	CacheCreationInputTokens   int
@@ -155,10 +155,15 @@ func (t *promptCacheTracker) Compute(accountID string, profile *promptCacheProfi
 		}
 	}
 
-	// Cap cacheable tokens at 85% of total input to ensure a realistic
+	// Cap cacheable tokens at 90% of total input to ensure a realistic
 	// uncached portion. The newest content in a request is never fully
-	// served from cache on the current turn.
-	maxCacheable := int(float64(profile.TotalInputTokens) * 0.85)
+	// served from cache on the current turn. This cap only applies to the
+	// simulated fallback; when the upstream reports real cached_tokens,
+	// those are used directly and bypass this cap.
+	maxCacheable := int(float64(profile.TotalInputTokens) * 0.90)
+	if maxCacheable < minTokens {
+		maxCacheable = minTokens
+	}
 	if lastTokens > maxCacheable {
 		lastTokens = maxCacheable
 	}

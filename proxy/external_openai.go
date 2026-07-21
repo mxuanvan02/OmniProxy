@@ -26,6 +26,13 @@ import (
 // externalAuthMethod is the AuthMethod value marking an external OpenAI-compatible provider.
 const externalAuthMethod = "external_openai"
 
+// ErrExternalCreditsNotSupported is returned by fetchExternalProviderCredits
+// when the upstream provider does not implement /api/me (HTTP 404). Callers
+// treat this as a non-fatal "no credit info available" condition rather than
+// a hard error, so the refresh button stays green even for providers that
+// only expose /v1/* endpoints.
+var ErrExternalCreditsNotSupported = fmt.Errorf("provider does not expose /api/me (credits API not supported)")
+
 // isExternalAccount reports whether the account routes to an external
 // OpenAI-compatible provider instead of the native Kiro/AWS backend.
 func isExternalAccount(account *config.Account) bool {
@@ -249,6 +256,18 @@ func kiroPayloadToOpenAIRequest(payload *KiroPayload, account *config.Account) (
 		"messages": msgs,
 	}
 
+	// When CacheControlPassthrough is enabled, attach Anthropic-style
+	// cache_control breakpoints at stable prefix boundaries so upstream
+	// providers that honour prompt caching (e.g. Anthropic via OpenAI-
+	// compatible gateways) can cache the system prompt + tool definitions +
+	// conversation history. Anthropic allows up to 4 breakpoints; we place
+	// them at: system message, last history message, and the current user
+	// message (when distinct). This is a no-op for providers that ignore
+	// the field.
+	if config.GetCacheControlPassthrough() && len(msgs) > 0 {
+		applyExternalCacheControl(msgs)
+	}
+
 	// Tools — restore original (pre-sanitization) names for the external provider.
 	if cur.UserInputMessageContext != nil && len(cur.UserInputMessageContext.Tools) > 0 {
 		tools := make([]map[string]interface{}, 0, len(cur.UserInputMessageContext.Tools))
@@ -284,6 +303,62 @@ func kiroPayloadToOpenAIRequest(payload *KiroPayload, account *config.Account) (
 	}
 
 	return body, nil
+}
+
+// applyExternalCacheControl attaches Anthropic-style cache_control breakpoints
+// to up to 4 stable prefix boundaries in the OpenAI chat messages list:
+//
+//  1. The system message (if present) — the most stable, highest-value prefix.
+//  2. The last non-tool history message before the current turn.
+//  3. The current user message (when it is not the only message).
+//
+// Anthropic caps cache_control at 4 breakpoints per request; we stay under
+// that limit. The field is added in-place to the message maps. Providers that
+// do not understand cache_control will ignore it (OpenAI) or reject it — the
+// operator is responsible for enabling this only for providers that honour it.
+//
+// The breakpoint uses the default 5-minute ephemeral TTL, matching Anthropic's
+// default. A 1h TTL is not exposed here because OpenAI-compatible gateways
+// rarely surface the ttl sub-field.
+func applyExternalCacheControl(msgs []map[string]interface{}) {
+	const maxBreakpoints = 4
+	breakpoints := 0
+	cacheControl := map[string]interface{}{"type": "ephemeral"}
+
+	// 1) System message (first message with role=system).
+	if breakpoints < maxBreakpoints {
+		for _, m := range msgs {
+			if role, _ := m["role"].(string); role == "system" {
+				m["cache_control"] = cacheControl
+				breakpoints++
+				break
+			}
+		}
+	}
+
+	// 2) Last message before the current user turn — i.e. the last message
+	//    that is NOT the final user/tool message. This is the conversation
+	//    history tail, the second most stable prefix.
+	if breakpoints < maxBreakpoints && len(msgs) >= 3 {
+		lastHistoryIdx := len(msgs) - 2 // second-to-last
+		if lastHistoryIdx > 0 {
+			if role, _ := msgs[lastHistoryIdx]["role"].(string); role != "system" {
+				msgs[lastHistoryIdx]["cache_control"] = cacheControl
+				breakpoints++
+			}
+		}
+	}
+
+	// 3) Current user message (final message) — only when there is enough
+	//    history that caching the prefix is worthwhile. We do NOT mark it
+	//    when it is the only message (no prefix to cache).
+	if breakpoints < maxBreakpoints && len(msgs) >= 3 {
+		lastIdx := len(msgs) - 1
+		if role, _ := msgs[lastIdx]["role"].(string); role == "user" || role == "tool" {
+			msgs[lastIdx]["cache_control"] = cacheControl
+			breakpoints++
+		}
+	}
 }
 
 func openAIUserContent(text string, images []KiroImage) interface{} {
@@ -410,6 +485,16 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 	}
 	br := bufio.NewReaderSize(body, 16*1024)
 
+	// SSE idle watchdog — same rationale as parseCodexResponsesSSE.
+	var watchdog *sseIdleWatchdog
+	if rc, ok := body.(io.ReadCloser); ok {
+		watchdog = newSSEIdleWatchdog(rc)
+		if watchdog != nil {
+			watchdog.Start()
+			defer watchdog.Stop()
+		}
+	}
+
 	var inputTokens, outputTokens int
 	toolAccums := map[int]*externalToolAccum{}
 	var toolOrder []int
@@ -447,6 +532,9 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil {
+			if watchdog != nil && watchdog.TimedOut() {
+				return ErrStreamIdleTimeout
+			}
 			if err == io.EOF {
 				if strings.TrimSpace(line) != "" {
 					if handled := processExternalSSELine(line, callback, toolAccums, &toolOrder, &inputTokens, &outputTokens); handled {
@@ -464,9 +552,26 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
+		// Real data line — reset the SSE idle watchdog timer.
+		if watchdog != nil {
+			watchdog.DataReceived()
+		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
 			break
+		}
+
+		// Some providers (e.g. mrdev.cyou) return HTTP 200 with an inline
+		// SSE error event: data: {"error":{"message":"Invalid request"}}
+		// when a model is unavailable or rejects the request. Detect this
+		// and surface it as an error so the combo handler can fall back to
+		// the next model instead of treating the empty stream as success.
+		if errMsg := extractExternalSSEError([]byte(data)); errMsg != "" {
+			emitToolCalls()
+			if callback.OnComplete != nil {
+				callback.OnComplete(inputTokens, outputTokens)
+			}
+			return fmt.Errorf("external provider error: %s", errMsg)
 		}
 
 		var chunk struct {
@@ -490,6 +595,9 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 				PromptTokens     int `json:"prompt_tokens"`
 				CompletionTokens int `json:"completion_tokens"`
 				TotalTokens      int `json:"total_tokens"`
+				PromptTokensDetails *struct {
+					CachedTokens int `json:"cached_tokens"`
+				} `json:"prompt_tokens_details,omitempty"`
 			} `json:"usage"`
 		}
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
@@ -524,6 +632,14 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 		if chunk.Usage != nil {
 			inputTokens = chunk.Usage.PromptTokens
 			outputTokens = chunk.Usage.CompletionTokens
+			// Forward the upstream's native prompt-cache hit count so the
+			// handler reports real cached tokens to the client instead of
+			// the locally-simulated promptCacheTracker numbers.
+			if chunk.Usage.PromptTokensDetails != nil &&
+				chunk.Usage.PromptTokensDetails.CachedTokens > 0 &&
+				callback.OnCacheRead != nil {
+				callback.OnCacheRead(chunk.Usage.PromptTokensDetails.CachedTokens)
+			}
 		}
 	}
 
@@ -536,6 +652,8 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 
 // processExternalSSELine handles a single non-empty SSE data line. Returns true
 // if the line was a recognised data event (used by the EOF tail handler).
+// Note: inline error events are handled by extractExternalSSEError in the main
+// loop; this tail handler only processes content chunks for the final partial line.
 func processExternalSSELine(line string, callback *KiroStreamCallback, toolAccums map[int]*externalToolAccum, toolOrder *[]int, inputTokens, outputTokens *int) bool {
 	if !strings.HasPrefix(line, "data:") {
 		return false
@@ -566,6 +684,30 @@ func processExternalSSELine(line string, callback *KiroStreamCallback, toolAccum
 	return true
 }
 
+// extractExternalSSEError checks whether a JSON SSE data payload is an
+// inline error event ({"error":{"message":"..."}} or {"detail":"..."}).
+// Returns the error message if so, or empty string if the payload is a
+// normal content/usage chunk. Some providers (e.g. mrdev.cyou) return
+// HTTP 200 with an error embedded in the SSE stream when a model rejects
+// the request; without this check the empty stream is treated as success
+// and combo fallback never triggers.
+func extractExternalSSEError(data []byte) string {
+	var probe struct {
+		Error  *struct{ Message string `json:"message"` } `json:"error"`
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return ""
+	}
+	if probe.Error != nil && probe.Error.Message != "" {
+		return probe.Error.Message
+	}
+	if probe.Detail != "" {
+		return probe.Detail
+	}
+	return ""
+}
+
 // parseExternalOpenAIJSON handles a non-streaming JSON response from a provider
 // that ignored stream=true. Emits the same callback events as the SSE parser.
 func parseExternalOpenAIJSON(body io.Reader, callback *KiroStreamCallback) error {
@@ -575,6 +717,11 @@ func parseExternalOpenAIJSON(body io.Reader, callback *KiroStreamCallback) error
 	data, err := io.ReadAll(body)
 	if err != nil {
 		return fmt.Errorf("external json read: %w", err)
+	}
+	// Detect inline error payloads ({"error":{"message":"..."}} or
+	// {"detail":"..."}) that some providers return with HTTP 200.
+	if errMsg := extractExternalSSEError(data); errMsg != "" {
+		return fmt.Errorf("external provider error: %s", errMsg)
 	}
 	var resp struct {
 		Choices []struct {
@@ -595,6 +742,9 @@ func parseExternalOpenAIJSON(body io.Reader, callback *KiroStreamCallback) error
 			PromptTokens     int `json:"prompt_tokens"`
 			CompletionTokens int `json:"completion_tokens"`
 			TotalTokens      int `json:"total_tokens"`
+			PromptTokensDetails *struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details,omitempty"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -636,6 +786,12 @@ func parseExternalOpenAIJSON(body io.Reader, callback *KiroStreamCallback) error
 	if resp.Usage != nil {
 		inTok = resp.Usage.PromptTokens
 		outTok = resp.Usage.CompletionTokens
+		// Forward upstream native cache hit (non-stream path).
+		if resp.Usage.PromptTokensDetails != nil &&
+			resp.Usage.PromptTokensDetails.CachedTokens > 0 &&
+			callback.OnCacheRead != nil {
+			callback.OnCacheRead(resp.Usage.PromptTokensDetails.CachedTokens)
+		}
 	}
 	if callback.OnComplete != nil {
 		callback.OnComplete(inTok, outTok)
@@ -784,6 +940,12 @@ func fetchExternalProviderCredits(account *config.Account) (*ExternalProviderMe,
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == 404 {
+		// /api/me is optional — many OpenAI-compatible providers only expose
+		// /v1/* endpoints. Treat 404 as "credits API not supported" so the
+		// refresh button doesn't surface a scary error.
+		return nil, ErrExternalCreditsNotSupported
+	}
 	if resp.StatusCode != 200 {
 		b, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateErrBody(b))

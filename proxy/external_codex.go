@@ -22,6 +22,8 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -55,6 +57,132 @@ func codexBaseURL(account *config.Account) string {
 		return strings.TrimRight(strings.TrimSpace(account.BaseURL), "/")
 	}
 	return codexDefaultBaseURL
+}
+
+// codexCacheKey derives a stable, opaque cache-routing key from the
+// system prompt (instructions). The key is shared across all conversations
+// that use the same instructions, so the backend's prompt cache can serve
+// hits regardless of which conversation is making the request.
+//
+// This is critical for multi-agent scenarios: 10 agents using the same
+// system prompt share 1 cache entry per account instead of 10 separate
+// entries. Warming cost drops from O(accounts × conversations) to
+// O(accounts × system_prompts).
+//
+// The key is used for:
+//   - prompt_cache_key in the request body (cache prefix matching)
+//   - session-id / thread-id headers (sticky routing to same machine)
+//   - cacheSticky map in AccountPool (pin to same account)
+//
+// Returns empty string when instructions are empty (cache won't work
+// without a system prompt — the backend only caches the instructions
+// field, not input content).
+func codexCacheKey(instructions string) string {
+	instructions = strings.TrimSpace(instructions)
+	if instructions == "" {
+		return ""
+	}
+	// Normalize: trim + collapse whitespace so minor formatting
+	// differences (extra spaces, line endings) don't create separate
+	// cache entries for semantically identical prompts.
+	normalized := strings.Join(strings.Fields(instructions), " ")
+	h := sha256.Sum256([]byte("codex-cache:" + normalized))
+	return hex.EncodeToString(h[:16]) // 32-char hex, stable per instructions
+}
+
+// codexSessionKey derives a per-conversation routing key for the
+// session-id / thread-id headers. This is separate from the cache key
+// so that conversations with the same system prompt share cache but
+// still get distinct session routing (avoids backend conflating
+// separate conversations on the same machine).
+func codexSessionKey(conversationID string) string {
+	conversationID = strings.TrimSpace(conversationID)
+	if conversationID == "" {
+		return ""
+	}
+	h := sha256.Sum256([]byte("codex-session:" + conversationID))
+	return hex.EncodeToString(h[:16])
+}
+
+// WarmCodexCache sends a minimal warmup request to the Codex backend for
+// the given account + cache key so the upstream prompt cache writes the
+// instructions prefix. After this call, a subsequent real request with the
+// same instructions + prompt_cache_key will hit the cache instead of
+// re-processing the full prefix.
+//
+// The warmup request reuses the same instructions and prompt_cache_key as
+// the real request but sends a trivial user message ("hi") with a tiny
+// max_output_tokens budget. This minimises token cost while still writing
+// the instructions prefix to the account's cache.
+//
+// Returns nil on success (cache warmed), or the error from the upstream.
+// Errors are non-fatal — the caller should proceed with the real request
+// regardless (it will just be a cache miss).
+func WarmCodexCache(account *config.Account, instructions, modelID, cacheKey string) error {
+	if account == nil || cacheKey == "" {
+		return nil
+	}
+	accessToken := strings.TrimSpace(account.AccessToken)
+	if accessToken == "" {
+		return fmt.Errorf("codex warmup: account %s has no access token", account.Email)
+	}
+	accountID := strings.TrimSpace(account.ChatGPTAccountID)
+	if accountID == "" {
+		return fmt.Errorf("codex warmup: account %s has no chatgpt_account_id", account.Email)
+	}
+
+	// Minimal body: same instructions + prompt_cache_key so the cache
+	// router groups this with the real request. Tiny input to minimise
+	// token spend. We omit max_output_tokens because the ChatGPT
+	// subscription backend rejects it ("Unsupported parameter"); the
+	// backend caps the response automatically for "hi".
+	body := map[string]interface{}{
+		"model":            modelID,
+		"instructions":     instructions,
+		"input":            []map[string]interface{}{{"type": "message", "role": "user", "content": "hi"}},
+		"stream":           true,
+		"store":            false,
+		"prompt_cache_key": cacheKey,
+	}
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("codex warmup marshal: %w", err)
+	}
+
+	endpoint := codexBaseURL(account) + "/backend-api/codex/responses"
+	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("codex warmup new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("chatgpt-account-id", accountID)
+	req.Header.Set("OpenAI-Beta", "responses=experimental")
+	req.Header.Set("User-Agent", "codex_cli_rs/0.0.0 omniproxy/1.0")
+	req.Header.Set("session-id", cacheKey)
+	req.Header.Set("thread-id", cacheKey)
+
+	client := GetClientForProxy(ResolveAccountProxyURL(account))
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("codex warmup request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Drain the SSE stream to completion so the backend records the
+	// cache write. We don't care about the content — only that the
+	// response.completed event fires (which triggers the cache write).
+	if resp.StatusCode >= 400 {
+		bodySnippet := make([]byte, 256)
+		n, _ := resp.Body.Read(bodySnippet)
+		return fmt.Errorf("codex warmup: HTTP %d: %s", resp.StatusCode, string(bodySnippet[:n]))
+	}
+
+	// Read until EOF or timeout. The stream is small (max_output_tokens=1)
+	// so this completes in ~1-3s.
+	io.Copy(io.Discard, resp.Body)
+	return nil
 }
 
 // CallExternalCodex forwards a KiroPayload to the Codex /v1/responses
@@ -95,6 +223,20 @@ func CallExternalCodex(account *config.Account, payload *KiroPayload, callback *
 	// Always stream — the non-stream handler buffers via the callback.
 	body["stream"] = true
 
+	// prompt_cache_key: derived from the instructions (system prompt) so
+	// that all conversations using the same system prompt share a single
+	// cache entry per account. This is critical for multi-agent scenarios
+	// where many agents/conversations use the same instructions — they
+	// all benefit from the same warmed cache instead of each needing
+	// their own warmup.
+	//
+	// When instructions are empty (no system prompt), the backend won't
+	// cache anyway (it only caches the instructions field, not input
+	// content), so we skip setting the key.
+	if instr, ok := body["instructions"].(string); ok && instr != "" {
+		body["prompt_cache_key"] = codexCacheKey(instr)
+	}
+
 	reqBody, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("codex call marshal: %w", err)
@@ -113,6 +255,26 @@ func CallExternalCodex(account *config.Account, payload *KiroPayload, callback *
 	// sticky-routing and turn-state logic happy.
 	req.Header.Set("OpenAI-Beta", "responses=experimental")
 	req.Header.Set("User-Agent", "codex_cli_rs/0.0.0 omniproxy/1.0")
+
+	// Prompt-cache sticky routing: Codex CLI sends session-id and thread-id
+	// headers so the backend can route consecutive turns from the same
+	// conversation to the same inference machine (required for prompt cache
+	// hits). Without these, every request lands on a random machine and
+	// cached_tokens is always 0.
+	//
+	// session-id / thread-id: per-conversation (hash of conversation ID)
+	// so turns within the same conversation route to the same machine.
+	// This is separate from prompt_cache_key (hash of instructions) so
+	// that conversations sharing the same system prompt can still have
+	// distinct session routing.
+	if payload != nil {
+		convID := strings.TrimSpace(payload.ConversationState.ConversationID)
+		if convID != "" {
+			sessionKey := codexSessionKey(convID)
+			req.Header.Set("session-id", sessionKey)
+			req.Header.Set("thread-id", sessionKey)
+		}
+	}
 
 	client := GetClientForProxy(ResolveAccountProxyURL(account))
 	resp, err := client.Do(req)
@@ -148,8 +310,9 @@ func CallExternalCodex(account *config.Account, payload *KiroPayload, callback *
 		return fmt.Errorf("codex response peek: %w", err)
 	}
 	if len(first) > 0 && (first[0] == 'e' || first[0] == 'd') {
-		// "event:" or "data:" — SSE stream
-		return parseCodexResponsesSSE(br, callback)
+		// "event:" or "data:" — SSE stream. Pass resp.Body (io.ReadCloser)
+		// so the SSE idle watchdog can close it on timeout.
+		return parseCodexResponsesSSE(resp.Body, callback)
 	}
 	// Non-SSE fallback: a single JSON Responses object.
 	return parseCodexResponsesJSON(br, callback)
@@ -169,9 +332,16 @@ func captureCodexUsageHeaders(account *config.Account, hdr http.Header) {
 	primaryWindow := atoiSafe(hdr.Get("x-codex-primary-window-minutes"))
 	primaryResetAt := atoi64Safe(hdr.Get("x-codex-primary-reset-at"))
 	secondaryResetAt := atoi64Safe(hdr.Get("x-codex-secondary-reset-at"))
-	creditsBalance := atoiSafe(hdr.Get("x-codex-credits-balance"))
-	creditsUnlimited := hdr.Get("x-codex-credits-unlimited") == "True" ||
-		hdr.Get("x-codex-credits-unlimited") == "true"
+	// Credits headers are only sent by Codex pay-as-you-go backends.
+	// ChatGPT Plus subscription responses omit them entirely — detect
+	// header presence so we don't clobber a previously-captured balance
+	// with a misleading "0 / not unlimited" snapshot.
+	creditsBalanceHdr := hdr.Get("x-codex-credits-balance")
+	creditsUnlimitedHdr := hdr.Get("x-codex-credits-unlimited")
+	creditsKnown := creditsBalanceHdr != "" || creditsUnlimitedHdr != ""
+	creditsBalance := atoiSafe(creditsBalanceHdr)
+	creditsUnlimited := creditsUnlimitedHdr == "True" ||
+		creditsUnlimitedHdr == "true"
 
 	// Only persist if we got at least the plan type (indicates headers present)
 	if planType == "" && activeLimit == "" && primaryPct == 0 {
@@ -179,13 +349,13 @@ func captureCodexUsageHeaders(account *config.Account, hdr http.Header) {
 			account.Email, planType, activeLimit, primaryPct)
 		return
 	}
-	logger.Infof("[Codex] captured usage for %s: plan=%s limit=%s primary=%d%% credits=%d",
-		account.Email, planType, activeLimit, primaryPct, creditsBalance)
+	logger.Infof("[Codex] captured usage for %s: plan=%s limit=%s primary=%d%% credits=%d (known=%v)",
+		account.Email, planType, activeLimit, primaryPct, creditsBalance, creditsKnown)
 	_ = config.UpdateAccountCodexUsage(
 		account.ID, planType, activeLimit,
 		primaryPct, secondaryPct, primaryWindow,
 		primaryResetAt, secondaryResetAt,
-		creditsBalance, creditsUnlimited,
+		creditsBalance, creditsUnlimited, creditsKnown,
 	)
 }
 
@@ -410,6 +580,20 @@ func parseCodexResponsesSSE(body io.Reader, callback *KiroStreamCallback) error 
 	}
 	br := bufio.NewReader(body)
 
+	// SSE idle watchdog: kills the connection when no ``data:`` line arrives
+	// within the configured idle window. Catches "200 OK but silent" hangs
+	// that a byte-level idle reader cannot detect (upstream keepalive
+	// comments reset byte-level timers without carrying payload). The
+	// watchdog closes the underlying body to unblock the pending ReadString.
+	var watchdog *sseIdleWatchdog
+	if rc, ok := body.(io.ReadCloser); ok {
+		watchdog = newSSEIdleWatchdog(rc)
+		if watchdog != nil {
+			watchdog.Start()
+			defer watchdog.Stop()
+		}
+	}
+
 	var inputTokens, outputTokens int
 	var totalCredits float64
 	// toolAccums accumulates arguments per call_id; emitted on
@@ -419,6 +603,9 @@ func parseCodexResponsesSSE(body io.Reader, callback *KiroStreamCallback) error 
 	for {
 		line, err := br.ReadString('\n')
 		if err != nil {
+			if watchdog != nil && watchdog.TimedOut() {
+				return ErrStreamIdleTimeout
+			}
 			if err == io.EOF {
 				if strings.TrimSpace(line) != "" {
 					processCodexSSELine(line, callback, toolAccums, &inputTokens, &outputTokens)
@@ -435,6 +622,10 @@ func parseCodexResponsesSSE(body io.Reader, callback *KiroStreamCallback) error 
 			// event: / id: / comment lines — ignore (event type is
 			// duplicated inside the JSON payload's "type" field).
 			continue
+		}
+		// Real data line — reset the SSE idle watchdog timer.
+		if watchdog != nil {
+			watchdog.DataReceived()
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
@@ -483,6 +674,13 @@ func processCodexSSELine(line string, callback *KiroStreamCallback, toolAccums m
 			Usage *struct {
 				InputTokens  int `json:"input_tokens"`
 				OutputTokens int `json:"output_tokens"`
+				// OpenAI Responses API emits input_tokens_details.cached_tokens
+				// when the upstream prompt cache served part of the input.
+				// Forwarding it lets the handler report real cache hits to the
+				// client instead of the locally-simulated promptCacheTracker.
+				InputTokensDetails *struct {
+					CachedTokens int `json:"cached_tokens"`
+				} `json:"input_tokens_details,omitempty"`
 			} `json:"usage"`
 		} `json:"response"`
 		// item (for response.output_item.done with function_call)
@@ -565,6 +763,13 @@ func processCodexSSELine(line string, callback *KiroStreamCallback, toolAccums m
 		if evt.Response.Usage != nil {
 			*inputTokens = evt.Response.Usage.InputTokens
 			*outputTokens = evt.Response.Usage.OutputTokens
+			// Forward upstream prompt-cache hit so the handler reports real
+			// cached_tokens to the client instead of the simulated tracker.
+			if evt.Response.Usage.InputTokensDetails != nil &&
+				evt.Response.Usage.InputTokensDetails.CachedTokens > 0 &&
+				callback.OnCacheRead != nil {
+				callback.OnCacheRead(evt.Response.Usage.InputTokensDetails.CachedTokens)
+			}
 		}
 	case "response.failed", "error":
 		// Surface error to caller via OnError if attached.
@@ -599,6 +804,9 @@ func parseCodexResponsesJSON(body io.Reader, callback *KiroStreamCallback) error
 		Usage *struct {
 			InputTokens  int `json:"input_tokens"`
 			OutputTokens int `json:"output_tokens"`
+			InputTokensDetails *struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"input_tokens_details,omitempty"`
 		} `json:"usage"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -628,6 +836,15 @@ func parseCodexResponsesJSON(body io.Reader, callback *KiroStreamCallback) error
 				})
 			}
 		}
+	}
+	// Forward upstream prompt-cache hit (non-stream path). Fired
+	// independently of OnComplete so a callback that only cares about
+	// cache numbers still receives them.
+	if resp.Usage != nil &&
+		resp.Usage.InputTokensDetails != nil &&
+		resp.Usage.InputTokensDetails.CachedTokens > 0 &&
+		callback.OnCacheRead != nil {
+		callback.OnCacheRead(resp.Usage.InputTokensDetails.CachedTokens)
 	}
 	if callback.OnComplete != nil {
 		in, out := 0, 0
@@ -687,12 +904,13 @@ func newCodexCoalescer(target *KiroStreamCallback) *KiroStreamCallback {
 	// we check elapsed time on each OnText and flush if the tick has
 	// elapsed. This avoids goroutine/timer overhead per request.
 	return &KiroStreamCallback{
-		OnText:          c.onText,
-		OnToolUse:       c.onToolUse,
-		OnComplete:      c.onComplete,
-		OnCredits:       target.OnCredits,
-		OnContextUsage:  target.OnContextUsage,
-		OnError:         c.onError,
+		OnText:         c.onText,
+		OnToolUse:      c.onToolUse,
+		OnComplete:     c.onComplete,
+		OnCredits:      target.OnCredits,
+		OnContextUsage: target.OnContextUsage,
+		OnCacheRead:    target.OnCacheRead,
+		OnError:        c.onError,
 	}
 }
 
@@ -798,6 +1016,85 @@ func refreshCodexAccountID(account *config.Account) {
 			_ = config.UpdateAccountCodexProfile(account.ID, info.Email, info.Name, info.PlanType)
 		}
 	}
+}
+
+// fetchCodexUsage sends a minimal /backend-api/codex/responses request to
+// capture the x-codex-* rate-limit / usage headers. Codex doesn't expose a
+// dedicated usage endpoint — usage info comes back as response headers on
+// every chat request. We send a tiny "say ok" prompt with max_tokens=1 so
+// the cost is negligible, then discard the body and keep only the headers.
+func fetchCodexUsage(account *config.Account) error {
+	if account == nil || !isCodexAccount(account) {
+		return fmt.Errorf("not a codex account")
+	}
+	accessToken := strings.TrimSpace(account.AccessToken)
+	if accessToken == "" {
+		return fmt.Errorf("no access token")
+	}
+	accountID := strings.TrimSpace(account.ChatGPTAccountID)
+	if accountID == "" {
+		accountID = auth.ExtractCodexAccountIDPublic(accessToken)
+		if accountID == "" {
+			return fmt.Errorf("no chatgpt_account_id")
+		}
+	}
+
+	body := map[string]interface{}{
+		"model": "gpt-5.6-luna",
+		"instructions": "You are a helpful assistant.",
+		"input": []map[string]interface{}{
+			{
+				"type":    "message",
+				"role":    "user",
+				"content": "ok",
+			},
+		},
+		"stream": true,
+		"store":  false,
+	}
+	reqBody, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+
+	endpoint := codexBaseURL(account) + "/backend-api/codex/responses"
+	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("chatgpt-account-id", accountID)
+	req.Header.Set("OpenAI-Beta", "responses=experimental")
+	req.Header.Set("User-Agent", "codex_cli_rs/0.0.0 omniproxy/1.0")
+
+	client := GetClientForProxy(ResolveAccountProxyURL(account))
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("do: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Capture usage headers on ANY response (200, 429, 402, etc.) — Codex
+	// sends x-codex-* rate-limit headers even on rate-limited responses,
+	// which is exactly when we need them most.
+	captureCodexUsageHeaders(account, resp.Header)
+
+	if resp.StatusCode != 200 {
+		errBody, _ := io.ReadAll(resp.Body)
+		// 429 "usage_limit_reached" is not a hard error — we still captured
+		// the usage headers, so return nil to signal "usage fetched".
+		if resp.StatusCode == 429 {
+			logger.Infof("[Codex] %s rate-limited but usage headers captured", account.Email)
+			return nil
+		}
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateErrBody(errBody))
+	}
+
+	// Drain the body so the connection can be reused.
+	io.Copy(io.Discard, resp.Body)
+	return nil
 }
 
 // codexSubscriptionModels returns the canonical model list exposed by

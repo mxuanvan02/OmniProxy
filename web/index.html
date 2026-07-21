@@ -110,6 +110,8 @@
                 data-i18n="tabs.api"></span></button>
             <button type="button" class="tab" data-tab="usage"><i class="fa-solid fa-chart-line tab-icon"></i><span
                 data-i18n="tabs.usage"></span></button>
+            <button type="button" class="tab" data-tab="quota"><i class="fa-solid fa-gauge-high tab-icon"></i><span
+                data-i18n="tabs.quota"></span></button>
             <button type="button" class="tab" data-tab="logs"><i class="fa-solid fa-terminal tab-icon"></i><span
                 data-i18n="tabs.logs"></span></button>
           </div>
@@ -146,8 +148,6 @@
               <div class="stat-sub">
                 <span class="stat-sub-sec"><span class="stat-value-sm" id="statCredits">0</span> <span
                     class="stat-label" data-i18n="stats.credits"></span></span>
-                <span class="stat-sub-sec"><span class="stat-value-sm" id="statKiroQuota">0 / 0</span> <span
-                    class="stat-label" data-i18n="stats.kiroQuota"></span></span>
               </div>
             </div>
             <i class="fa-solid fa-users stat-icon" aria-hidden="true"></i>
@@ -253,9 +253,45 @@
             <div class="usage-loading">Loading...</div>
           </div>
 
+          <!-- Tab: Cache -->
+          <div id="usageCacheContent" class="hidden">
+            <div class="usage-loading">Loading...</div>
+          </div>
+
+          <!-- Tab: Compression -->
+          <div id="usageCompressionContent" class="hidden">
+            <div class="usage-loading">Loading...</div>
+          </div>
+
           <!-- Request Details Drawer -->
           <div id="detailsDrawerOverlay" class="usage-drawer-overlay hidden">
             <div id="detailsDrawer" class="usage-drawer"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Quota tab -->
+      <div id="tabQuota" class="tab-content hidden">
+        <div class="quota-page">
+          <!-- Compact top strip: refresh + provider pills + cache pills (horizontal) -->
+          <div class="quota-topstrip">
+            <div class="quota-topstrip-left">
+              <button class="btn-primary quota-refresh-btn" id="quotaRefreshBtn"><i class="fa-solid fa-rotate"></i> <span data-i18n="quota.refresh"></span></button>
+              <span class="quota-last-updated" id="quotaLastUpdated"></span>
+            </div>
+            <div class="quota-topstrip-pills" id="quotaProviderPills">
+              <span class="quota-loading">Loading...</span>
+            </div>
+            <div class="quota-topstrip-pills" id="quotaCachePills">
+              <span class="quota-loading">Loading...</span>
+            </div>
+          </div>
+
+          <!-- Per-account blocks (main area, 9router-style) -->
+          <div class="quota-blocks-section">
+            <div id="quotaAccountsTable">
+              <div class="quota-loading">Loading...</div>
+            </div>
           </div>
         </div>
       </div>
@@ -300,6 +336,8 @@
                   aria-hidden="true"></i><span class="btn-text" data-i18n="accounts.export"></span></button>
               <button class="btn btn-outline btn-sm" id="refreshAllModelsBtn"><i class="fa-solid fa-arrows-rotate"
                   aria-hidden="true"></i><span class="btn-text" data-i18n="models.refreshAll"></span></button>
+              <button class="btn btn-outline btn-sm" id="refreshAllAccountsBtn"><i class="fa-solid fa-rotate"
+                  aria-hidden="true"></i><span class="btn-text" data-i18n="accounts.refreshAll"></span></button>
               <button class="btn btn-primary btn-sm" id="addAccountBtn"><i class="fa-solid fa-plus"
                   aria-hidden="true"></i><span class="btn-text" data-i18n="accounts.add"></span></button>
             </div>
@@ -838,7 +876,7 @@
   <script>
     (function () {
       var v = window.__v || Date.now();
-      var scripts = ['/admin/toast.js', '/admin/app.js', '/admin/settings.js', '/admin/accounts.js', '/admin/combos.js', '/admin/apiCli.js', '/admin/usage.js', '/admin/logs.js'];
+      var scripts = ['/admin/toast.js', '/admin/app.js', '/admin/settings.js', '/admin/accounts.js', '/admin/combos.js', '/admin/apiCli.js', '/admin/usage.js', '/admin/quota.js', '/admin/logs.js'];
       scripts.forEach(function (src) {
         var el = document.createElement('script');
         el.src = src + '?v=' + v;

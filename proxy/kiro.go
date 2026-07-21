@@ -255,6 +255,13 @@ type KiroStreamCallback struct {
 	OnError        func(err error)
 	OnCredits      func(credits float64)
 	OnContextUsage func(percentage float64)
+	// OnCacheRead reports the number of prompt tokens served from the
+	// upstream provider's native prompt cache (e.g. OpenAI's
+	// prompt_tokens_details.cached_tokens). When non-zero, the handler
+	// reports these to the client as cached tokens instead of the
+	// locally-simulated promptCacheTracker numbers, so the client sees
+	// the real cache behaviour of the upstream provider.
+	OnCacheRead func(cachedTokens int)
 }
 
 // ==================== API Call ====================
@@ -510,7 +517,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 			continue
 		}
 
-		err = parseEventStream(resp.Body, callback)
+		err = parseEventStream(newIdleTimeoutReader(resp.Body), callback)
 		resp.Body.Close()
 		return err
 	}
@@ -582,7 +589,10 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 			continue
 		}
 
-		inputTokens, outputTokens = updateTokensFromEvent(event, inputTokens, outputTokens)
+		inputTokens, outputTokens, evCacheRead := updateTokensAndCacheFromEvent(event, inputTokens, outputTokens)
+		if evCacheRead > 0 && callback.OnCacheRead != nil {
+			callback.OnCacheRead(evCacheRead)
+		}
 
 		if debugUsage {
 			// Log the raw event type and, when present, any token/usage-shaped
@@ -664,11 +674,23 @@ func hasUsageShape(event map[string]interface{}) bool {
 }
 
 func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, currentOutputTokens int) (int, int) {
+	in, out, _ := updateTokensAndCacheFromEvent(event, currentInputTokens, currentOutputTokens)
+	return in, out
+}
+
+// updateTokensAndCacheFromEvent mirrors updateTokensFromEvent but also
+// returns the largest cache-read token count observed in any usage-shaped
+// map within the event. cacheRead > 0 means the upstream provider reported
+// a real prompt-cache hit (Kiro's cacheReadInputTokens or OpenAI's
+// cached_tokens), which the handler should forward to the client instead
+// of the locally-simulated promptCacheTracker numbers.
+func updateTokensAndCacheFromEvent(event map[string]interface{}, currentInputTokens, currentOutputTokens int) (int, int, int) {
 	candidates := []map[string]interface{}{event}
 	collectUsageMaps(event, &candidates)
 
 	inputTokens := currentInputTokens
 	outputTokens := currentOutputTokens
+	cacheRead := 0
 
 	for _, usage := range candidates {
 		if usage == nil {
@@ -691,11 +713,20 @@ func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, cur
 		}
 
 		uncached, _ := readTokenNumber(usage, "uncachedInputTokens", "uncached_input_tokens")
-		cacheRead, _ := readTokenNumber(usage, "cacheReadInputTokens", "cache_read_input_tokens")
+		cr, _ := readTokenNumber(usage, "cacheReadInputTokens", "cache_read_input_tokens")
 		cacheWrite, _ := readTokenNumber(usage, "cacheWriteInputTokens", "cache_write_input_tokens", "cacheCreationInputTokens", "cache_creation_input_tokens")
-		if uncached+cacheRead+cacheWrite > 0 {
-			inputTokens = uncached + cacheRead + cacheWrite
+		if uncached+cr+cacheWrite > 0 {
+			inputTokens = uncached + cr + cacheWrite
+			if cr > cacheRead {
+				cacheRead = cr
+			}
 			continue
+		}
+
+		// OpenAI-style prompt_tokens_details.cached_tokens (when upstream
+		// emits OpenAI usage shape inside a Kiro event).
+		if v, ok := readTokenNumber(usage, "cachedTokens", "cached_tokens"); ok && v > cacheRead {
+			cacheRead = v
 		}
 
 		total, ok := readTokenNumber(usage, "totalTokens", "total_tokens")
@@ -713,7 +744,7 @@ func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, cur
 		}
 	}
 
-	return inputTokens, outputTokens
+	return inputTokens, outputTokens, cacheRead
 }
 
 // getContextWindowSize returns the context window size (in tokens) for a model.

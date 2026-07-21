@@ -37,6 +37,24 @@ type AccountPool struct {
 	modelLists    map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
 	modelLocks    map[string]map[string]time.Time // accountID → modelName → cooldown until
 	stats         map[string]*accountStats   // accountID → cumulative runtime stats (survives Reload)
+	// cacheSticky maps a prompt-cache key (derived from the conversation ID)
+	// to the account ID that last handled it. Used to pin consecutive turns
+	// from the same conversation to the same upstream account so the
+	// provider's prompt cache can warm up and serve hits.
+	cacheSticky    map[string]string   // cacheKey → accountID
+	cacheStickyTS  map[string]time.Time // cacheKey → last seen time
+	cacheStickyTTL time.Duration
+	// cacheWarmed tracks (accountID + cacheKey) pairs that have already been
+	// warmed via a background warmup request. Used by on-rotation warming to
+	// avoid re-warming the same account for the same cache key (which would
+	// waste tokens and rate-limit budget).
+	cacheWarmed   map[string]bool      // "accountID|cacheKey" → true
+	cacheWarmedTS map[string]time.Time // "accountID|cacheKey" → warm time
+	cacheWarmedTTL time.Duration       // expire warmed entries after 1h
+	// cacheWarming tracks (accountID + cacheKey) pairs that currently have
+	// a warmup request in flight. Prevents duplicate warmups from concurrent
+	// requests to the same account+cacheKey.
+	cacheWarming map[string]bool // "accountID|cacheKey" → true
 }
 
 var (
@@ -48,11 +66,18 @@ var (
 func GetPool() *AccountPool {
 	poolOnce.Do(func() {
 		pool = &AccountPool{
-			cooldowns:   make(map[string]time.Time),
-			errorCounts: make(map[string]int),
-			modelLists:  make(map[string]map[string]bool),
-			modelLocks:  make(map[string]map[string]time.Time),
-			stats:       make(map[string]*accountStats),
+			cooldowns:      make(map[string]time.Time),
+			errorCounts:    make(map[string]int),
+			modelLists:     make(map[string]map[string]bool),
+			modelLocks:     make(map[string]map[string]time.Time),
+			stats:          make(map[string]*accountStats),
+			cacheSticky:    make(map[string]string),
+			cacheStickyTS:  make(map[string]time.Time),
+			cacheStickyTTL: 30 * time.Minute, // expire pinning 30 min after last use
+			cacheWarmed:    make(map[string]bool),
+			cacheWarmedTS:  make(map[string]time.Time),
+			cacheWarmedTTL: 1 * time.Hour, // warmed entries expire after 1h
+			cacheWarming:   make(map[string]bool),
 		}
 		pool.Reload()
 	})
@@ -256,6 +281,69 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 	n := len(p.accounts)
 	seen := make(map[string]bool)
 
+	// Provider-aware routing: when the requested model is a Claude model
+	// (claude-*), prefer External OpenAI-compatible accounts that actually
+	// serve it. Codex accounts do not serve Claude models — without this
+	// preference the round-robin would frequently land on a Codex account,
+	// which then silently substitutes gpt-5.6-* for the Claude request.
+	// Conversely, gpt-* models should prefer Codex accounts.
+	preferExternal := strings.HasPrefix(strings.ToLower(model), "claude")
+	preferCodex := strings.HasPrefix(strings.ToLower(model), "gpt-")
+
+	// tryPass returns the account if it passes all filters, else nil.
+	// Filters: excluded, seen, accountHasModel, isModelLocked, cooldown, isQuotaBlocked.
+	tryPass := func(acc *config.Account) *config.Account {
+		if excluded != nil && excluded[acc.ID] {
+			seen[acc.ID] = true
+			return nil
+		}
+		if seen[acc.ID] {
+			return nil
+		}
+		if !p.accountHasModel(acc.ID, model) {
+			seen[acc.ID] = true
+			return nil
+		}
+		if p.isModelLocked(acc.ID, model, now) {
+			seen[acc.ID] = true
+			return nil
+		}
+		if cooldown, ok := p.cooldowns[acc.ID]; ok && now.Before(cooldown) {
+			seen[acc.ID] = true
+			return nil
+		}
+		if isQuotaBlocked(*acc, allowOverUsage) {
+			seen[acc.ID] = true
+			return nil
+		}
+		return acc
+	}
+
+	// Phase 1: preferred-provider pass. Iterate the weighted slice starting
+	// from the atomic cursor and return the first preferred account that
+	// passes all filters. This gives preferred accounts priority while still
+	// round-robining among them.
+	if preferExternal || preferCodex {
+		isPreferred := func(acc *config.Account) bool {
+			if preferExternal {
+				return acc.AuthMethod == "external_openai"
+			}
+			// preferCodex
+			return acc.AuthMethod == "codex"
+		}
+		for i := 0; i < n; i++ {
+			idx := atomic.AddUint64(&p.currentIndex, 1) % uint64(n)
+			acc := &p.accounts[idx]
+			if !isPreferred(acc) {
+				continue
+			}
+			if picked := tryPass(acc); picked != nil {
+				return picked
+			}
+		}
+	}
+
+	// Phase 2: standard round-robin over every account (preferred + others).
 	for i := 0; i < n; i++ {
 		idx := atomic.AddUint64(&p.currentIndex, 1) % uint64(n)
 		acc := &p.accounts[idx]
@@ -325,6 +413,178 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 		}
 	}
 	return best
+}
+
+// GetNextForModelWithCacheKey works like GetNextForModelExcluding but first
+// tries the account that last handled the same cacheKey. This keeps
+// consecutive turns from the same conversation on the same upstream account
+// so the provider's prompt cache can warm up and serve hits.
+//
+// cacheKey is the opaque hash derived from the conversation ID (see
+// codexCacheKey). When cacheKey is empty, falls back to normal rotation.
+func (p *AccountPool) GetNextForModelWithCacheKey(model string, excluded map[string]bool, cacheKey string) *config.Account {
+	if cacheKey != "" {
+		p.mu.RLock()
+		stickyID, ok := p.cacheSticky[cacheKey]
+		p.mu.RUnlock()
+		if ok && stickyID != "" {
+			// Try the sticky account first — but only if it's not excluded,
+			// not in cooldown, not quota-blocked, and supports the model.
+			if excluded == nil || !excluded[stickyID] {
+				if acc := p.getAccountIfAvailable(stickyID, model); acc != nil {
+					return acc
+				}
+			}
+		}
+	}
+	return p.GetNextForModelExcluding(model, excluded)
+}
+
+// getAccountIfAvailable returns the account by ID if it is enabled, supports
+// the model, is not in cooldown, not model-locked, and not quota-blocked.
+// Returns nil otherwise. Caller must hold no pool lock.
+func (p *AccountPool) getAccountIfAvailable(accountID, model string) *config.Account {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	allowOverUsage := config.GetAllowOverUsage()
+	now := time.Now()
+	for i := range p.accounts {
+		acc := &p.accounts[i]
+		if acc.ID != accountID {
+			continue
+		}
+		if !p.accountHasModel(acc.ID, model) {
+			return nil
+		}
+		if p.isModelLocked(acc.ID, model, now) {
+			return nil
+		}
+		if cd, ok := p.cooldowns[acc.ID]; ok && now.Before(cd) {
+			return nil
+		}
+		if isQuotaBlocked(*acc, allowOverUsage) {
+			return nil
+		}
+		return acc
+	}
+	return nil
+}
+
+// RecordCacheStickiness pins cacheKey → accountID so subsequent requests
+// with the same cacheKey prefer this account. Called after a successful
+// upstream response.
+func (p *AccountPool) RecordCacheStickiness(cacheKey, accountID string) {
+	if cacheKey == "" || accountID == "" {
+		return
+	}
+	p.mu.Lock()
+	p.cacheSticky[cacheKey] = accountID
+	p.cacheStickyTS[cacheKey] = time.Now()
+	p.mu.Unlock()
+}
+
+// PruneCacheSticky removes cache-sticky entries older than the TTL.
+// Called periodically from the background refresh loop.
+func (p *AccountPool) PruneCacheSticky() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cacheStickyTTL <= 0 {
+		return
+	}
+	cutoff := time.Now().Add(-p.cacheStickyTTL)
+	for key, ts := range p.cacheStickyTS {
+		if ts.Before(cutoff) {
+			delete(p.cacheSticky, key)
+			delete(p.cacheStickyTS, key)
+		}
+	}
+}
+
+// cacheWarmedKey builds the composite key for the warmed registry.
+func cacheWarmedKey(accountID, cacheKey string) string {
+	return accountID + "|" + cacheKey
+}
+
+// IsCacheWarmed reports whether accountID has already been warmed for the
+// given cacheKey (i.e. a warmup request with the same instructions prefix
+// has been sent to this account). Used by on-rotation warming to skip the
+// warmup step when the account already has a hot cache entry.
+func (p *AccountPool) IsCacheWarmed(accountID, cacheKey string) bool {
+	if accountID == "" || cacheKey == "" {
+		return false
+	}
+	p.mu.RLock()
+	_, ok := p.cacheWarmed[cacheWarmedKey(accountID, cacheKey)]
+	p.mu.RUnlock()
+	return ok
+}
+
+// MarkCacheWarmed records that accountID has been warmed for cacheKey.
+// Called after a successful warmup request, or after a real request that
+// wrote to cache (cache_write_tokens > 0 or cached_tokens > 0 on a hit).
+func (p *AccountPool) MarkCacheWarmed(accountID, cacheKey string) {
+	if accountID == "" || cacheKey == "" {
+		return
+	}
+	p.mu.Lock()
+	p.cacheWarmed[cacheWarmedKey(accountID, cacheKey)] = true
+	p.cacheWarmedTS[cacheWarmedKey(accountID, cacheKey)] = time.Now()
+	p.mu.Unlock()
+}
+
+// IsCacheWarming reports whether a warmup request is currently in flight
+// for the given accountID + cacheKey. Used to prevent duplicate warmups
+// from concurrent requests.
+func (p *AccountPool) IsCacheWarming(accountID, cacheKey string) bool {
+	if accountID == "" || cacheKey == "" {
+		return false
+	}
+	p.mu.RLock()
+	_, ok := p.cacheWarming[cacheWarmedKey(accountID, cacheKey)]
+	p.mu.RUnlock()
+	return ok
+}
+
+// MarkCacheWarming records that a warmup request is in flight for the
+// given accountID + cacheKey. Called BEFORE starting the async warmup
+// goroutine to prevent concurrent requests from starting duplicates.
+func (p *AccountPool) MarkCacheWarming(accountID, cacheKey string) {
+	if accountID == "" || cacheKey == "" {
+		return
+	}
+	p.mu.Lock()
+	p.cacheWarming[cacheWarmedKey(accountID, cacheKey)] = true
+	p.mu.Unlock()
+}
+
+// ClearCacheWarming removes the warming flag after the warmup completes
+// (success or failure). On success, MarkCacheWarmed should be called
+// first so the warmed flag is set before clearing the warming flag.
+func (p *AccountPool) ClearCacheWarming(accountID, cacheKey string) {
+	if accountID == "" || cacheKey == "" {
+		return
+	}
+	p.mu.Lock()
+	delete(p.cacheWarming, cacheWarmedKey(accountID, cacheKey))
+	p.mu.Unlock()
+}
+
+// PruneCacheWarmed removes warmed entries older than the TTL. Called
+// periodically from the background refresh loop. After expiry, the next
+// request to that account+cacheKey will trigger a fresh warmup.
+func (p *AccountPool) PruneCacheWarmed() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.cacheWarmedTTL <= 0 {
+		return
+	}
+	cutoff := time.Now().Add(-p.cacheWarmedTTL)
+	for key, ts := range p.cacheWarmedTS {
+		if ts.Before(cutoff) {
+			delete(p.cacheWarmed, key)
+			delete(p.cacheWarmedTS, key)
+		}
+	}
 }
 
 // isModelLocked reports whether a specific model is in cooldown for this account.
@@ -474,6 +734,47 @@ func IsSuspensionError(err error) bool {
 		strings.Contains(lower, "no available kiro profile")
 }
 
+// IsQuotaExhaustionError reports whether the error indicates the account's
+// quota/credit/usage limit is HARD-exhausted (not a transient rate-limit blip).
+// Such accounts will not recover on a same-account retry — the caller should
+// rotate to a different account immediately instead of backing off.
+//
+// Recognised markers (case-insensitive):
+//   - "credit limit exceeded" / "credit limit" (External OpenAI-compatible)
+//   - "usage_limit_reached" / "usage limit" (Codex / ChatGPT subscription)
+//   - "quota" + ("exceeded" / "exhausted" / "reached")
+//   - "exceeded your current quota" (OpenAI standard)
+//   - "insufficient_quota" / "insufficient quota"
+//   - "plan_type" + "resets_at" (Codex usage_limit_reached body)
+func IsQuotaExhaustionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+
+	// Direct markers of hard quota/credit exhaustion.
+	if strings.Contains(lower, "credit limit") ||
+		strings.Contains(lower, "usage_limit") ||
+		strings.Contains(lower, "usage limit") ||
+		strings.Contains(lower, "insufficient_quota") ||
+		strings.Contains(lower, "insufficient quota") ||
+		strings.Contains(lower, "exceeded your current quota") {
+		return true
+	}
+	// "quota" paired with an exhaustion verb.
+	if strings.Contains(lower, "quota") &&
+		(strings.Contains(lower, "exceeded") ||
+			strings.Contains(lower, "exhausted") ||
+			strings.Contains(lower, "reached")) {
+		return true
+	}
+	// Codex usage_limit_reached body carries plan_type + resets_at.
+	if strings.Contains(lower, "plan_type") && strings.Contains(lower, "resets_at") {
+		return true
+	}
+	return false
+}
+
 // IsTransientError reports whether the error is a transient upstream condition
 // (provider overload, 5xx, timeout) that may succeed on a same-account retry
 // after a short backoff. Unlike auth failures, the account stays enabled.
@@ -485,12 +786,21 @@ func IsSuspensionError(err error) bool {
 //   - "timeout" / "deadline exceeded" / "context deadline exceeded"
 //   - "connection reset" / "EOF" / "broken pipe"
 //   - "temporarily unavailable" / "service unavailable"
+//
+// NOTE: hard quota/credit exhaustion (IsQuotaExhaustionError) is NOT transient
+// — retrying the same account wastes time. Callers should check
+// IsQuotaExhaustionError first and rotate immediately.
 func IsTransientError(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
 	lower := strings.ToLower(msg)
+
+	// Hard quota/credit exhaustion is NOT transient — don't retry same account.
+	if IsQuotaExhaustionError(err) {
+		return false
+	}
 
 	// HTTP 5xx status tokens (502/503/504) — bounded by non-digit boundaries
 	// so we don't match arbitrary digits in error bodies.
@@ -653,14 +963,37 @@ func (p *AccountPool) GetAllAccounts() []config.Account {
 }
 
 func isOverUsageLimit(acc config.Account) bool {
-	return acc.UsageLimit > 0 && acc.UsageCurrent >= acc.UsageLimit
+	if acc.UsageLimit > 0 && acc.UsageCurrent >= acc.UsageLimit {
+		return true
+	}
+	// Codex accounts: treat primary usage percent >= 100 as exhausted so the
+	// pool rotates to accounts that still have quota. Without this, accounts
+	// with codexPrimaryUsedPercent=100 but UsageLimit=0 (Codex does not use the
+	// Kiro UsageLimit fields) would never be skipped, causing upstream 429s.
+	if acc.CodexPrimaryUsedPercent >= 100 {
+		return true
+	}
+	return false
 }
 
 // isQuotaBlocked reports whether an over-quota account should be skipped:
 // the per-account upstream Overages switch (OverageStatus=ENABLED) and the
 // global allowOverUsage setting are the two ways to keep it routable.
 func isQuotaBlocked(acc config.Account, allowOverUsage bool) bool {
-	return isOverUsageLimit(acc) && !isUpstreamOverageEnabled(acc) && !allowOverUsage
+	if isOverUsageLimit(acc) && !isUpstreamOverageEnabled(acc) && !allowOverUsage {
+		return true
+	}
+	// External OpenAI-compatible: skip when credit balance is known-exhausted.
+	// extStatus="exhausted" is the authoritative signal from the provider; the
+	// numeric check (extCreditsUsed >= extCreditLimit) catches cases where the
+	// status hasn't been refreshed yet but the numbers show an overdraft.
+	if acc.ExtCreditLimit > 0 && acc.ExtCreditsUsed >= acc.ExtCreditLimit {
+		return true
+	}
+	if strings.EqualFold(acc.ExtStatus, "exhausted") {
+		return true
+	}
+	return false
 }
 
 // isUpstreamOverageEnabled reports whether the upstream Overages switch is ON for this account.

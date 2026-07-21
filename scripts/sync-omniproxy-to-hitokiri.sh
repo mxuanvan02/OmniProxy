@@ -128,22 +128,88 @@ stamp="$(date +%Y%m%d-%H%M%S)"
 backup="${REMOTE_CONFIG}.bak-sync-${stamp}"
 merged="/tmp/omniproxy-merged-${stamp}.json"
 
+# Stop the service before touching the config — the running proxy holds config
+# state in memory and will overwrite file changes (dropping newly-added accounts)
+# if it stays up during install. The RESTART section at the end will start it again.
+echo "Stopping ${SERVICE_NAME} before config install (avoid in-memory overwrite)..."
+systemctl --user stop "$SERVICE_NAME" 2>/dev/null || true
+
+# Wait until the proxy process is actually gone — a still-alive proxy holds config
+# state in memory and will overwrite the file (dropping newly-added accounts) when it
+# eventually exits. systemctl stop returns before the process fully terminates.
+for i in $(seq 1 20); do
+  if ! pgrep -f "superkiro --no-menu" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.5
+done
+# Final hard check
+if pgrep -f "superkiro --no-menu" >/dev/null 2>&1; then
+  echo "WARN: proxy still running after 10s; killing to avoid config overwrite"
+  pkill -f "superkiro --no-menu" 2>/dev/null || true
+  sleep 1
+fi
+
 cp "$REMOTE_CONFIG" "$backup"
 chmod 600 "$backup" 2>/dev/null || true
 
-# Merge: take local accounts + apiKeys, keep remote settings
+# Merge: local is source of truth for account existence + enabled + credentials.
+# Remote runtime stats (requestCount, lastUsed, totalTokens, codexUsage*) are preserved.
+# Accounts in remote but not local are dropped (deletion propagation).
+# Accounts disabled in local become disabled in remote (disable propagation).
 jq -s '
   .[0] as $remote |
   .[1] as $local |
+  ($local.accounts // []) as $la |
+  ($remote.accounts // []) as $ra |
   $remote
-  | .accounts = ($local.accounts // [])
+  | .accounts = (
+      $la | map(
+        . as $lacc |
+        ($ra | map(select(.id == $lacc.id)) | first) as $racc |
+        if $racc then
+          $lacc * ($racc | {
+            requestCount, lastUsed, totalTokens,
+            codexPrimaryUsedPercent, codexPrimaryWindowMinutes,
+            codexPrimaryResetAt, codexUsageCheckedAt
+          } | with_entries(select(.value != null)))
+        else
+          $lacc
+        end
+      )
+    )
   | .apiKeys = ($local.apiKeys // $remote.apiKeys // [])
 ' "$REMOTE_CONFIG" "$REMOTE_TMP" > "$merged"
 
-install -m 600 "$merged" "$REMOTE_CONFIG"
-rm -f "$REMOTE_TMP" "$merged"
+# Diff summary: added / removed / disabled-changed (jq < 1.7 compatible — no set())
+jq -s '
+  .[0] as $remote |
+  .[1] as $local |
+  ($remote.accounts // []) as $ra |
+  ($local.accounts // []) as $la |
+  ($la | map({(.id): true}) | add // {}) as $local_ids |
+  ($ra | map({(.id): true}) | add // {}) as $remote_ids |
+  {
+    added:   [$la[] | select(.id as $id | $remote_ids | has($id) | not) | .email],
+    removed: [$ra[] | select(.id as $id | $local_ids  | has($id) | not) | .email],
+    disabled_now: [($la[] | select(.enabled == false) as $lacc |
+                    $ra[] | select(.id == $lacc.id and .enabled == true) |
+                    "\($lacc.email) (was enabled)")],
+    enabled_now:  [($la[] | select(.enabled == true) as $lacc |
+                    $ra[] | select(.id == $lacc.id and .enabled == false) |
+                    "\($lacc.email) (was disabled)")]
+  }
+' "$REMOTE_CONFIG" "$REMOTE_TMP" > /tmp/omniproxy-diff-$$.json
 
 echo "Config merged. Backup: $backup"
+echo "── Diff (local → remote) ──"
+jq -r '
+  "  added:        \(.added | length)   \(.added | map("  - " + .) | join("\n"))",
+  "  removed:      \(.removed | length)   \(.removed | map("  - " + .) | join("\n"))",
+  "  disabled_now: \(.disabled_now | length)   \(.disabled_now | map("  - " + .) | join("\n"))",
+  "  enabled_now:  \(.enabled_now | length)   \(.enabled_now | map("  - " + .) | join("\n"))"
+' /tmp/omniproxy-diff-$$.json
+rm -f /tmp/omniproxy-diff-$$.json
 REMOTE_SCRIPT
 fi
 
@@ -165,11 +231,11 @@ echo "── Models endpoint ──"
 curl -sS "http://localhost:${PORT}/v1/models" | jq '{object, data_len:(.data|length), first:(.data[0].id // null), last:(.data[-1].id // null)}'
 
 echo
-echo "── Messages smoke test ──"
-curl -sS "http://localhost:${PORT}/v1/messages" \
+echo "── Chat smoke test (gpt-5.6-sol — Codex account) ──"
+curl -sS "http://localhost:${PORT}/v1/chat/completions" \
   -H 'content-type: application/json' \
-  -d '{"model":"claude-haiku-4.5","max_tokens":16,"messages":[{"role":"user","content":"Tra loi dung mot tu: OK"}]}' \
-  | jq '{id, type, model, text:(.content[0].text // .error.message // .message // null)}'
+  -d '{"model":"gpt-5.6-sol","max_tokens":16,"messages":[{"role":"user","content":"Tra loi dung mot tu: OK"}]}' \
+  | jq '{model, text:(.choices[0].message.content // .error.message // null)}'
 RESTART
 
 log "Sync complete ✓"

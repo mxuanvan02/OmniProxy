@@ -352,17 +352,25 @@ func RefreshAccountInfo(account *config.Account) (*config.AccountInfo, error) {
 	}
 
 	// if info fetched successfully, clear ban status (if previously marked)
+	// and re-enable if the account was disabled (covers the inconsistent state
+	// where BanStatus was already cleared to ACTIVE but Enabled stayed false).
+	needsUpdate := false
+	updatedAccount := *account
 	if account.BanStatus != "" && account.BanStatus != "ACTIVE" {
 		logger.Infof("[RefreshAccountInfo] Account %s is now active, clearing ban status", account.Email)
-
-		updatedAccount := *account
 		updatedAccount.BanStatus = "ACTIVE"
 		updatedAccount.BanReason = ""
 		updatedAccount.BanTime = 0
-
-		// save updated account status
+		updatedAccount.Enabled = true
+		needsUpdate = true
+	} else if !account.Enabled {
+		logger.Infof("[RefreshAccountInfo] Account %s is now active, re-enabling", account.Email)
+		updatedAccount.Enabled = true
+		needsUpdate = true
+	}
+	if needsUpdate {
 		if updateErr := config.UpdateAccount(account.ID, updatedAccount); updateErr != nil {
-			logger.Errorf("[RefreshAccountInfo] Failed to clear account ban status: %v", updateErr)
+			logger.Errorf("[RefreshAccountInfo] Failed to update account status: %v", updateErr)
 		}
 	}
 

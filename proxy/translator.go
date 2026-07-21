@@ -38,6 +38,19 @@ var modelAliases = []modelMapping{
 // (claude-sonnet-4-20250514) are not accidentally rewritten.
 var claudeVersionPattern = regexp.MustCompile(`claude-(opus|sonnet|haiku)-(\d+)-(\d{1,2})\b`)
 
+// stripProviderPrefix removes a leading provider/vendor namespace from a model
+// name so that prefixed requests (e.g. "codezdev/claude-opus-4-8",
+// "codex/gpt-5.6-sol", "cx/gpt-5.5", "ws/glm-5-2") are routed to the same
+// pool entries as their bare form. Only the first segment before "/" is
+// stripped; models that legitimately contain "/" deeper (none currently)
+// are unaffected. Returns the string unchanged if there is no "/".
+func stripProviderPrefix(model string) string {
+	if i := strings.IndexByte(model, '/'); i > 0 {
+		return model[i+1:]
+	}
+	return model
+}
+
 // Thinking mode prompt
 const ThinkingModePrompt = `<thinking_mode>enabled</thinking_mode>
 <max_thinking_length>200000</max_thinking_length>`
@@ -157,16 +170,17 @@ type ClaudeMessage struct {
 }
 
 type ClaudeContentBlock struct {
-	Type      string       `json:"type"`
-	Text      string       `json:"text,omitempty"`
-	Thinking  string       `json:"thinking,omitempty"`
-	Signature string       `json:"signature,omitempty"`
-	ID        string       `json:"id,omitempty"`
-	Name      string       `json:"name,omitempty"`
-	Input     interface{}  `json:"input,omitempty"`
-	ToolUseID string       `json:"tool_use_id,omitempty"`
-	Content   interface{}  `json:"content,omitempty"` // for tool_result
-	Source    *ImageSource `json:"source,omitempty"`
+	Type         string                 `json:"type"`
+	Text         string                 `json:"text,omitempty"`
+	Thinking     string                 `json:"thinking,omitempty"`
+	Signature    string                 `json:"signature,omitempty"`
+	ID           string                 `json:"id,omitempty"`
+	Name         string                 `json:"name,omitempty"`
+	Input        interface{}            `json:"input,omitempty"`
+	ToolUseID    string                 `json:"tool_use_id,omitempty"`
+	Content      interface{}            `json:"content,omitempty"` // for tool_result
+	Source       *ImageSource           `json:"source,omitempty"`
+	CacheControl map[string]interface{} `json:"cache_control,omitempty"` // preserved for External passthrough
 }
 
 type ImageSource struct {
@@ -371,6 +385,8 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 func buildClaudeSystemPrompt(system interface{}, thinking bool) string {
 	systemPrompt := extractSystemPrompt(system)
 	systemPrompt = applyPromptFilters(systemPrompt)
+	// Apply Caveman (terse output) + Ponytail (minimal code) suffixes if enabled.
+	systemPrompt = ApplySystemPromptSuffix(systemPrompt)
 	if !thinking {
 		return systemPrompt
 	}
@@ -670,6 +686,8 @@ func extractClaudeUserContent(content interface{}) (string, []KiroImage, []KiroT
 			case "tool_result":
 				toolUseID, _ := block["tool_use_id"].(string)
 				resultContent, resultImages := extractToolResultContent(block["content"])
+				// Apply RTK-style tool output compression (git diff, grep, ls, etc.)
+				resultContent, _ = compressToolOutput(resultContent)
 				if len(resultImages) > 0 {
 					images = append(images, resultImages...)
 					if strings.TrimSpace(resultContent) == "" {
@@ -2137,7 +2155,7 @@ func extractThinkingFromContent(content string) (string, string) {
 }
 
 // KiroToOpenAIResponseWithReasoning returns OpenAI response with reasoning_content
-func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, inputTokens, outputTokens int, model, thinkingFormat string) map[string]interface{} {
+func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUses []KiroToolUse, inputTokens, outputTokens int, model, thinkingFormat string, cachedTokens int) map[string]interface{} {
 	finishReason := "stop"
 
 	message := map[string]interface{}{
@@ -2187,10 +2205,24 @@ func KiroToOpenAIResponseWithReasoning(content, reasoningContent string, toolUse
 			"message":       message,
 			"finish_reason": finishReason,
 		}},
-		"usage": map[string]int{
-			"prompt_tokens":     inputTokens,
-			"completion_tokens": outputTokens,
-			"total_tokens":      inputTokens + outputTokens,
-		},
+		"usage": buildOpenAIUsageMap(inputTokens, outputTokens, cachedTokens),
 	}
+}
+
+// buildOpenAIUsageMap constructs the OpenAI usage object. When cachedTokens > 0
+// (upstream reported a real prompt-cache hit), it is surfaced via
+// prompt_tokens_details.cached_tokens so the client sees the real cache
+// behaviour of the upstream provider.
+func buildOpenAIUsageMap(inputTokens, outputTokens, cachedTokens int) map[string]interface{} {
+	usage := map[string]interface{}{
+		"prompt_tokens":     inputTokens,
+		"completion_tokens": outputTokens,
+		"total_tokens":      inputTokens + outputTokens,
+	}
+	if cachedTokens > 0 {
+		usage["prompt_tokens_details"] = map[string]int{
+			"cached_tokens": cachedTokens,
+		}
+	}
+	return usage
 }

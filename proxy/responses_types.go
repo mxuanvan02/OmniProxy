@@ -53,6 +53,16 @@ type ResponsesUsage struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
 	TotalTokens  int `json:"total_tokens"`
+	// InputTokensDetails surfaces the upstream prompt-cache hit count so
+	// clients of /v1/responses see the real cache behaviour (matching the
+	// OpenAI Responses API shape). Populated only when the upstream
+	// reported cached_tokens > 0.
+	InputTokensDetails *ResponsesInputTokensDetails `json:"input_tokens_details,omitempty"`
+}
+
+// ResponsesInputTokensDetails mirrors OpenAI's input_tokens_details object.
+type ResponsesInputTokensDetails struct {
+	CachedTokens int `json:"cached_tokens"`
 }
 
 type ResponsesError struct {
