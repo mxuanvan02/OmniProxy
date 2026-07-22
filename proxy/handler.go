@@ -1728,6 +1728,10 @@ func (h *Handler) apiResetAccountCredits(w http.ResponseWriter, r *http.Request,
 	account.CodexSecondaryUsedPercent = 0
 	account.CodexSecondaryResetAt = 0
 	account.CodexUsageCheckedAt = 0
+	// Decrement cached bank-reset credit count (we just consumed one).
+	if account.CodexResetCreditsAvailable > 0 {
+		account.CodexResetCreditsAvailable--
+	}
 	h.pool.ClearCooldown(account.ID)
 	if !account.Enabled && (account.BanStatus == "" || account.BanStatus == "ACTIVE") {
 		account.Enabled = true
@@ -3611,7 +3615,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			}
 		}
 
-		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits, realCacheRead, 0, realCacheRead)
+		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits, 0, 0, realCacheRead)
 		h.pool.RecordSuccess(account.ID, model)
 			if cacheKey != "" {
 				h.pool.RecordCacheStickiness(cacheKey, account.ID)
@@ -3762,7 +3766,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 		}
 
-		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits, realCacheRead, 0, realCacheRead)
+		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits, 0, 0, realCacheRead)
 		h.pool.RecordSuccess(account.ID, model)
 			if cacheKey != "" {
 				h.pool.RecordCacheStickiness(cacheKey, account.ID)
@@ -4225,6 +4229,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetUsageRequestDetails(w, r)
 	case path == "/usage/providers" && r.Method == "GET":
 		h.apiGetUsageProviders(w, r)
+	case path == "/pricing" && r.Method == "GET":
+		h.apiGetPricing(w, r)
 	case path == "/quota/overview" && r.Method == "GET":
 		h.apiGetQuotaOverview(w, r)
 	case path == "/cache/stats" && r.Method == "GET":
@@ -9737,6 +9743,35 @@ func (h *Handler) apiGetUsageProviders(w http.ResponseWriter, r *http.Request) {
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"providers": providers,
+	})
+}
+
+// apiGetPricing GET /admin/api/pricing
+// Returns the model pricing table used to compute RealCost in usage stats.
+// The UI uses this to show $/1M-token rates alongside the effective-tokens
+// column in the Usage by Model table, and to explain how RealCost was
+// derived. Includes both built-in pricing and any custom overrides.
+func (h *Handler) apiGetPricing(w http.ResponseWriter, r *http.Request) {
+	// Build a combined map: built-in table + custom overrides (custom wins).
+	combined := make(map[string]ModelPricing, len(pricingTable)+8)
+	for model, p := range pricingTable {
+		combined[model] = p
+	}
+	customPricing.Range(func(k, v interface{}) bool {
+		if model, ok := k.(string); ok {
+			if p, ok := v.(ModelPricing); ok {
+				combined[model] = p
+			}
+		}
+		return true
+	})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"pricing": combined,
+		"sources": map[string]string{
+			"openai":    "https://developers.openai.com/api/docs/pricing",
+			"anthropic": "https://platform.claude.com/docs/en/about-claude/pricing",
+		},
+		"note": "Prices are USD per 1M tokens, sourced from official provider pricing pages. RealCost = (input-cached)*InputPerM + cached*CachedPerM + output*OutputPerM, divided by 1M.",
 	})
 }
 

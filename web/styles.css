@@ -4933,6 +4933,24 @@ img.brand-icon {
   color: #b45309;
   background: rgba(245, 158, 11, 0.18);
 }
+.quota-reset-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  background: #f59e0b;
+  color: #fff;
+  margin-left: 2px;
+}
+.quota-reset-count-zero {
+  background: #6b7280;
+  opacity: 0.6;
+}
 
 /* Skeleton loading block */
 .quota-block-skeleton {

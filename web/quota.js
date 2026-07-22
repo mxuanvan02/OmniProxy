@@ -318,9 +318,19 @@ function renderAccountBlock(a) {
       <button class="quota-block-btn" data-action="check-credits" data-account-id="${escapeHtml(a.id)}" title="${escapeHtml(creditsLabel)}">
         <i class="fa-solid fa-coins"></i> <span>${escapeHtml(creditsLabel)}</span>
       </button>` : '';
+  // Bank Reset button: always shown for Codex accounts. Displays the
+  // cached available count as a badge. Disabled when count is 0 (no
+  // credits to consume). Count is fetched during account refresh and
+  // cached on the account — click the button to consume one credit.
+  const resetCount = a.codexResetCreditsAvailable || 0;
+  const resetDisabled = resetCount <= 0 ? 'disabled' : '';
+  const resetBtnClass = resetCount > 0 ? 'quota-block-btn-warning' : '';
+  const resetCountBadge = resetCount > 0
+    ? `<span class="quota-reset-count">${resetCount}</span>`
+    : '<span class="quota-reset-count quota-reset-count-zero">0</span>';
   const resetCreditBtn = isCodex ? `
-      <button class="quota-block-btn quota-block-btn-warning" data-action="bank-reset" data-account-id="${escapeHtml(a.id)}" title="${escapeHtml(resetCreditLabel)}">
-        <i class="fa-solid fa-bolt"></i> <span>${escapeHtml(resetCreditLabel)}</span>
+      <button class="quota-block-btn ${resetBtnClass}" data-action="bank-reset" data-account-id="${escapeHtml(a.id)}" ${resetDisabled} title="${escapeHtml(resetCreditLabel)}">
+        <i class="fa-solid fa-bolt"></i> <span>${escapeHtml(resetCreditLabel)}</span> ${resetCountBadge}
       </button>` : '';
   const actionsHtml = `
     <div class="quota-block-actions">

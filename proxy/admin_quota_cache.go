@@ -57,6 +57,7 @@ type quotaAccountRow struct {
 	CodexSecondaryResetAt     int64  `json:"codexSecondaryResetAt,omitempty"`
 	CodexCreditsBalance       *int   `json:"codexCreditsBalance,omitempty"`
 	CodexCreditsUnlimited     bool   `json:"codexCreditsUnlimited,omitempty"`
+	CodexResetCreditsAvailable int   `json:"codexResetCreditsAvailable,omitempty"`
 	// External
 	ExtCreditLimit      float64 `json:"extCreditLimit,omitempty"`
 	ExtCreditsRemaining float64 `json:"extCreditsRemaining,omitempty"`
@@ -123,7 +124,7 @@ func (h *Handler) apiGetQuotaOverview(w http.ResponseWriter, r *http.Request) {
 		row.Quotas = buildAccountQuotas(a)
 
 		// Codex fields (backward compat)
-		if a.CodexPlanType != "" || a.CodexPrimaryUsedPercent > 0 {
+		if a.CodexPlanType != "" || a.CodexPrimaryUsedPercent > 0 || isCodexAccount(&a) {
 			row.CodexPlanType = a.CodexPlanType
 			row.CodexPrimaryUsedPercent = a.CodexPrimaryUsedPercent
 			row.CodexSecondaryUsedPercent = a.CodexSecondaryUsedPercent
@@ -131,6 +132,7 @@ func (h *Handler) apiGetQuotaOverview(w http.ResponseWriter, r *http.Request) {
 			row.CodexSecondaryResetAt = a.CodexSecondaryResetAt
 			row.CodexCreditsBalance = &a.CodexCreditsBalance
 			row.CodexCreditsUnlimited = a.CodexCreditsUnlimited
+			row.CodexResetCreditsAvailable = a.CodexResetCreditsAvailable
 		}
 
 		// External credits

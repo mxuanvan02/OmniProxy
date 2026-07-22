@@ -226,7 +226,7 @@ func (h *Handler) handleResponsesNonStream(
 			outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 		}
 
-		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits, realCacheRead, 0, realCacheRead)
+		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits, 0, 0, realCacheRead)
 		h.pool.RecordSuccess(account.ID, model)
 		if cacheKey != "" {
 			h.pool.RecordCacheStickiness(cacheKey, account.ID)
@@ -620,7 +620,7 @@ func (h *Handler) handleResponsesStream(
 			outputTokens = estimateOpenAIOutputTokens(finalContent, reasoning, toolUses)
 		}
 
-		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits, realCacheRead, 0, realCacheRead)
+		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits, 0, 0, realCacheRead)
 		h.pool.RecordSuccess(account.ID, model)
 		if cacheKey != "" {
 			h.pool.RecordCacheStickiness(cacheKey, account.ID)

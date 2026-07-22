@@ -160,6 +160,7 @@ type Account struct {
 	CodexCreditsBalance      int    `json:"codexCreditsBalance,omitempty"`      // purchased credits remaining
 	CodexCreditsUnlimited    bool   `json:"codexCreditsUnlimited,omitempty"`    // unlimited credits flag
 	CodexCreditsKnown        bool   `json:"codexCreditsKnown,omitempty"`        // true when upstream sent x-codex-credits-* headers (pay-as-you-go); false for ChatGPT Plus subscription (no credit balance)
+	CodexResetCreditsAvailable int  `json:"codexResetCreditsAvailable,omitempty"` // bank-reset credits available (from wham/usage rate_limit_reset_credits.available_count)
 	CodexUsageCheckedAt      int64  `json:"codexUsageCheckedAt,omitempty"`      // last header capture timestamp
 }
 

@@ -717,14 +717,22 @@ function renderOverviewCards() {
   const cacheRead = stats.totalCacheReadTokens || 0;
   const cacheCreate = stats.totalCacheCreateTokens || 0;
   const cachedTokens = stats.totalCachedTokens || 0;
-  const totalCached = cacheRead + cacheCreate + cachedTokens;
+  // cacheRead (Claude path) and cachedTokens (OpenAI path) both represent
+  // cache hits — they are mutually exclusive in correct data. Use max() not
+  // sum() to avoid double-counting legacy records that populated both fields.
+  const cacheHits = Math.max(cacheRead, cachedTokens);
+  const totalCached = cacheHits + cacheCreate;
+  const effectiveTokens = stats.totalEffectiveTokens || 0;
+  const realCost = stats.totalRealCost || 0;
 
   container.innerHTML =
-    '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.totalRequests') : 'Total Requests') + '</div><div class="overview-card-value">' + fmtNum(stats.totalRequests) + '</div></div>' +
+    '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.totalRequests') : 'Total Request') + '</div><div class="overview-card-value">' + fmtNum(stats.totalRequests) + '</div></div>' +
     '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.inputTokens') : 'Input Tokens') + '</div><div class="overview-card-value text-primary">' + fmtTokenFull(stats.totalPromptTokens) + '</div></div>' +
     '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.outputTokens') : 'Output Tokens') + '</div><div class="overview-card-value text-success">' + fmtTokenFull(stats.totalCompletionTokens) + '</div></div>' +
     '<div class="usage-card overview-card"><div class="overview-card-title">Cached Tokens</div><div class="overview-card-value" style="color:#16a34a">' + fmtTokenFull(totalCached) + '</div></div>' +
-    '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.estimatedCost') : 'Est. Cost') + '</div><div class="overview-card-value text-warning">~' + fmtCost(stats.totalCost) + '</div><div class="overview-card-sub">' + (typeof t === 'function' ? t('usage.costDisclaimer') : 'Estimated, not actual billing') + '</div></div>';
+    '<div class="usage-card overview-card"><div class="overview-card-title">Effective Tokens</div><div class="overview-card-value" style="color:#0ea5e9" title="' + (typeof t === 'function' ? t('usage.effectiveTokensHint') : '(Input - Cached) + Output — tokens actually processed') + '">' + fmtTokenFull(effectiveTokens) + '</div></div>' +
+    '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.realCost') : 'Real Cost') + '</div><div class="overview-card-value text-warning">~$' + fmtCost(realCost) + '</div><div class="overview-card-sub">' + (typeof t === 'function' ? t('usage.realCostDisclaimer') : 'Computed from official pricing × tokens') + '</div></div>' +
+    '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.estimatedCost') : 'Est. Cost') + '</div><div class="overview-card-value text-warning">~' + fmtCost(stats.totalCost) + '</div><div class="overview-card-sub">' + (typeof t === 'function' ? t('usage.costDisclaimer') : 'Upstream-reported credits (legacy)') + '</div></div>';
 }
 
 // ─── Recent Requests Table ───────────────────────────────
@@ -915,14 +923,26 @@ function renderUsageTable() {
     const cr = val.cacheReadTokens || 0;
     const cc = val.cacheCreateTokens || 0;
     const ct = val.cachedTokens || 0;
+    // cacheRead (Claude) and cachedTokens (OpenAI) both represent cache hits
+    // and are mutually exclusive in correct data. Use max() to avoid
+    // double-counting legacy records that populated both fields.
+    const cached = Math.max(cr, ct) + cc;
+    const promptTokens = val.promptTokens || 0;
+    const completionTokens = val.completionTokens || 0;
+    // Effective tokens = (input - cached) + output. Recompute locally if the
+    // backend hasn't backfilled this field yet (legacy daily buckets).
+    const effectiveTokens = val.effectiveTokens || Math.max(0, promptTokens - cached) + completionTokens;
+    const realCost = val.realCost || 0;
     return {
     key,
     requests: val.requests || 0,
-    promptTokens: val.promptTokens || 0,
-    completionTokens: val.completionTokens || 0,
-    totalTokens: (val.promptTokens || 0) + (val.completionTokens || 0),
+    promptTokens,
+    completionTokens,
+    totalTokens: promptTokens + completionTokens,
+    effectiveTokens,
     cost: val.cost || 0,
-    cachedTokens: cr + cc + ct,
+    realCost,
+    cachedTokens: cached,
   };
   });
 
@@ -941,10 +961,12 @@ function renderUsageTable() {
     acc.promptTokens += r.promptTokens;
     acc.completionTokens += r.completionTokens;
     acc.totalTokens += r.totalTokens;
+    acc.effectiveTokens += r.effectiveTokens;
     acc.cost += r.cost;
+    acc.realCost += r.realCost;
     acc.cachedTokens += r.cachedTokens;
     return acc;
-  }, { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, cost: 0, cachedTokens: 0 });
+  }, { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, effectiveTokens: 0, cost: 0, realCost: 0, cachedTokens: 0 });
 
   const valueColumns = viewMode === 'tokens'
     ? [
@@ -952,11 +974,13 @@ function renderUsageTable() {
         { field: 'completionTokens', label: (typeof t === 'function' ? t('usage.outputTokensCol') : 'Output Tokens'), align: 'right' },
         { field: 'totalTokens', label: (typeof t === 'function' ? t('usage.totalTokens') : 'Total Tokens'), align: 'right' },
         { field: 'cachedTokens', label: 'Cached Tokens', align: 'right' },
+        { field: 'effectiveTokens', label: 'Effective Tokens', align: 'right' },
       ]
     : [
         { field: 'promptTokens', label: (typeof t === 'function' ? t('usage.inputCost') : 'Input Cost'), align: 'right' },
         { field: 'completionTokens', label: (typeof t === 'function' ? t('usage.outputCost') : 'Output Cost'), align: 'right' },
         { field: 'cost', label: (typeof t === 'function' ? t('usage.totalCost') : 'Total Cost'), align: 'right' },
+        { field: 'realCost', label: (typeof t === 'function' ? t('usage.realCost') : 'Real Cost'), align: 'right' },
       ];
 
   const allCols = columns.concat(valueColumns);
@@ -993,12 +1017,14 @@ function renderUsageTable() {
         '<td class="text-right text-text-muted">' + fmtTokenFull(row.promptTokens) + '</td>' +
         '<td class="text-right text-text-muted">' + fmtTokenFull(row.completionTokens) + '</td>' +
         '<td class="text-right">' + fmtTokenFull(row.totalTokens) + '</td>' +
-        '<td class="text-right" style="color:#16a34a">' + (row.cachedTokens ? fmtTokenFull(row.cachedTokens) : '—') + '</td>';
+        '<td class="text-right" style="color:#16a34a">' + (row.cachedTokens ? fmtTokenFull(row.cachedTokens) : '—') + '</td>' +
+        '<td class="text-right" style="color:#0ea5e9" title="' + escAttr((typeof t === 'function' ? t('usage.effectiveTokensHint') : '(Input - Cached) + Output')) + '">' + fmtTokenFull(row.effectiveTokens) + '</td>';
     } else {
       html +=
         '<td class="text-right text-text-muted">' + fmtCost(row.promptTokens ? (row.promptTokens / (row.promptTokens + row.completionTokens) * row.cost) : 0) + '</td>' +
         '<td class="text-right text-text-muted">' + fmtCost(row.completionTokens ? (row.completionTokens / (row.promptTokens + row.completionTokens) * row.cost) : 0) + '</td>' +
-        '<td class="text-right text-warning">' + fmtCost(row.cost) + '</td>';
+        '<td class="text-right text-warning">' + fmtCost(row.cost) + '</td>' +
+        '<td class="text-right text-warning"><strong>$' + fmtCost(row.realCost) + '</strong></td>';
     }
 
     html += '</tr>';
@@ -1013,12 +1039,14 @@ function renderUsageTable() {
       '<td class="text-right text-text-muted"><strong>' + fmtTokenFull(totalRow.promptTokens) + '</strong></td>' +
       '<td class="text-right text-text-muted"><strong>' + fmtTokenFull(totalRow.completionTokens) + '</strong></td>' +
       '<td class="text-right"><strong>' + fmtTokenFull(totalRow.totalTokens) + '</strong></td>' +
-      '<td class="text-right" style="color:#16a34a"><strong>' + (totalRow.cachedTokens ? fmtTokenFull(totalRow.cachedTokens) : '—') + '</strong></td>';
+      '<td class="text-right" style="color:#16a34a"><strong>' + (totalRow.cachedTokens ? fmtTokenFull(totalRow.cachedTokens) : '—') + '</strong></td>' +
+      '<td class="text-right" style="color:#0ea5e9"><strong>' + fmtTokenFull(totalRow.effectiveTokens) + '</strong></td>';
   } else {
     html +=
       '<td class="text-right text-text-muted"><strong>' + fmtCost(totalRow.promptTokens ? (totalRow.promptTokens / (totalRow.promptTokens + totalRow.completionTokens) * totalRow.cost) : 0) + '</strong></td>' +
       '<td class="text-right text-text-muted"><strong>' + fmtCost(totalRow.completionTokens ? (totalRow.completionTokens / (totalRow.promptTokens + totalRow.completionTokens) * totalRow.cost) : 0) + '</strong></td>' +
-      '<td class="text-right text-warning"><strong>' + fmtCost(totalRow.cost) + '</strong></td>';
+      '<td class="text-right text-warning"><strong>' + fmtCost(totalRow.cost) + '</strong></td>' +
+      '<td class="text-right text-warning"><strong>$' + fmtCost(totalRow.realCost) + '</strong></td>';
   }
   html += '</tr>';
 
@@ -1321,21 +1349,23 @@ function renderCacheTab() {
       <div class="usage-overview-card-label">${card.label}</div>
     </div>`).join('') + '</div>';
 
-  // Visual bar: cache composition
-  const total = cacheRead + cacheCreate + cachedTokens + uncached;
+  // Visual bar: cache composition. cacheRead (Claude) and cachedTokens (OpenAI)
+  // both represent cache hits and are mutually exclusive in correct data. Use
+  // max() not sum() to avoid double-counting legacy records.
+  const cacheHitsForBar = Math.max(cacheRead, cachedTokens);
+  const total = cacheHitsForBar + cacheCreate + uncached;
   const barHtml = total > 0 ? `
     <div class="usage-card" style="margin-top:16px;padding:16px">
       <div class="usage-card-title" style="margin-bottom:12px">Cache Composition</div>
       <div class="cache-composition-bar">
-        <div class="cache-seg cache-seg-read" style="width:${(cacheRead/total*100).toFixed(1)}%" title="Cache Read: ${fmtTokens(cacheRead)}"></div>
+        <div class="cache-seg cache-seg-read" style="width:${(cacheHitsForBar/total*100).toFixed(1)}%" title="Cache Hits: ${fmtTokens(cacheHitsForBar)}"></div>
         <div class="cache-seg cache-seg-create" style="width:${(cacheCreate/total*100).toFixed(1)}%" title="Cache Create: ${fmtTokens(cacheCreate)}"></div>
-        <div class="cache-seg cache-seg-cached" style="width:${(cachedTokens/total*100).toFixed(1)}%" title="Cached (OpenAI): ${fmtTokens(cachedTokens)}"></div>
+        <div class="cache-seg cache-seg-cached" style="width:0%" title="Cached (OpenAI): merged into Cache Hits"></div>
         <div class="cache-seg cache-seg-uncached" style="width:${(uncached/total*100).toFixed(1)}%" title="Uncached: ${fmtTokens(uncached)}"></div>
       </div>
       <div class="cache-legend">
-        <span class="cache-legend-item"><span class="cache-dot cache-dot-read"></span> Read (${fmtPct(cacheRead/total*100)})</span>
-        <span class="cache-legend-item"><span class="cache-dot cache-dot-create"></span> Create (${fmtPct(cacheCreate/total*100)})</span>
-        <span class="cache-legend-item"><span class="cache-dot cache-dot-cached"></span> OpenAI Cached (${fmtPct(cachedTokens/total*100)})</span>
+        <span class="cache-legend-item"><span class="cache-dot cache-dot-read"></span> Cache Hits (${fmtPct(cacheHitsForBar/total*100)})</span>
+        <span class="cache-legend-item"><span class="cache-dot cache-dot-create"></span> Cache Create (${fmtPct(cacheCreate/total*100)})</span>
         <span class="cache-legend-item"><span class="cache-dot cache-dot-uncached"></span> Uncached (${fmtPct(uncached/total*100)})</span>
       </div>
     </div>` : '';

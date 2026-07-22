@@ -1095,6 +1095,18 @@ func fetchCodexUsage(account *config.Account) error {
 
 	// Drain the body so the connection can be reused.
 	io.Copy(io.Discard, resp.Body)
+
+	// Also fetch the bank-reset credits available count from the wham/usage
+	// endpoint. This is a separate GET (no chat cost) that returns
+	// rate_limit_reset_credits.available_count. We cache it on the account
+	// so the Quota page can display it without making per-poll upstream
+	// calls. Errors are non-fatal — we just leave the cached value as-is.
+	if avail, err := codexResetCreditsAvailable(account); err == nil {
+		if account.CodexResetCreditsAvailable != avail {
+			account.CodexResetCreditsAvailable = avail
+			_ = config.UpdateAccount(account.ID, *account)
+		}
+	}
 	return nil
 }
 
