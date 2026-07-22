@@ -39,6 +39,9 @@ type RequestRecord struct {
 	OutputTokens       int     `json:"outputTokens"`
 	Cost               float64 `json:"cost"` // upstream-reported credits (legacy)
 	RealCost           float64 `json:"realCost,omitempty"` // USD computed from model pricing
+	InputCost          float64 `json:"inputCost,omitempty"` // USD for uncached input tokens
+	CachedCost         float64 `json:"cachedCost,omitempty"` // USD for cached input tokens (cache-read rate)
+	OutputCost         float64 `json:"outputCost,omitempty"` // USD for output tokens
 	EffectiveTokens    int     `json:"effectiveTokens,omitempty"` // (input - cached) + output
 	Status             string  `json:"status"`
 	Endpoint           string  `json:"endpoint"`
@@ -61,6 +64,9 @@ type PeriodSummary struct {
 	CompletionTokens int     `json:"completionTokens"`
 	Cost             float64 `json:"cost"` // legacy upstream-reported credits
 	RealCost         float64 `json:"realCost,omitempty"` // USD from ComputeCost
+	InputCost        float64 `json:"inputCost,omitempty"` // USD for uncached input
+	CachedCost       float64 `json:"cachedCost,omitempty"` // USD for cached input
+	OutputCost       float64 `json:"outputCost,omitempty"` // USD for output
 	EffectiveTokens  int     `json:"effectiveTokens,omitempty"` // (input - cached) + output
 	CacheReadTokens  int     `json:"cacheReadTokens,omitempty"`
 	CacheCreateTokens int    `json:"cacheCreateTokens,omitempty"`
@@ -79,6 +85,9 @@ type UsageStats struct {
 	TotalCompletionTokens int                       `json:"totalCompletionTokens"`
 	TotalCost             float64                   `json:"totalCost"` // legacy credits
 	TotalRealCost         float64                   `json:"totalRealCost,omitempty"` // USD from pricing
+	TotalInputCost        float64                   `json:"totalInputCost,omitempty"` // USD uncached input
+	TotalCachedCost       float64                   `json:"totalCachedCost,omitempty"` // USD cached input
+	TotalOutputCost       float64                   `json:"totalOutputCost,omitempty"` // USD output
 	TotalEffectiveTokens  int                       `json:"totalEffectiveTokens,omitempty"` // (input-cached)+output
 	TotalCacheReadTokens  int                       `json:"totalCacheReadTokens,omitempty"`
 	TotalCacheCreateTokens int                      `json:"totalCacheCreateTokens,omitempty"`
@@ -148,8 +157,8 @@ func (t *UsageTracker) loadFromDisk() {
 		var records []RequestRecord
 		if json.Unmarshal(data, &records) == nil {
 			for _, r := range records {
-				// Backfill realCost + effectiveTokens on legacy ring records
-				// that were persisted before these fields existed.
+				// Backfill realCost + cost breakdown + effectiveTokens on legacy
+				// ring records that were persisted before these fields existed.
 				cached := r.CacheReadTokens
 				if r.CachedTokens > cached {
 					cached = r.CachedTokens
@@ -158,7 +167,11 @@ func (t *UsageTracker) loadFromDisk() {
 					r.EffectiveTokens = EffectiveTokens(r.InputTokens, cached, r.OutputTokens)
 				}
 				if r.RealCost == 0 {
-					r.RealCost = ComputeCost(r.Model, r.InputTokens, cached, r.OutputTokens)
+					bd := ComputeCostBreakdown(r.Model, r.InputTokens, cached, r.OutputTokens)
+					r.RealCost = bd.Total
+					r.InputCost = bd.InputCost
+					r.CachedCost = bd.CachedCost
+					r.OutputCost = bd.OutputCost
 				}
 				t.pushToRing(r)
 			}
@@ -177,19 +190,27 @@ func (t *UsageTracker) loadFromDisk() {
 	}
 }
 
-// backfillDaySummary recomputes RealCost + EffectiveTokens for a legacy daily
-// bucket that was persisted without these fields. Iterates the ByModel map
-// (which has per-model token counts) and sums up. Also fixes the day-level
-// headline totals so they match the breakdown.
+// backfillDaySummary recomputes RealCost + EffectiveTokens + cost breakdown for
+// a legacy daily bucket that was persisted without these fields. Iterates the
+// ByModel map (which has per-model token counts) and sums up. Also fixes the
+// day-level headline totals so they match the breakdown.
 func backfillDaySummary(day *PeriodSummary) {
 	if day == nil || day.ByModel == nil {
 		return
 	}
-	// If RealCost is already non-zero, assume this day was written by a
-	// version that knew about pricing — skip to avoid double-counting.
-	if day.RealCost > 0 || day.EffectiveTokens > 0 {
+	// Skip only if the breakdown is already complete (all 3 cost fields + realCost).
+	// Older versions wrote RealCost without InputCost/CachedCost/OutputCost, so
+	// we still need to backfill the breakdown in that case.
+	if day.RealCost > 0 && day.InputCost > 0 && day.CachedCost > 0 && day.OutputCost > 0 {
 		return
 	}
+	// Reset day-level cost fields before re-summing from ByModel to avoid
+	// double-counting when called multiple times across restarts.
+	day.RealCost = 0
+	day.InputCost = 0
+	day.CachedCost = 0
+	day.OutputCost = 0
+	day.EffectiveTokens = 0
 	for model, s := range day.ByModel {
 		if s == nil {
 			continue
@@ -201,10 +222,23 @@ func backfillDaySummary(day *PeriodSummary) {
 		if s.EffectiveTokens == 0 {
 			s.EffectiveTokens = EffectiveTokens(s.PromptTokens, cached, s.CompletionTokens)
 		}
+		bd := ComputeCostBreakdown(model, s.PromptTokens, cached, s.CompletionTokens)
 		if s.RealCost == 0 {
-			s.RealCost = ComputeCost(model, s.PromptTokens, cached, s.CompletionTokens)
+			s.RealCost = bd.Total
+		}
+		if s.InputCost == 0 {
+			s.InputCost = bd.InputCost
+		}
+		if s.CachedCost == 0 {
+			s.CachedCost = bd.CachedCost
+		}
+		if s.OutputCost == 0 {
+			s.OutputCost = bd.OutputCost
 		}
 		day.RealCost += s.RealCost
+		day.InputCost += s.InputCost
+		day.CachedCost += s.CachedCost
+		day.OutputCost += s.OutputCost
 		day.EffectiveTokens += s.EffectiveTokens
 	}
 }
@@ -272,7 +306,11 @@ func (t *UsageTracker) Append(r RequestRecord) {
 		r.EffectiveTokens = EffectiveTokens(r.InputTokens, cached, r.OutputTokens)
 	}
 	if r.RealCost == 0 {
-		r.RealCost = ComputeCost(r.Model, r.InputTokens, cached, r.OutputTokens)
+		bd := ComputeCostBreakdown(r.Model, r.InputTokens, cached, r.OutputTokens)
+		r.RealCost = bd.Total
+		r.InputCost = bd.InputCost
+		r.CachedCost = bd.CachedCost
+		r.OutputCost = bd.OutputCost
 	}
 	t.pushToRing(r)
 	t.dirty = true
@@ -289,6 +327,9 @@ func (t *UsageTracker) Append(r RequestRecord) {
 	day.CompletionTokens += r.OutputTokens
 	day.Cost += r.Cost
 	day.RealCost += r.RealCost
+	day.InputCost += r.InputCost
+	day.CachedCost += r.CachedCost
+	day.OutputCost += r.OutputCost
 	day.EffectiveTokens += r.EffectiveTokens
 	// Day-level cache totals must be updated here too, not just in
 	// addToSummaryMap — otherwise sumDailyTotalsLocked reads 0 for the
@@ -542,6 +583,9 @@ func addToSummaryMap(m map[string]*PeriodSummary, key string, r RequestRecord) {
 	s.CompletionTokens += r.OutputTokens
 	s.Cost += r.Cost
 	s.RealCost += r.RealCost
+	s.InputCost += r.InputCost
+	s.CachedCost += r.CachedCost
+	s.OutputCost += r.OutputCost
 	s.EffectiveTokens += r.EffectiveTokens
 	s.CacheReadTokens += r.CacheReadTokens
 	s.CacheCreateTokens += r.CacheCreateTokens
@@ -565,6 +609,9 @@ func mergeSummaryMapInto(dst, src map[string]*PeriodSummary) {
 		d.CompletionTokens += s.CompletionTokens
 		d.Cost += s.Cost
 		d.RealCost += s.RealCost
+		d.InputCost += s.InputCost
+		d.CachedCost += s.CachedCost
+		d.OutputCost += s.OutputCost
 		d.EffectiveTokens += s.EffectiveTokens
 		d.CacheReadTokens += s.CacheReadTokens
 		d.CacheCreateTokens += s.CacheCreateTokens
@@ -591,6 +638,9 @@ func (t *UsageTracker) sumDailyTotalsLocked(stats *UsageStats, period string) {
 		stats.TotalCompletionTokens += day.CompletionTokens
 		stats.TotalCost += day.Cost
 		stats.TotalRealCost += day.RealCost
+		stats.TotalInputCost += day.InputCost
+		stats.TotalCachedCost += day.CachedCost
+		stats.TotalOutputCost += day.OutputCost
 		stats.TotalEffectiveTokens += day.EffectiveTokens
 		stats.TotalCacheReadTokens += day.CacheReadTokens
 		stats.TotalCacheCreateTokens += day.CacheCreateTokens

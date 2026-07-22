@@ -731,8 +731,7 @@ function renderOverviewCards() {
     '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.outputTokens') : 'Output Tokens') + '</div><div class="overview-card-value text-success">' + fmtTokenFull(stats.totalCompletionTokens) + '</div></div>' +
     '<div class="usage-card overview-card"><div class="overview-card-title">Cached Tokens</div><div class="overview-card-value" style="color:#16a34a">' + fmtTokenFull(totalCached) + '</div></div>' +
     '<div class="usage-card overview-card"><div class="overview-card-title">Effective Tokens</div><div class="overview-card-value" style="color:#0ea5e9" title="' + (typeof t === 'function' ? t('usage.effectiveTokensHint') : '(Input - Cached) + Output — tokens actually processed') + '">' + fmtTokenFull(effectiveTokens) + '</div></div>' +
-    '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.realCost') : 'Real Cost') + '</div><div class="overview-card-value text-warning">~$' + fmtCost(realCost) + '</div><div class="overview-card-sub">' + (typeof t === 'function' ? t('usage.realCostDisclaimer') : 'Computed from official pricing × tokens') + '</div></div>' +
-    '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.estimatedCost') : 'Est. Cost') + '</div><div class="overview-card-value text-warning">~' + fmtCost(stats.totalCost) + '</div><div class="overview-card-sub">' + (typeof t === 'function' ? t('usage.costDisclaimer') : 'Upstream-reported credits (legacy)') + '</div></div>';
+    '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.realCost') : 'Real Cost') + '</div><div class="overview-card-value text-warning">' + fmtCost(realCost) + '</div><div class="overview-card-sub">' + (typeof t === 'function' ? t('usage.realCostDisclaimer') : 'Computed from official pricing × tokens') + '</div></div>';
 }
 
 // ─── Recent Requests Table ───────────────────────────────
@@ -933,6 +932,11 @@ function renderUsageTable() {
     // backend hasn't backfilled this field yet (legacy daily buckets).
     const effectiveTokens = val.effectiveTokens || Math.max(0, promptTokens - cached) + completionTokens;
     const realCost = val.realCost || 0;
+    // Cost breakdown from backend (computed at ingestion). Falls back to 0
+    // for legacy data — UI shows realCost only in that case.
+    const inputCost = val.inputCost || 0;
+    const cachedCost = val.cachedCost || 0;
+    const outputCost = val.outputCost || 0;
     return {
     key,
     requests: val.requests || 0,
@@ -942,6 +946,9 @@ function renderUsageTable() {
     effectiveTokens,
     cost: val.cost || 0,
     realCost,
+    inputCost,
+    cachedCost,
+    outputCost,
     cachedTokens: cached,
   };
   });
@@ -964,9 +971,12 @@ function renderUsageTable() {
     acc.effectiveTokens += r.effectiveTokens;
     acc.cost += r.cost;
     acc.realCost += r.realCost;
+    acc.inputCost += r.inputCost;
+    acc.cachedCost += r.cachedCost;
+    acc.outputCost += r.outputCost;
     acc.cachedTokens += r.cachedTokens;
     return acc;
-  }, { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, effectiveTokens: 0, cost: 0, realCost: 0, cachedTokens: 0 });
+  }, { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, effectiveTokens: 0, cost: 0, realCost: 0, inputCost: 0, cachedCost: 0, outputCost: 0, cachedTokens: 0 });
 
   const valueColumns = viewMode === 'tokens'
     ? [
@@ -977,9 +987,9 @@ function renderUsageTable() {
         { field: 'effectiveTokens', label: 'Effective Tokens', align: 'right' },
       ]
     : [
-        { field: 'promptTokens', label: (typeof t === 'function' ? t('usage.inputCost') : 'Input Cost'), align: 'right' },
-        { field: 'completionTokens', label: (typeof t === 'function' ? t('usage.outputCost') : 'Output Cost'), align: 'right' },
-        { field: 'cost', label: (typeof t === 'function' ? t('usage.totalCost') : 'Total Cost'), align: 'right' },
+        { field: 'inputCost', label: 'Input Cost', align: 'right' },
+        { field: 'cachedCost', label: 'Cached Cost', align: 'right' },
+        { field: 'outputCost', label: 'Output Cost', align: 'right' },
         { field: 'realCost', label: (typeof t === 'function' ? t('usage.realCost') : 'Real Cost'), align: 'right' },
       ];
 
@@ -1021,10 +1031,10 @@ function renderUsageTable() {
         '<td class="text-right" style="color:#0ea5e9" title="' + escAttr((typeof t === 'function' ? t('usage.effectiveTokensHint') : '(Input - Cached) + Output')) + '">' + fmtTokenFull(row.effectiveTokens) + '</td>';
     } else {
       html +=
-        '<td class="text-right text-text-muted">' + fmtCost(row.promptTokens ? (row.promptTokens / (row.promptTokens + row.completionTokens) * row.cost) : 0) + '</td>' +
-        '<td class="text-right text-text-muted">' + fmtCost(row.completionTokens ? (row.completionTokens / (row.promptTokens + row.completionTokens) * row.cost) : 0) + '</td>' +
-        '<td class="text-right text-warning">' + fmtCost(row.cost) + '</td>' +
-        '<td class="text-right text-warning"><strong>$' + fmtCost(row.realCost) + '</strong></td>';
+        '<td class="text-right text-text-muted">' + fmtCost(row.inputCost) + '</td>' +
+        '<td class="text-right" style="color:#16a34a">' + fmtCost(row.cachedCost) + '</td>' +
+        '<td class="text-right text-text-muted">' + fmtCost(row.outputCost) + '</td>' +
+        '<td class="text-right text-warning"><strong>' + fmtCost(row.realCost) + '</strong></td>';
     }
 
     html += '</tr>';
@@ -1043,10 +1053,10 @@ function renderUsageTable() {
       '<td class="text-right" style="color:#0ea5e9"><strong>' + fmtTokenFull(totalRow.effectiveTokens) + '</strong></td>';
   } else {
     html +=
-      '<td class="text-right text-text-muted"><strong>' + fmtCost(totalRow.promptTokens ? (totalRow.promptTokens / (totalRow.promptTokens + totalRow.completionTokens) * totalRow.cost) : 0) + '</strong></td>' +
-      '<td class="text-right text-text-muted"><strong>' + fmtCost(totalRow.completionTokens ? (totalRow.completionTokens / (totalRow.promptTokens + totalRow.completionTokens) * totalRow.cost) : 0) + '</strong></td>' +
-      '<td class="text-right text-warning"><strong>' + fmtCost(totalRow.cost) + '</strong></td>' +
-      '<td class="text-right text-warning"><strong>$' + fmtCost(totalRow.realCost) + '</strong></td>';
+      '<td class="text-right text-text-muted"><strong>' + fmtCost(totalRow.inputCost) + '</strong></td>' +
+      '<td class="text-right" style="color:#16a34a"><strong>' + fmtCost(totalRow.cachedCost) + '</strong></td>' +
+      '<td class="text-right text-text-muted"><strong>' + fmtCost(totalRow.outputCost) + '</strong></td>' +
+      '<td class="text-right text-warning"><strong>' + fmtCost(totalRow.realCost) + '</strong></td>';
   }
   html += '</tr>';
 

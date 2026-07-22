@@ -2070,6 +2070,57 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	}
 }
 
+// shouldFallbackToSol returns true if the given model is a Claude model
+// (not already gpt-5.6-sol) and the Claude→Sol fallback is enabled in config.
+// Used to decide whether to retry a failed Claude request with gpt-5.6-sol.
+func shouldFallbackToSol(model string) bool {
+	if !config.GetClaudeSolFallback() {
+		return false
+	}
+	m := strings.ToLower(strings.TrimSpace(model))
+	if m == "" {
+		return false
+	}
+	// Already a Sol/GPT model — don't fallback to self
+	if strings.Contains(m, "gpt-5.6") || strings.Contains(m, "gpt-5-6") {
+		return false
+	}
+	// Any Claude model (opus/sonnet/haiku) qualifies for fallback
+	return strings.Contains(m, "claude") ||
+		strings.Contains(m, "opus") ||
+		strings.Contains(m, "sonnet") ||
+		strings.Contains(m, "haiku")
+}
+
+// clonePayloadForSolFallback deep-copies a KiroPayload and rewrites all model
+// IDs to gpt-5.6-sol, so the fallback request routes to Codex/external OpenAI
+// accounts. The context window is implicitly adjusted: gpt-5.6-sol has 300K
+// input / 128K output (vs Claude 4.8's 1M / 128K), and getContextWindowSize
+// already returns the correct value for non-Claude models.
+func clonePayloadForSolFallback(payload *KiroPayload) *KiroPayload {
+	if payload == nil {
+		return nil
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		logger.Warnf("[ClaudeSolFallback] failed to marshal payload for clone: %v", err)
+		return payload
+	}
+	var clone KiroPayload
+	if err := json.Unmarshal(data, &clone); err != nil {
+		logger.Warnf("[ClaudeSolFallback] failed to unmarshal payload clone: %v", err)
+		return payload
+	}
+	clone.OriginalModel = "gpt-5.6-sol"
+	clone.ConversationState.CurrentMessage.UserInputMessage.ModelID = "gpt-5.6-sol"
+	for i := range clone.ConversationState.History {
+		if clone.ConversationState.History[i].UserInputMessage != nil {
+			clone.ConversationState.History[i].UserInputMessage.ModelID = "gpt-5.6-sol"
+		}
+	}
+	return &clone
+}
+
 // handleClaudeStream handles Claude streaming response
 func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -2617,6 +2668,20 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		return
 	}
 
+	// Claude→Sol fallback: if no Claude account was available and nothing has
+	// been sent to the client yet, retry the entire request with gpt-5.6-sol.
+	// The context window is adjusted automatically by getContextWindowSize
+	// (300K for Sol vs 1M for Claude 4.8+), and the payload model IDs are
+	// rewritten so the request routes to Codex/external OpenAI accounts.
+	if !messageStarted && shouldFallbackToSol(model) {
+		logger.Warnf("[CLAUDE-STREAM] fallback: %s → gpt-5.6-sol (no Claude accounts available, lastErr=%v)", model, lastErr)
+		fbPayload := clonePayloadForSolFallback(payload)
+		// Disable thinking for Sol — gpt-5.6-sol handles reasoning natively
+		// and the Claude thinking format would produce invalid SSE blocks.
+		h.handleClaudeStream(w, fbPayload, "gpt-5.6-sol", false, thinkingOpts, estimatedInputTokens, cacheProfile, apiKeyID)
+		return
+	}
+
 	if lastErr == nil {
 		h.sendClaudeSSEError(w, flusher, "api_error", "No available accounts")
 		return
@@ -3097,6 +3162,15 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	// Claude→Sol fallback: if no Claude account was available, retry with
+	// gpt-5.6-sol. Context window is adjusted automatically (300K for Sol).
+	if shouldFallbackToSol(model) {
+		logger.Warnf("[CLAUDE-NONSTREAM] fallback: %s → gpt-5.6-sol (no Claude accounts available, lastErr=%v)", model, lastErr)
+		fbPayload := clonePayloadForSolFallback(payload)
+		h.handleClaudeNonStream(w, fbPayload, "gpt-5.6-sol", false, thinkingOpts, estimatedInputTokens, cacheProfile, apiKeyID)
 		return
 	}
 
@@ -5694,21 +5768,15 @@ func (h *Handler) apiCopilotSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
-	accounts := config.GetAccounts()
-	poolAccounts := h.pool.GetAllAccounts()
-
-	// merge runtime stats
-	statsMap := make(map[string]config.Account)
-	for _, a := range poolAccounts {
-		statsMap[a.ID] = a
-	}
+	// GetAllAccountsFull returns ALL config accounts with live pool stats
+	// overlaid. Accounts not in the pool (banned/disabled) retain their
+	// last-persisted stats from config — so their token/request counters
+	// show historical usage instead of 0.
+	accounts := h.pool.GetAllAccountsFull()
 
 	// hide sensitive info
 	result := make([]map[string]interface{}, len(accounts))
 	for i, a := range accounts {
-		// get runtime stats
-		stats := statsMap[a.ID]
-
 		result[i] = map[string]interface{}{
 			"id":                a.ID,
 			"email":             a.Email,
@@ -5745,11 +5813,11 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"trialUsagePercent": a.TrialUsagePercent,
 			"trialStatus":       a.TrialStatus,
 			"trialExpiresAt":    a.TrialExpiresAt,
-			"requestCount":      stats.RequestCount,
-			"errorCount":        stats.ErrorCount,
-			"totalTokens":       stats.TotalTokens,
-			"totalCredits":      stats.TotalCredits,
-			"lastUsed":          stats.LastUsed,
+			"requestCount":      a.RequestCount,
+			"errorCount":        a.ErrorCount,
+			"totalTokens":       a.TotalTokens,
+			"totalCredits":      a.TotalCredits,
+			"lastUsed":          a.LastUsed,
 			"baseUrl":           a.BaseURL,
 			"extCreditLimit":      a.ExtCreditLimit,
 			"extCreditsRemaining": a.ExtCreditsRemaining,
@@ -8426,11 +8494,21 @@ func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
 	// These reflect the real per-account credit quotas reported by Kiro, distinct
 	// from totalCredits which only counts credits consumed through OmniProxy.
 	var kiroUsageCurrent, kiroUsageLimit, trialUsageCurrent, trialUsageLimit float64
-	for _, a := range h.pool.GetAllAccounts() {
+	// Compute totalTokens/totalRequests/totalCredits as the SUM of per-account
+	// stats from the pool (same source as /quota/overview and /accounts). This
+	// guarantees the top-level stats bar is always consistent with the sum of
+	// per-account blocks — no divergence between pages.
+	var totalTokens int64
+	var totalRequests int64
+	var totalCredits float64
+	for _, a := range h.pool.GetAllAccountsFull() {
 		kiroUsageCurrent += a.UsageCurrent
 		kiroUsageLimit += a.UsageLimit
 		trialUsageCurrent += a.TrialUsageCurrent
 		trialUsageLimit += a.TrialUsageLimit
+		totalRequests += int64(a.RequestCount)
+		totalTokens += int64(a.TotalTokens)
+		totalCredits += a.TotalCredits
 	}
 	// Available models from cache (same source as /v1/models, minus aliases/combos)
 	h.modelsCacheMu.RLock()
@@ -8445,11 +8523,12 @@ func (h *Handler) apiGetStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"accounts":          h.pool.Count(),
 		"available":         h.pool.AvailableCount(),
-		"totalRequests":     atomic.LoadInt64(&h.totalRequests),
+		"totalAccounts":     len(h.pool.GetAllAccountsFull()),
+		"totalRequests":     totalRequests,
 		"successRequests":   atomic.LoadInt64(&h.successRequests),
 		"failedRequests":    atomic.LoadInt64(&h.failedRequests),
-		"totalTokens":       atomic.LoadInt64(&h.totalTokens),
-		"totalCredits":      h.getCredits(),
+		"totalTokens":       totalTokens,
+		"totalCredits":      totalCredits,
 		"kiroUsageCurrent":  kiroUsageCurrent,
 		"kiroUsageLimit":    kiroUsageLimit,
 		"trialUsageCurrent": trialUsageCurrent,
@@ -8992,14 +9071,15 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 
 // apiGetAccountFull gets full account info (including sensitive fields)
 func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id string) {
-	accounts := config.GetAccounts()
-	poolAccounts := h.pool.GetAllAccounts()
+	// Use GetAllAccountsFull to get ALL accounts with live pool stats overlaid.
+	// This ensures banned/disabled accounts also show their correct stats.
+	allAccounts := h.pool.GetAllAccountsFull()
 
 	// find specified account
 	var account *config.Account
-	for i := range accounts {
-		if accounts[i].ID == id {
-			account = &accounts[i]
+	for i := range allAccounts {
+		if allAccounts[i].ID == id {
+			account = &allAccounts[i]
 			break
 		}
 	}
@@ -9008,15 +9088,6 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		w.WriteHeader(404)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
 		return
-	}
-
-	// get runtime stats
-	var stats config.Account
-	for _, a := range poolAccounts {
-		if a.ID == id {
-			stats = a
-			break
-		}
 	}
 
 	// return full account info (including sensitive fields)
@@ -9059,11 +9130,11 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		"trialUsagePercent": account.TrialUsagePercent,
 		"trialStatus":       account.TrialStatus,
 		"trialExpiresAt":    account.TrialExpiresAt,
-		"requestCount":      stats.RequestCount,
-		"errorCount":        stats.ErrorCount,
-		"totalTokens":       stats.TotalTokens,
-		"totalCredits":      stats.TotalCredits,
-		"lastUsed":          stats.LastUsed,
+		"requestCount":      account.RequestCount,
+		"errorCount":        account.ErrorCount,
+		"totalTokens":       account.TotalTokens,
+		"totalCredits":      account.TotalCredits,
+		"lastUsed":          account.LastUsed,
 	}
 
 	json.NewEncoder(w).Encode(result)

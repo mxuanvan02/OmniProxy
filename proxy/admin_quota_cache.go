@@ -87,13 +87,14 @@ type quotaRow struct {
 // apiGetQuotaOverview GET /admin/api/quota/overview
 // Returns aggregate quota by provider + per-account breakdown.
 //
-// Uses h.pool.GetAllAccounts() instead of config.GetAccounts() so the
-// per-account token/request counters reflect live in-memory stats (the
-// running source of truth), not the persisted config which is only
-// flushed periodically. This makes the Quota page update in real time
-// as requests flow through the proxy.
+// Uses h.pool.GetAllAccountsFull() which returns ALL config accounts
+// (including disabled, banned, and quota-blocked) with live pool stats
+// overlaid. This ensures:
+//   - All accounts visible on the Quota page (not just routable ones)
+//   - SUM of per-account tokens/requests == /status total tokens/requests
+//   - Banned/disabled accounts show their historical usage
 func (h *Handler) apiGetQuotaOverview(w http.ResponseWriter, r *http.Request) {
-	accounts := h.pool.GetAllAccounts()
+	accounts := h.pool.GetAllAccountsFull()
 
 	providerSummaries := map[string]*quotaProviderSummary{
 		"kiro":     {Provider: "kiro", Label: "Kiro / CodeWhisperer"},
@@ -377,14 +378,12 @@ func buildAccountQuotas(a config.Account) []quotaRow {
 			rows = append(rows, r)
 		}
 		// Tokens row — always show for external (cumulative, unlimited)
-		if a.ExtTokensUsed > 0 || a.TotalTokens > 0 {
-			tokensUsed := float64(a.ExtTokensUsed)
-			if tokensUsed == 0 {
-				tokensUsed = float64(a.TotalTokens)
-			}
+		// Use a.TotalTokens (same source as /status and /accounts) for
+		// consistency. ExtTokensUsed is a legacy field that may diverge.
+		if a.TotalTokens > 0 {
 			rows = append(rows, quotaRow{
 				Name:      "Tokens",
-				Used:      tokensUsed,
+				Used:      float64(a.TotalTokens),
 				Total:     0, // unlimited / cumulative
 				Remaining: 100,
 				Recurring: false,
@@ -392,14 +391,11 @@ func buildAccountQuotas(a config.Account) []quotaRow {
 			})
 		}
 		// Requests row — always show for external
-		if a.ExtRequestsCount > 0 || a.RequestCount > 0 {
-			reqCount := float64(a.ExtRequestsCount)
-			if reqCount == 0 {
-				reqCount = float64(a.RequestCount)
-			}
+		// Use a.RequestCount (same source as /status and /accounts).
+		if a.RequestCount > 0 {
 			rows = append(rows, quotaRow{
 				Name:      "Requests",
-				Used:      reqCount,
+				Used:      float64(a.RequestCount),
 				Total:     0,
 				Remaining: 100,
 				Recurring: false,

@@ -124,6 +124,38 @@ func prefixFallbackPricing(model string) (ModelPricing, bool) {
 	return ModelPricing{}, false
 }
 
+// CostBreakdown holds the per-component USD cost of a request, computed from
+// the model pricing. CachedCost is billed at the cache-read rate, InputCost at
+// the base input rate (for the uncached portion), OutputCost at the output
+// rate. Total = InputCost + CachedCost + OutputCost.
+type CostBreakdown struct {
+	InputCost   float64 `json:"inputCost"`   // (input - cached) * InputPerM / 1M
+	CachedCost  float64 `json:"cachedCost"`  // cached * CachedPerM / 1M
+	OutputCost  float64 `json:"outputCost"`  // output * OutputPerM / 1M
+	Total       float64 `json:"total"`       // sum of the three
+}
+
+// ComputeCostBreakdown returns the per-component USD cost of a request. If the
+// model is unknown, all fields are zero. `cached` is the cache-hit token count
+// (a subset of `input`); it is clamped to `input` if it exceeds it.
+func ComputeCostBreakdown(model string, input, cached, output int) CostBreakdown {
+	p, ok := LookupPricing(model)
+	if !ok {
+		return CostBreakdown{}
+	}
+	if cached > input {
+		cached = input
+	}
+	uncached := input - cached
+	bd := CostBreakdown{
+		InputCost:  float64(uncached) * p.InputPerM / 1_000_000.0,
+		CachedCost: float64(cached) * p.CachedPerM / 1_000_000.0,
+		OutputCost: float64(output) * p.OutputPerM / 1_000_000.0,
+	}
+	bd.Total = bd.InputCost + bd.CachedCost + bd.OutputCost
+	return bd
+}
+
 // ComputeCost calculates the real USD cost of a request given token counts
 // and the model's pricing. Cost = (input-cached)*InputPerM + cached*CachedPerM
 // + output*OutputPerM, all divided by 1M. If the model is unknown, returns 0.
@@ -133,17 +165,7 @@ func prefixFallbackPricing(model string) (ModelPricing, bool) {
 // separate cache-write price field in the usage record, so they fold into
 // `input` to avoid double-counting.
 func ComputeCost(model string, input, cached, output int) float64 {
-	p, ok := LookupPricing(model)
-	if !ok {
-		return 0
-	}
-	if cached > input {
-		cached = input // clamp — cached cannot exceed input
-	}
-	uncached := input - cached
-	return (float64(uncached)*p.InputPerM +
-		float64(cached)*p.CachedPerM +
-		float64(output)*p.OutputPerM) / 1_000_000.0
+	return ComputeCostBreakdown(model, input, cached, output).Total
 }
 
 // EffectiveTokens returns the "real" tokens consumed = (input - cached) + output.

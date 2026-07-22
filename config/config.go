@@ -224,6 +224,13 @@ type Config struct {
 	// Defaults to true. Set to false to only use the preferred endpoint.
 	EndpointFallback *bool `json:"endpointFallback,omitempty"`
 
+	// ClaudeSolFallback controls whether Claude API requests automatically
+	// fall back to gpt-5.6-sol when no Claude accounts are available (all
+	// exhausted/banned/disabled). The fallback adjusts the payload model ID
+	// and context window to match gpt-5.6-sol's limits (300K input / 128K
+	// output). Defaults to true.
+	ClaudeSolFallback *bool `json:"claudeSolFallback,omitempty"`
+
 	// AllowOverUsage allows accounts to continue serving requests even when their
 	// usage quota has been exhausted. When enabled, the pool will not skip accounts
 	// solely because usageCurrent >= usageLimit.
@@ -1160,6 +1167,26 @@ func UpdateEndpointFallback(enabled bool) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.EndpointFallback = &enabled
+	return Save()
+}
+
+// GetClaudeSolFallback returns whether Claude→gpt-5.6-sol fallback is enabled.
+// Defaults to true — when all Claude accounts are unavailable, Claude API
+// requests are retried with gpt-5.6-sol (adjusting context window / model ID).
+func GetClaudeSolFallback() bool {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg.ClaudeSolFallback == nil {
+		return true
+	}
+	return *cfg.ClaudeSolFallback
+}
+
+// UpdateClaudeSolFallback sets the Claude→Sol fallback switch and persists it.
+func UpdateClaudeSolFallback(enabled bool) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	cfg.ClaudeSolFallback = &enabled
 	return Save()
 }
 

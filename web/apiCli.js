@@ -143,6 +143,16 @@
     el.classList.remove('hidden');
   }
 
+  // Default model IDs for the 3 Claude CLI slots — user can override via /model
+  // opus  → claude-opus-4.8   (flagship Claude, 1M context)
+  // sonnet → claude-sonnet-5  (balanced Claude, 1M context)
+  // haiku  → gpt-5.6-sol      (fallback model, 300K context)
+  var CLAUDE_DEFAULT_MODELS = {
+    opus: 'claude-opus-4.8',
+    sonnet: 'claude-sonnet-5',
+    haiku: 'gpt-5.6-sol'
+  };
+
   function claudeManualConfig(endpoint, apiKey, opus, sonnet, haiku) {
     endpoint = endpoint.replace(/\/v1$/, "");
     var env = { ANTHROPIC_BASE_URL: endpoint, ANTHROPIC_AUTH_TOKEN: apiKey, ANTHROPIC_API_KEY: apiKey };
@@ -161,13 +171,13 @@
     html += renderEndpointApiKeyFields(prefix);
     html += '<div class="form-group"><label data-i18n="cliTools.model"></label>';
     var slots = [
-      { key: 'opus', label: t('cliTools.opus'), param: 'ANTHROPIC_DEFAULT_OPUS_MODEL' },
-      { key: 'sonnet', label: t('cliTools.sonnet'), param: 'ANTHROPIC_DEFAULT_SONNET_MODEL' },
-      { key: 'haiku', label: t('cliTools.haiku'), param: 'ANTHROPIC_DEFAULT_HAIKU_MODEL' }
+      { key: 'opus', label: t('cliTools.opus'), param: 'ANTHROPIC_DEFAULT_OPUS_MODEL', hint: 'claude-opus-4.8' },
+      { key: 'sonnet', label: t('cliTools.sonnet'), param: 'ANTHROPIC_DEFAULT_SONNET_MODEL', hint: 'claude-sonnet-5' },
+      { key: 'haiku', label: t('cliTools.haiku'), param: 'ANTHROPIC_DEFAULT_HAIKU_MODEL', hint: 'gpt-5.6-sol' }
     ];
     var claudeState = window.claudeSlotState || {};
     slots.forEach(function (s, idx) {
-      var val = claudeState[s.key] || '';
+      var val = claudeState[s.key] || CLAUDE_DEFAULT_MODELS[s.key] || '';
       html += '<div class="cli-model-slot" style="display:flex;gap:0.5rem;align-items:center;margin-top:' + (idx > 0 ? '0.5rem' : '0.5rem') + ';">' +
         '<span style="font-size:0.75rem;font-weight:600;color:var(--muted-foreground);min-width:3.5rem;">' + s.label + '</span>' +
         '<input type="text" class="form-control claude-slot-input" style="flex:1;" data-i18n-placeholder="cliTools.modelPlaceholder" placeholder="provider/model-id" value="' + escapeAttr(val) + '" autocomplete="off" data-slot="' + s.key + '" />' +
@@ -194,9 +204,12 @@
     var apiKey = await getCliApiKey(prefix + '_ak', prefix + '_akCustom');
     var state = window.claudeSlotState || {};
     var env = { ANTHROPIC_BASE_URL: endpoint, ANTHROPIC_AUTH_TOKEN: apiKey };
-    if (state.opus) env.ANTHROPIC_DEFAULT_OPUS_MODEL = state.opus;
-    if (state.sonnet) env.ANTHROPIC_DEFAULT_SONNET_MODEL = state.sonnet;
-    if (state.haiku) env.ANTHROPIC_DEFAULT_HAIKU_MODEL = state.haiku;
+    var opusModel = state.opus || CLAUDE_DEFAULT_MODELS.opus;
+    var sonnetModel = state.sonnet || CLAUDE_DEFAULT_MODELS.sonnet;
+    var haikuModel = state.haiku || CLAUDE_DEFAULT_MODELS.haiku;
+    if (opusModel) env.ANTHROPIC_DEFAULT_OPUS_MODEL = opusModel;
+    if (sonnetModel) env.ANTHROPIC_DEFAULT_SONNET_MODEL = sonnetModel;
+    if (haikuModel) env.ANTHROPIC_DEFAULT_HAIKU_MODEL = haikuModel;
     var applyBtn = document.querySelector('.cli-tool-detail-body .btn-primary');
     if (applyBtn) { applyBtn.disabled = true; applyBtn.textContent = t('cliTools.applying'); }
     try {
@@ -219,7 +232,7 @@
     var endpoint = getEndpointValue('claude');
     var apiKey = await getCliApiKey('claude_ak', 'claude_akCustom');
     var state = window.claudeSlotState || {};
-    showManualConfigModal(claudeManualConfig(endpoint, apiKey || 'sk-your-api-key', state.opus || '', state.sonnet || '', state.haiku || ''));
+    showManualConfigModal(claudeManualConfig(endpoint, apiKey || 'sk-your-api-key', state.opus || CLAUDE_DEFAULT_MODELS.opus, state.sonnet || CLAUDE_DEFAULT_MODELS.sonnet, state.haiku || CLAUDE_DEFAULT_MODELS.haiku));
   };
   window.claudeReset = async function () {
     var confirmed = await confirmAction('Reset Claude Code configuration?', { confirmText: 'Reset', variant: 'danger' });
@@ -1638,10 +1651,11 @@
           if (!window.claudeSlotState) window.claudeSlotState = {};
           ['opus','sonnet','haiku'].forEach(function(k) {
             var envKey = 'ANTHROPIC_DEFAULT_' + k.toUpperCase() + '_MODEL';
-            if (s.env[envKey]) {
-              window.claudeSlotState[k] = s.env[envKey];
+            var modelVal = s.env[envKey] || (CLAUDE_DEFAULT_MODELS[k] || '');
+            if (modelVal) {
+              window.claudeSlotState[k] = modelVal;
               var inp = document.querySelector('.claude-slot-input[data-slot="' + k + '"]');
-              if (inp) inp.value = s.env[envKey];
+              if (inp) inp.value = modelVal;
             }
           });
         }

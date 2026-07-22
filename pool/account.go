@@ -1001,6 +1001,34 @@ func (p *AccountPool) GetAllAccounts() []config.Account {
 	return result
 }
 
+// GetAllAccountsFull returns ALL config accounts (including disabled,
+// banned, and quota-blocked ones) with live pool stats overlaid on top.
+// Unlike GetAllAccounts() which only returns routable pool accounts,
+// this returns every account the operator has configured — so the Quota
+// page and /status can show a complete picture with consistent totals.
+//
+// Accounts not currently in the pool (disabled/banned) retain their
+// last-persisted stats from config; accounts in the pool get live
+// in-memory stats overlaid. This ensures:
+//   - SUM of per-account tokens/requests == /status total tokens/requests
+//   - All accounts visible on Quota page (not just routable ones)
+//   - Banned/disabled accounts show their historical usage
+func (p *AccountPool) GetAllAccountsFull() []config.Account {
+	all := config.GetAccounts()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for i := range all {
+		if s, ok := p.stats[all[i].ID]; ok {
+			all[i].RequestCount = s.RequestCount
+			all[i].ErrorCount = s.ErrorCount
+			all[i].TotalTokens = s.TotalTokens
+			all[i].TotalCredits = s.TotalCredits
+			all[i].LastUsed = s.LastUsed
+		}
+	}
+	return all
+}
+
 func isOverUsageLimit(acc config.Account) bool {
 	if acc.UsageLimit > 0 && acc.UsageCurrent >= acc.UsageLimit {
 		return true
