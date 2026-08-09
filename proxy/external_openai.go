@@ -279,7 +279,7 @@ func kiroPayloadToOpenAIRequest(payload *KiroPayload, account *config.Account) (
 				"function": map[string]interface{}{
 					"name":        restoreToolName(payload, tw.ToolSpecification.Name),
 					"description": tw.ToolSpecification.Description,
-					"parameters":  tw.ToolSpecification.InputSchema.JSON,
+					"parameters":  sanitizeExternalToolSchema(tw.ToolSpecification.InputSchema.JSON),
 				},
 			})
 		}
@@ -308,6 +308,51 @@ func kiroPayloadToOpenAIRequest(payload *KiroPayload, account *config.Account) (
 	}
 
 	return body, nil
+}
+
+// sanitizeExternalToolSchema removes enum constraints that Gemini-compatible
+// gateways reject when an enum member is not a string. The property's type is
+// preserved, so boolean and numeric inputs remain correctly typed. A deep copy
+// keeps the Kiro payload reusable by other upstreams without mutation.
+func sanitizeExternalToolSchema(schema interface{}) interface{} {
+	cloned := cloneSchemaValue(schema)
+	cleanExternalToolSchema(cloned)
+	return cloned
+}
+
+func cleanExternalToolSchema(value interface{}) {
+	switch current := value.(type) {
+	case map[string]interface{}:
+		if enum, exists := current["enum"]; exists && !isNonEmptyStringEnum(enum) {
+			delete(current, "enum")
+		}
+		for _, child := range current {
+			cleanExternalToolSchema(child)
+		}
+	case []interface{}:
+		for _, child := range current {
+			cleanExternalToolSchema(child)
+		}
+	}
+}
+
+func isNonEmptyStringEnum(value interface{}) bool {
+	switch enum := value.(type) {
+	case []interface{}:
+		if len(enum) == 0 {
+			return false
+		}
+		for _, member := range enum {
+			if _, ok := member.(string); !ok {
+				return false
+			}
+		}
+		return true
+	case []string:
+		return len(enum) > 0
+	default:
+		return false
+	}
 }
 
 // openAIToolChoice converts Anthropic's tool_choice vocabulary to the

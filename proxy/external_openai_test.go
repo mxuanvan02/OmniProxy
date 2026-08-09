@@ -174,6 +174,79 @@ func TestKiroPayloadToOpenAIRequestRestoresToolNames(t *testing.T) {
 	}
 }
 
+func TestKiroPayloadToOpenAIRequestRemovesNonStringToolEnums(t *testing.T) {
+	initConfigForTests(t)
+
+	parameters := map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"enabled": map[string]interface{}{
+				"type": "boolean",
+				"enum": []interface{}{false},
+			},
+			"count": map[string]interface{}{
+				"type": "integer",
+				"enum": []interface{}{float64(1)},
+			},
+			"mode": map[string]interface{}{
+				"type": "string",
+				"enum": []interface{}{"fast", "safe"},
+			},
+			"value": map[string]interface{}{
+				"anyOf": []interface{}{
+					map[string]interface{}{
+						"type": "boolean",
+						"enum": []interface{}{false},
+					},
+					map[string]interface{}{"type": "null"},
+				},
+			},
+		},
+	}
+	req := &OpenAIRequest{
+		Model:    "google/gemini-test",
+		Messages: []OpenAIMessage{{Role: "user", Content: "use the tool"}},
+		Tools: []OpenAITool{{
+			Type: "function",
+			Function: struct {
+				Name        string      `json:"name"`
+				Description string      `json:"description"`
+				Parameters  interface{} `json:"parameters"`
+			}{Name: "configure", Description: "Configure a value", Parameters: parameters},
+		}},
+	}
+	payload := OpenAIToKiro(req, false)
+	payload.OriginalModel = req.Model
+
+	body, err := kiroPayloadToOpenAIRequest(payload, nil)
+	if err != nil {
+		t.Fatalf("kiroPayloadToOpenAIRequest: %v", err)
+	}
+	tools := body["tools"].([]map[string]interface{})
+	function := tools[0]["function"].(map[string]interface{})
+	schema := function["parameters"].(map[string]interface{})
+	properties := schema["properties"].(map[string]interface{})
+
+	for _, name := range []string{"enabled", "count"} {
+		property := properties[name].(map[string]interface{})
+		if _, exists := property["enum"]; exists {
+			t.Fatalf("non-string enum for %s was not removed: %#v", name, property)
+		}
+	}
+	valueAnyOf := properties["value"].(map[string]interface{})["anyOf"].([]interface{})
+	if _, exists := valueAnyOf[0].(map[string]interface{})["enum"]; exists {
+		t.Fatalf("nested non-string enum was not removed: %#v", valueAnyOf[0])
+	}
+	if got := properties["mode"].(map[string]interface{})["enum"]; !reflect.DeepEqual(got, []interface{}{"fast", "safe"}) {
+		t.Fatalf("valid string enum changed: %#v", got)
+	}
+
+	originalEnabled := parameters["properties"].(map[string]interface{})["enabled"].(map[string]interface{})
+	if _, exists := originalEnabled["enum"]; !exists {
+		t.Fatal("outbound sanitization mutated the caller's schema")
+	}
+}
+
 func TestClaudeToolChoiceReachesExternalOpenAIRequest(t *testing.T) {
 	initConfigForTests(t)
 
