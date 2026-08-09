@@ -2,10 +2,10 @@ package proxy
 
 import (
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"omniproxy/config"
 	"omniproxy/logger"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -30,26 +30,29 @@ const (
 
 // RequestRecord is a single usage event captured during a proxy request.
 type RequestRecord struct {
-	Timestamp          string  `json:"timestamp"`
-	Model              string  `json:"model"`
-	Provider           string  `json:"provider"`
-	AccountID          string  `json:"accountId"`
-	AccountName        string  `json:"accountName"`
-	InputTokens        int     `json:"inputTokens"`
-	OutputTokens       int     `json:"outputTokens"`
-	Cost               float64 `json:"cost"` // upstream-reported credits (legacy)
-	RealCost           float64 `json:"realCost,omitempty"` // USD computed from model pricing
-	InputCost          float64 `json:"inputCost,omitempty"` // USD for uncached input tokens
-	CachedCost         float64 `json:"cachedCost,omitempty"` // USD for cached input tokens (cache-read rate)
-	OutputCost         float64 `json:"outputCost,omitempty"` // USD for output tokens
-	EffectiveTokens    int     `json:"effectiveTokens,omitempty"` // (input - cached) + output
-	Status             string  `json:"status"`
-	Endpoint           string  `json:"endpoint"`
-	APIKeyID           string  `json:"apiKeyId,omitempty"`
-	Error              string  `json:"error,omitempty"`
-	CacheReadTokens    int     `json:"cacheReadTokens,omitempty"`
-	CacheCreateTokens  int     `json:"cacheCreateTokens,omitempty"`
-	CachedTokens       int     `json:"cachedTokens,omitempty"` // OpenAI-style cached prompt tokens
+	Timestamp                  string  `json:"timestamp"`
+	Model                      string  `json:"model"`
+	Provider                   string  `json:"provider"`
+	AccountID                  string  `json:"accountId"`
+	AccountName                string  `json:"accountName"`
+	InputTokens                int     `json:"inputTokens"`
+	OutputTokens               int     `json:"outputTokens"`
+	Cost                       float64 `json:"cost"`                      // upstream-reported credits (legacy)
+	RealCost                   float64 `json:"realCost,omitempty"`        // USD computed from model pricing
+	InputCost                  float64 `json:"inputCost,omitempty"`       // USD for uncached input tokens
+	CachedCost                 float64 `json:"cachedCost,omitempty"`      // USD for cached input tokens (cache-read rate)
+	OutputCost                 float64 `json:"outputCost,omitempty"`      // USD for output tokens
+	EffectiveTokens            int     `json:"effectiveTokens,omitempty"` // (input - cached) + output
+	Status                     string  `json:"status"`
+	Endpoint                   string  `json:"endpoint"`
+	APIKeyID                   string  `json:"apiKeyId,omitempty"`
+	Error                      string  `json:"error,omitempty"`
+	CacheReadTokens            int     `json:"cacheReadTokens,omitempty"`
+	CacheCreateTokens          int     `json:"cacheCreateTokens,omitempty"`
+	CachedTokens               int     `json:"cachedTokens,omitempty"` // OpenAI-style cached prompt tokens
+	CacheSource                string  `json:"cacheSource,omitempty"`  // upstream, estimated, or none
+	EstimatedCacheReadTokens   int     `json:"estimatedCacheReadTokens,omitempty"`
+	EstimatedCacheCreateTokens int     `json:"estimatedCacheCreateTokens,omitempty"`
 }
 
 // PeriodSummary holds aggregated stats for a single time bucket.
@@ -59,18 +62,26 @@ type RequestRecord struct {
 // omitempty + nil on legacy daily files and on the nested per-dimension
 // summaries (which never carry their own sub-breakdowns).
 type PeriodSummary struct {
-	Requests         int     `json:"requests"`
-	PromptTokens     int     `json:"promptTokens"`
-	CompletionTokens int     `json:"completionTokens"`
-	Cost             float64 `json:"cost"` // legacy upstream-reported credits
-	RealCost         float64 `json:"realCost,omitempty"` // USD from ComputeCost
-	InputCost        float64 `json:"inputCost,omitempty"` // USD for uncached input
-	CachedCost       float64 `json:"cachedCost,omitempty"` // USD for cached input
-	OutputCost       float64 `json:"outputCost,omitempty"` // USD for output
-	EffectiveTokens  int     `json:"effectiveTokens,omitempty"` // (input - cached) + output
-	CacheReadTokens  int     `json:"cacheReadTokens,omitempty"`
-	CacheCreateTokens int    `json:"cacheCreateTokens,omitempty"`
-	CachedTokens     int     `json:"cachedTokens,omitempty"`
+	Requests          int     `json:"requests"`
+	PromptTokens      int     `json:"promptTokens"`
+	CompletionTokens  int     `json:"completionTokens"`
+	Cost              float64 `json:"cost"`                      // legacy upstream-reported credits
+	RealCost          float64 `json:"realCost,omitempty"`        // USD from ComputeCost
+	InputCost         float64 `json:"inputCost,omitempty"`       // USD for uncached input
+	CachedCost        float64 `json:"cachedCost,omitempty"`      // USD for cached input
+	OutputCost        float64 `json:"outputCost,omitempty"`      // USD for output
+	EffectiveTokens   int     `json:"effectiveTokens,omitempty"` // (input - cached) + output
+	CacheReadTokens   int     `json:"cacheReadTokens,omitempty"`
+	CacheCreateTokens int     `json:"cacheCreateTokens,omitempty"`
+	CachedTokens      int     `json:"cachedTokens,omitempty"`
+	// UpstreamCache* only contains source-tagged records written after cache
+	// telemetry was made authoritative. Legacy cache counters may include local
+	// predictions and remain available only for backwards-compatible history.
+	UpstreamCacheReadTokens    int `json:"upstreamCacheReadTokens,omitempty"`
+	UpstreamCacheCreateTokens  int `json:"upstreamCacheCreateTokens,omitempty"`
+	UpstreamCachedTokens       int `json:"upstreamCachedTokens,omitempty"`
+	EstimatedCacheReadTokens   int `json:"estimatedCacheReadTokens,omitempty"`
+	EstimatedCacheCreateTokens int `json:"estimatedCacheCreateTokens,omitempty"`
 
 	ByModel    map[string]*PeriodSummary `json:"byModel,omitempty"`
 	ByAccount  map[string]*PeriodSummary `json:"byAccount,omitempty"`
@@ -80,26 +91,43 @@ type PeriodSummary struct {
 
 // UsageStats holds the full response for the usage stats endpoint.
 type UsageStats struct {
-	TotalRequests         int                       `json:"totalRequests"`
-	TotalPromptTokens     int                       `json:"totalPromptTokens"`
-	TotalCompletionTokens int                       `json:"totalCompletionTokens"`
-	TotalCost             float64                   `json:"totalCost"` // legacy credits
-	TotalRealCost         float64                   `json:"totalRealCost,omitempty"` // USD from pricing
-	TotalInputCost        float64                   `json:"totalInputCost,omitempty"` // USD uncached input
-	TotalCachedCost       float64                   `json:"totalCachedCost,omitempty"` // USD cached input
-	TotalOutputCost       float64                   `json:"totalOutputCost,omitempty"` // USD output
-	TotalEffectiveTokens  int                       `json:"totalEffectiveTokens,omitempty"` // (input-cached)+output
-	TotalCacheReadTokens  int                       `json:"totalCacheReadTokens,omitempty"`
-	TotalCacheCreateTokens int                      `json:"totalCacheCreateTokens,omitempty"`
-	TotalCachedTokens     int                       `json:"totalCachedTokens,omitempty"`
-	ActiveRequests        []ActiveRequest           `json:"activeRequests"`
-	RecentRequests        []RequestRecord           `json:"recentRequests"`
-	ByModel               map[string]*PeriodSummary `json:"byModel"`
-	ByAccount             map[string]*PeriodSummary `json:"byAccount"`
-	ByAPIKey              map[string]*PeriodSummary `json:"byApiKey"`
-	ByEndpoint            map[string]*PeriodSummary `json:"byEndpoint"`
-	ErrorProvider         string                    `json:"errorProvider"`
-	AccountNames          map[string]string         `json:"accountNames"`
+	TotalRequests                   int                       `json:"totalRequests"`
+	TotalPromptTokens               int                       `json:"totalPromptTokens"`
+	TotalCompletionTokens           int                       `json:"totalCompletionTokens"`
+	TotalCost                       float64                   `json:"totalCost"`                      // legacy credits
+	TotalRealCost                   float64                   `json:"totalRealCost,omitempty"`        // USD from pricing
+	TotalInputCost                  float64                   `json:"totalInputCost,omitempty"`       // USD uncached input
+	TotalCachedCost                 float64                   `json:"totalCachedCost,omitempty"`      // USD cached input
+	TotalOutputCost                 float64                   `json:"totalOutputCost,omitempty"`      // USD output
+	TotalEffectiveTokens            int                       `json:"totalEffectiveTokens,omitempty"` // (input-cached)+output
+	TotalCacheReadTokens            int                       `json:"totalCacheReadTokens,omitempty"`
+	TotalCacheCreateTokens          int                       `json:"totalCacheCreateTokens,omitempty"`
+	TotalCachedTokens               int                       `json:"totalCachedTokens,omitempty"`
+	TotalUpstreamCacheReadTokens    int                       `json:"totalUpstreamCacheReadTokens,omitempty"`
+	TotalUpstreamCacheCreateTokens  int                       `json:"totalUpstreamCacheCreateTokens,omitempty"`
+	TotalUpstreamCachedTokens       int                       `json:"totalUpstreamCachedTokens,omitempty"`
+	TotalEstimatedCacheReadTokens   int                       `json:"totalEstimatedCacheReadTokens,omitempty"`
+	TotalEstimatedCacheCreateTokens int                       `json:"totalEstimatedCacheCreateTokens,omitempty"`
+	ActiveRequests                  []ActiveRequest           `json:"activeRequests"`
+	RecentRequests                  []RequestRecord           `json:"recentRequests"`
+	ByModel                         map[string]*PeriodSummary `json:"byModel"`
+	ByAccount                       map[string]*PeriodSummary `json:"byAccount"`
+	ByAPIKey                        map[string]*PeriodSummary `json:"byApiKey"`
+	ByEndpoint                      map[string]*PeriodSummary `json:"byEndpoint"`
+	ErrorProvider                   string                    `json:"errorProvider"`
+	AccountNames                    map[string]string         `json:"accountNames"`
+}
+
+// cacheHitTokens returns the number of prompt tokens served from cache. When
+// effective tokens are available, they retain the per-request cache clamping
+// applied at ingestion and are therefore the authoritative aggregate source.
+// Legacy aggregates without effective tokens fall back to their two cache
+// counters and remain bounded by input tokens.
+func cacheHitTokens(input, output, effective, cacheRead, cachedTokens int) int {
+	if effective > 0 {
+		return clampInt(input+output-effective, 0, input)
+	}
+	return clampInt(cacheRead+cachedTokens, 0, input)
 }
 
 // ActiveRequest represents an in-flight request for the topology.
@@ -340,6 +368,13 @@ func (t *UsageTracker) Append(r RequestRecord) {
 	day.CacheReadTokens += r.CacheReadTokens
 	day.CacheCreateTokens += r.CacheCreateTokens
 	day.CachedTokens += r.CachedTokens
+	if r.CacheSource == "upstream" {
+		day.UpstreamCacheReadTokens += r.CacheReadTokens
+		day.UpstreamCacheCreateTokens += r.CacheCreateTokens
+		day.UpstreamCachedTokens += r.CachedTokens
+	}
+	day.EstimatedCacheReadTokens += r.EstimatedCacheReadTokens
+	day.EstimatedCacheCreateTokens += r.EstimatedCacheCreateTokens
 
 	// Per-day breakdowns so the By* tables survive past the ring buffer cap.
 	if day.ByModel == nil {
@@ -468,6 +503,31 @@ func (t *UsageTracker) GetStats(period string) *UsageStats {
 	return stats
 }
 
+// TokensForAccountSince returns the persisted input plus output token total for
+// one account from the UTC day containing since through the current day. Daily
+// usage is the durable accounting source: the in-memory request ring is capped
+// at 500 records and must not be used for a quota window that can span days.
+func (t *UsageTracker) TokensForAccountSince(accountID string, since time.Time) int {
+	if t == nil || accountID == "" || since.IsZero() {
+		return 0
+	}
+
+	cutoffDate := since.UTC().Format("2006-01-02")
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	tokens := 0
+	for dateKey, day := range t.dailyData {
+		if dateKey < cutoffDate || day == nil || day.ByAccount == nil {
+			continue
+		}
+		if account, ok := day.ByAccount[accountID]; ok && account != nil {
+			tokens += account.PromptTokens + account.CompletionTokens
+		}
+	}
+	return tokens
+}
+
 // GetChartData produces time-bucketed chart data.
 func (t *UsageTracker) GetChartData(period string) []ChartDataPoint {
 	t.mu.RLock()
@@ -590,6 +650,13 @@ func addToSummaryMap(m map[string]*PeriodSummary, key string, r RequestRecord) {
 	s.CacheReadTokens += r.CacheReadTokens
 	s.CacheCreateTokens += r.CacheCreateTokens
 	s.CachedTokens += r.CachedTokens
+	if r.CacheSource == "upstream" {
+		s.UpstreamCacheReadTokens += r.CacheReadTokens
+		s.UpstreamCacheCreateTokens += r.CacheCreateTokens
+		s.UpstreamCachedTokens += r.CachedTokens
+	}
+	s.EstimatedCacheReadTokens += r.EstimatedCacheReadTokens
+	s.EstimatedCacheCreateTokens += r.EstimatedCacheCreateTokens
 }
 
 // mergeSummaryInto folds one source breakdown map into a destination, summing
@@ -616,6 +683,11 @@ func mergeSummaryMapInto(dst, src map[string]*PeriodSummary) {
 		d.CacheReadTokens += s.CacheReadTokens
 		d.CacheCreateTokens += s.CacheCreateTokens
 		d.CachedTokens += s.CachedTokens
+		d.UpstreamCacheReadTokens += s.UpstreamCacheReadTokens
+		d.UpstreamCacheCreateTokens += s.UpstreamCacheCreateTokens
+		d.UpstreamCachedTokens += s.UpstreamCachedTokens
+		d.EstimatedCacheReadTokens += s.EstimatedCacheReadTokens
+		d.EstimatedCacheCreateTokens += s.EstimatedCacheCreateTokens
 	}
 }
 
@@ -645,6 +717,11 @@ func (t *UsageTracker) sumDailyTotalsLocked(stats *UsageStats, period string) {
 		stats.TotalCacheReadTokens += day.CacheReadTokens
 		stats.TotalCacheCreateTokens += day.CacheCreateTokens
 		stats.TotalCachedTokens += day.CachedTokens
+		stats.TotalUpstreamCacheReadTokens += day.UpstreamCacheReadTokens
+		stats.TotalUpstreamCacheCreateTokens += day.UpstreamCacheCreateTokens
+		stats.TotalUpstreamCachedTokens += day.UpstreamCachedTokens
+		stats.TotalEstimatedCacheReadTokens += day.EstimatedCacheReadTokens
+		stats.TotalEstimatedCacheCreateTokens += day.EstimatedCacheCreateTokens
 
 		// Merge each day's per-dimension breakdown so the By* tables are also
 		// lifetime-accurate instead of capped at the ring buffer size. Legacy
@@ -659,14 +736,18 @@ func (t *UsageTracker) sumDailyTotalsLocked(stats *UsageStats, period string) {
 
 // dailyCutoffDate returns the earliest UTC date ("2006-01-02") to include for a
 // period, or "" to include every day. Daily buckets have day granularity, so
-// sub-day periods (today/24h) both collapse to "today in UTC".
+// "today" only counts the current UTC day, while "24h" rolls back one UTC day
+// so it also includes (part of) yesterday — matching the rolling-24h semantics
+// used by getPeriodCutoff for the recent-requests feed and chart.
 func dailyCutoffDate(period string) string {
 	now := time.Now().UTC()
 	switch period {
 	case "all":
 		return ""
-	case "today", "24h":
+	case "today":
 		return now.Format("2006-01-02")
+	case "24h":
+		return now.AddDate(0, 0, -1).Format("2006-01-02")
 	case "7d":
 		return now.AddDate(0, 0, -6).Format("2006-01-02")
 	case "30d":

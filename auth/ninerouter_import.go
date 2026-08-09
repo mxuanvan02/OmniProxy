@@ -9,14 +9,9 @@
 //   - accessToken  / refreshToken / apiKey / expiresAt (ISO-8601)
 //   - providerSpecificData (provider-specific blob)
 //
-// OmniProxy only imports the two provider types it can actually route:
-//   - codex  → AuthMethod="codex",        ChatGPTAccountID from providerSpecificData.chatgptAccountId
-//   - kiro   → AuthMethod="idc"/"social", ProfileArn     from providerSpecificData.profileArn
-//
-// Other providers (qwen, openrouter, ollama, vertex, ...) are skipped —
-// they don't map to either the Kiro/AWS backend or the Codex /v1/responses
-// backend, and importing them as external_openai would require per-provider
-// base URL discovery which 9router doesn't expose cleanly.
+// Codex and Kiro retain their native import paths. Other valid connections are
+// returned as generic imports so the caller can assign a capability-specific
+// adapter instead of pretending every provider is OpenAI-compatible chat.
 package auth
 
 import (
@@ -24,6 +19,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -56,18 +52,25 @@ type NineRouterImportedAccount struct {
 	Name             string // display name from 9router
 	AccessToken      string
 	RefreshToken     string
-	ExpiresAt        int64 // Unix seconds; 0 if unparseable
+	ExpiresAt        int64  // Unix seconds; 0 if unparseable
 	ChatGPTAccountID string // codex only
 	ProfileArn       string // kiro only
 	PlanType         string // codex: "plus" | "free" | "pro"
+	AuthType         string
+	APIKey           string
+	BaseURL          string
+	ProxyURL         string
+	ProviderKind     string
+	Capabilities     []string
 }
 
 // NineRouterImportResult is what ReadNineRouterDB returns to the handler.
 type NineRouterImportResult struct {
-	Codex []NineRouterImportedAccount
-	Kiro  []NineRouterImportedAccount
+	Codex   []NineRouterImportedAccount
+	Kiro    []NineRouterImportedAccount
+	Generic []NineRouterImportedAccount
 	Skipped []string // provider names that were skipped
-	Path   string    // db.json path that was read
+	Path    string   // db.json path that was read
 }
 
 // nineRouterDBPath returns the default ~/.9router/db.json path. Can be
@@ -83,8 +86,9 @@ func nineRouterDBPath() (string, error) {
 	return filepath.Join(home, ".9router", "db.json"), nil
 }
 
-// ReadNineRouterDB reads ~/.9router/db.json and extracts codex + kiro
-// accounts. Other providers are listed in result.Skipped.
+// ReadNineRouterDB reads ~/.9router/db.json and extracts all connections with
+// usable credentials. Unknown or malformed connections are listed in
+// result.Skipped; the handler decides whether a generic provider is routable.
 //
 // The caller (handler) is responsible for dedup, token refresh, and
 // config.AddAccount — this function only parses + normalizes.
@@ -122,13 +126,23 @@ func ReadNineRouterDB() (*NineRouterImportResult, error) {
 				skipped["kiro (invalid)"] = true
 			}
 		default:
-			skipped[conn.Provider] = true
+			acc := parseNineRouterGeneric(conn)
+			if acc != nil {
+				result.Generic = append(result.Generic, *acc)
+			} else {
+				name := strings.TrimSpace(conn.Provider)
+				if name == "" {
+					name = "unknown"
+				}
+				skipped[name+" (invalid)"] = true
+			}
 		}
 	}
 
 	for name := range skipped {
 		result.Skipped = append(result.Skipped, name)
 	}
+	sort.Strings(result.Skipped)
 	return result, nil
 }
 
@@ -160,6 +174,7 @@ func parseNineRouterCodex(conn NineRouterConnection) *NineRouterImportedAccount 
 		ExpiresAt:        parseNineRouterExpiry(conn.ExpiresAt),
 		ChatGPTAccountID: accountID,
 		PlanType:         planType,
+		AuthType:         strings.TrimSpace(conn.AuthType),
 	}
 }
 
@@ -184,6 +199,68 @@ func parseNineRouterKiro(conn NineRouterConnection) *NineRouterImportedAccount {
 		RefreshToken: strings.TrimSpace(conn.RefreshToken),
 		ExpiresAt:    parseNineRouterExpiry(conn.ExpiresAt),
 		ProfileArn:   profileArn,
+		AuthType:     strings.TrimSpace(conn.AuthType),
+	}
+}
+
+func parseNineRouterGeneric(conn NineRouterConnection) *NineRouterImportedAccount {
+	provider := strings.ToLower(strings.TrimSpace(conn.Provider))
+	if provider == "" {
+		return nil
+	}
+	apiKey := strings.TrimSpace(conn.APIKey)
+	accessToken := strings.TrimSpace(conn.AccessToken)
+	if apiKey == "" && accessToken == "" {
+		return nil
+	}
+	baseURL := ""
+	proxyURL := ""
+	if conn.ProviderSpecificData != nil {
+		for _, key := range []string{"baseUrl", "baseURL", "endpoint", "resourceUrl"} {
+			if value, ok := conn.ProviderSpecificData[key].(string); ok && strings.TrimSpace(value) != "" {
+				baseURL = strings.TrimSpace(value)
+				break
+			}
+		}
+		if enabled, ok := conn.ProviderSpecificData["connectionProxyEnabled"].(bool); ok && enabled {
+			if value, ok := conn.ProviderSpecificData["connectionProxyUrl"].(string); ok {
+				proxyURL = strings.TrimSpace(value)
+			}
+		}
+	}
+	capabilities := []string{}
+	providerKind := "unsupported"
+	switch provider {
+	case "tavily", "exa", "firecrawl", "jina-reader":
+		capabilities = []string{"search"}
+		providerKind = "search"
+	case "openrouter":
+		// 9router does not expose an OpenRouter chat base URL in the
+		// connection record. Keep the credential routable for the native image
+		// adapter, but do not pretend it is an OpenAI-compatible chat account.
+		capabilities = []string{"image"}
+		providerKind = "image"
+	case "openai-compatible", "openai-compatible-chat":
+		capabilities = []string{"chat"}
+		providerKind = "chat"
+	}
+	if strings.HasPrefix(provider, "openai-compatible-chat") {
+		capabilities = []string{"chat"}
+		providerKind = "chat"
+	}
+	return &NineRouterImportedAccount{
+		SourceID:     strings.TrimSpace(conn.ID),
+		Provider:     provider,
+		Name:         strings.TrimSpace(conn.Name),
+		AccessToken:  accessToken,
+		RefreshToken: strings.TrimSpace(conn.RefreshToken),
+		APIKey:       apiKey,
+		AuthType:     strings.TrimSpace(conn.AuthType),
+		ExpiresAt:    parseNineRouterExpiry(conn.ExpiresAt),
+		BaseURL:      baseURL,
+		ProxyURL:     proxyURL,
+		ProviderKind: providerKind,
+		Capabilities: capabilities,
 	}
 }
 

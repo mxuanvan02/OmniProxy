@@ -189,7 +189,8 @@ func SetExtraModels(ids []string) error {
 	if cfg == nil {
 		return errors.New("config not initialized")
 	}
-	cfg.ExtraModels = ids
+	cfg.ExtraModels = append([]string(nil), ids...)
+	extraModelsExplicit = true
 	return saveLocked()
 }
 

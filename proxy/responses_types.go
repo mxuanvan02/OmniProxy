@@ -3,17 +3,27 @@ package proxy
 import "encoding/json"
 
 type ResponsesRequest struct {
-	Model              string            `json:"model"`
-	Input              json.RawMessage   `json:"input"`
-	Instructions       string            `json:"instructions,omitempty"`
-	Stream             bool              `json:"stream,omitempty"`
-	Tools              []OpenAITool      `json:"tools,omitempty"`
-	ToolChoice         json.RawMessage   `json:"tool_choice,omitempty"`
-	PreviousResponseID string            `json:"previous_response_id,omitempty"`
-	Store              *bool             `json:"store,omitempty"`
-	Temperature        *float64          `json:"temperature,omitempty"`
-	MaxOutputTokens    *int              `json:"max_output_tokens,omitempty"`
-	Metadata           map[string]string `json:"metadata,omitempty"`
+	Model              string             `json:"model"`
+	Input              json.RawMessage    `json:"input"`
+	Instructions       string             `json:"instructions,omitempty"`
+	Stream             bool               `json:"stream,omitempty"`
+	Tools              []OpenAITool       `json:"tools,omitempty"`
+	ToolChoice         json.RawMessage    `json:"tool_choice,omitempty"`
+	PreviousResponseID string             `json:"previous_response_id,omitempty"`
+	Store              *bool              `json:"store,omitempty"`
+	Temperature        *float64           `json:"temperature,omitempty"`
+	MaxOutputTokens    *int               `json:"max_output_tokens,omitempty"`
+	Metadata           map[string]string  `json:"metadata,omitempty"`
+	// Reasoning carries the Codex CLI / OpenAI Responses API reasoning
+	// config. Codex CLI sends this when model_reasoning_effort is set in
+	// config.toml. The Effort field is forwarded to the upstream Codex
+	// backend so the reasoning budget actually takes effect.
+	Reasoning          *ResponsesReasoning `json:"reasoning,omitempty"`
+}
+
+// ResponsesReasoning mirrors the OpenAI Responses API "reasoning" object.
+type ResponsesReasoning struct {
+	Effort string `json:"effort,omitempty"`
 }
 
 type ResponsesObject struct {

@@ -986,6 +986,8 @@ let customSelectRefreshQueued = false;
       else if (action === 'refreshToken') refreshAccountToken(id);
       else if (action === 'resetQuota') resetAccountQuota(id, btn.closest('.account-card'));
       else if (action === 'reauth') reauthAccount(id, btn);
+      else if (action === 'loginAgain') loginCodexAgain(id);
+      else if (action === 'changeCodexPassword') changeCodexPassword(id);
     });
   }
 
@@ -1064,6 +1066,9 @@ let customSelectRefreshQueued = false;
       else if (a === 'refreshModels') refreshAccountModels(id);
       else if (a === 'refreshCredits') refreshAccountCredits(id);
       else if (a === 'refreshToken') refreshAccountToken(id);
+      else if (a === 'restoreCodexRefreshToken') restoreCodexRefreshToken(id);
+      else if (a === 'saveCodexImageModel') saveCodexImageModel(id);
+      else if (a === 'saveImageModel') saveImageModel(id);
       else if (a === 'refresh') refreshAccount(id);
     });
   }
@@ -1072,16 +1077,27 @@ let customSelectRefreshQueued = false;
     $('testBody').addEventListener('click', e => {
       if (e.target.id === 'testLogClear') { clearTestLog(); return; }
       if (e.target.id === 'testModalCancelBtn') { closeTestModal(); return; }
+      const mode = e.target.closest('[data-test-mode]');
+      if (mode) {
+        testModalMode = mode.dataset.testMode === 'image' ? 'image' : mode.dataset.testMode === 'search' ? 'search' : 'chat';
+        renderTestModal();
+        return;
+      }
+      const action = e.target.closest('[data-test-action]');
+      if (action && action.dataset.testAction === 'refresh-image-models') {
+        refreshTestImageModels(testModalAccountId);
+        return;
+      }
       const run = e.target.closest('#testRunBtn');
-      if (run) runTestAccount(run.dataset.id, getTestModelValue());
+      if (run) runTestAccount(run.dataset.id, getTestRequest());
     });
     $('testBody').addEventListener('keydown', e => {
       if (e.key !== 'Enter') return;
-      if (!e.target.closest('#testModelChoice')) return;
+      if (!e.target.closest('#testModelChoice, #testSearchQuery, #testSearchURL, #testImageModelCustom')) return;
       const run = $('testRunBtn');
       if (!run || run.disabled) return;
       e.preventDefault();
-      runTestAccount(run.dataset.id, getTestModelValue());
+      runTestAccount(run.dataset.id, getTestRequest());
     });
   }
 

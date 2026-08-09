@@ -4,11 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
+	neturl "net/url"
 	"omniproxy/auth"
 	"omniproxy/config"
 	"omniproxy/logger"
-	"net/http"
-	neturl "net/url"
 	"strings"
 	"time"
 )
@@ -369,7 +369,7 @@ func RefreshAccountInfo(account *config.Account) (*config.AccountInfo, error) {
 		needsUpdate = true
 	}
 	if needsUpdate {
-		if updateErr := config.UpdateAccount(account.ID, updatedAccount); updateErr != nil {
+		if updateErr := config.UpdateAccountPreservingCredentials(account.ID, updatedAccount); updateErr != nil {
 			logger.Errorf("[RefreshAccountInfo] Failed to update account status: %v", updateErr)
 		}
 	}
@@ -520,9 +520,28 @@ type ModelInfo struct {
 	ModelName      string   `json:"modelName"`
 	Description    string   `json:"description"`
 	InputTypes     []string `json:"supportedInputTypes"`
+	OutputTypes    []string `json:"supportedOutputTypes,omitempty"`
+	Modalities     []string `json:"modalities,omitempty"`
 	RateMultiplier float64  `json:"rateMultiplier"`
-	TokenLimits    *struct {
+	// Provider is populated by the cache for model discovery. It is kept out
+	// of the upstream Kiro JSON shape because the API does not return it.
+	Provider    string `json:"-"`
+	TokenLimits *struct {
 		MaxInputTokens  int `json:"maxInputTokens"`
 		MaxOutputTokens int `json:"maxOutputTokens"`
 	} `json:"tokenLimits"`
+}
+
+// modelSupportsImageOutput is intentionally stricter than the input/vision
+// check. A model accepting image input is not necessarily able to generate an
+// image, so only explicit output metadata is treated as image generation
+// support.
+func modelSupportsImageOutput(model ModelInfo) bool {
+	for _, value := range append(append([]string{}, model.OutputTypes...), model.Modalities...) {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if strings.Contains(value, "image") && (strings.Contains(value, "output") || strings.Contains(value, "generate") || value == "image") {
+			return true
+		}
+	}
+	return false
 }

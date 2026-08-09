@@ -13,7 +13,9 @@
 // to the authorize URL, captures the authorization code on callback, and
 // exchanges it for an access_token (JWT) + refresh_token. The ChatGPT
 // account_id is extracted from the JWT's
-//   payload["https://api.openai.com/auth"].chatgpt_account_id
+//
+//	payload["https://api.openai.com/auth"].chatgpt_account_id
+//
 // claim and sent as the `chatgpt-account-id` header on every /v1/responses
 // call to the Codex backend.
 //
@@ -30,6 +32,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -39,7 +44,7 @@ import (
 // and confirmed by multiple third-party reimplementations). These are public
 // values shipped in every Codex CLI install; they are not secrets.
 const (
-	codexClientID    = "app_EMoamEEZ73f0CkXaXp7hrann"
+	codexClientID     = "app_EMoamEEZ73f0CkXaXp7hrann"
 	codexAuthorizeURL = "https://auth.openai.com/oauth/authorize"
 	codexTokenURL     = "https://auth.openai.com/oauth/token"
 	codexRedirectURI  = "http://localhost:1455/auth/callback"
@@ -55,7 +60,7 @@ const (
 type CodexTokens struct {
 	AccessToken  string
 	RefreshToken string
-	ExpiresAt    int64 // Unix seconds
+	ExpiresAt    int64  // Unix seconds
 	AccountID    string // chatgpt_account_id extracted from the JWT
 }
 
@@ -63,14 +68,25 @@ type CodexTokens struct {
 // Only one Codex login can be active at a time because OpenAI registers a
 // fixed redirect port (1455); concurrent logins would collide on the port.
 type CodexLoginSession struct {
-	Verifier    string
-	State       string
-	AuthURL     string
-	StartedAt   time.Time
-	ExpiresAt   time.Time
-	codeChan    chan string
-	errChan     chan error
-	server      *http.Server
+	Verifier  string
+	State     string
+	AuthURL   string
+	StartedAt time.Time
+	ExpiresAt time.Time
+	// TargetAccountID and ProfileDir are set only when an operator is
+	// linking a persistent browser profile to an existing Codex account.
+	TargetAccountID string
+	ProfileDir      string
+	// approvalStatus is used only by the persistent-profile callback page. It
+	// remains pending until the admin handler has exchanged the OAuth code and
+	// verified that the JWT belongs to TargetAccountID.
+	approvalStatus string
+	codeChan       chan string
+	errChan        chan error
+	server         *http.Server
+
+	browserMu  sync.Mutex
+	browserCmd *exec.Cmd
 }
 
 var (
@@ -96,6 +112,20 @@ func generateCodexState() string {
 // Only one Codex login may be active at a time. Calling StartCodexLogin while
 // another session is in flight returns an error.
 func StartCodexLogin() (*CodexLoginSession, error) {
+	return startCodexLogin("", "")
+}
+
+// StartCodexLoginForAccount starts the standard PKCE flow in a persistent,
+// account-scoped browser profile. The caller must validate the returned JWT
+// account ID before treating the profile as linked to TargetAccountID.
+func StartCodexLoginForAccount(profileDir, targetAccountID string) (*CodexLoginSession, error) {
+	if strings.TrimSpace(profileDir) == "" || strings.TrimSpace(targetAccountID) == "" {
+		return nil, fmt.Errorf("codex login: persistent profile and target account are required")
+	}
+	return startCodexLogin(profileDir, targetAccountID)
+}
+
+func startCodexLogin(profileDir, targetAccountID string) (*CodexLoginSession, error) {
 	codexLoginMu.Lock()
 	defer codexLoginMu.Unlock()
 
@@ -124,16 +154,32 @@ func StartCodexLogin() (*CodexLoginSession, error) {
 	authURL := codexAuthorizeURL + "?" + q.Encode()
 
 	session := &CodexLoginSession{
-		Verifier:  verifier,
-		State:     state,
-		AuthURL:   authURL,
-		StartedAt: time.Now(),
-		ExpiresAt: time.Now().Add(10 * time.Minute),
-		codeChan:  make(chan string, 1),
-		errChan:   make(chan error, 1),
+		Verifier:        verifier,
+		State:           state,
+		AuthURL:         authURL,
+		StartedAt:       time.Now(),
+		ExpiresAt:       time.Now().Add(10 * time.Minute),
+		TargetAccountID: targetAccountID,
+		ProfileDir:      profileDir,
+		codeChan:        make(chan string, 1),
+		errChan:         make(chan error, 1),
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/callback/status", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("state") != state {
+			http.Error(w, "state mismatch", http.StatusBadRequest)
+			return
+		}
+		codexLoginMu.Lock()
+		status := "pending"
+		if codexLoginCurrent == session && session.approvalStatus != "" {
+			status = session.approvalStatus
+		}
+		codexLoginMu.Unlock()
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": status})
+	})
 	mux.HandleFunc("/auth/callback", func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		if q.Get("state") != state {
@@ -155,13 +201,30 @@ func StartCodexLogin() (*CodexLoginSession, error) {
 			http.Error(w, "missing code", http.StatusBadRequest)
 			return
 		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		if session.ProfileDir != "" {
+			// Do not expose Security until the admin handler exchanges this code
+			// and verifies the JWT account ID. The state is a PKCE nonce and is
+			// checked again by the local status endpoint.
+			stateJSON, _ := json.Marshal(state)
+			fmt.Fprintf(w, "<html><body><script>const s=%s;const check=async()=>{try{const r=await fetch('/auth/callback/status?state='+encodeURIComponent(s));const d=await r.json();if(d.status==='approved'){location.replace('https://chatgpt.com/#settings/Security');return}if(d.status==='rejected'){window.close();return}}catch(_){}setTimeout(check,500)};check()</script></body></html>", stateJSON)
+		} else {
+			fmt.Fprint(w, "<html><body><script>window.close()</script></body></html>")
+		}
 		select {
 		case session.codeChan <- code:
 		default:
 		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		fmt.Fprint(w, "<html><body><h2>✅ OpenAI authentication completed.</h2><p>You can close this window and return to OmniProxy.</p></body></html>")
+		// The temporary profile used for an ordinary add-account login can be
+		// closed after its callback. A persistent account profile must be left
+		// alone so Chrome can flush its authenticated session to disk.
+		if session.ProfileDir == "" {
+			go func() {
+				time.Sleep(500 * time.Millisecond)
+				session.closeCleanBrowser()
+			}()
+		}
 	})
 
 	srv := &http.Server{
@@ -197,6 +260,7 @@ func (s *CodexLoginSession) abort() {
 	if s == nil {
 		return
 	}
+	s.closeCleanBrowser()
 	if s.server != nil {
 		_ = s.server.Close()
 		s.server = nil
@@ -235,7 +299,6 @@ func PollCodexLogin() (*CodexTokens, error) {
 			CancelCodexLogin()
 			return nil, err
 		}
-		CancelCodexLogin()
 		return tokens, nil
 	case err := <-session.errChan:
 		CancelCodexLogin()
@@ -243,6 +306,41 @@ func PollCodexLogin() (*CodexTokens, error) {
 	case <-time.After(15 * time.Second):
 		return nil, fmt.Errorf("authorization_pending")
 	}
+}
+
+// CompleteCodexLogin records a successful account check. Persistent-profile
+// callback pages observe the approved status and navigate to Security; the
+// local callback listener is released shortly afterwards. Temporary logins
+// are closed immediately as before.
+func CompleteCodexLogin() {
+	codexLoginMu.Lock()
+	defer codexLoginMu.Unlock()
+	if codexLoginCurrent == nil {
+		return
+	}
+	if codexLoginCurrent.ProfileDir != "" {
+		session := codexLoginCurrent
+		session.approvalStatus = "approved"
+		go func() {
+			time.Sleep(3 * time.Second)
+			codexLoginMu.Lock()
+			defer codexLoginMu.Unlock()
+			if codexLoginCurrent != session {
+				return
+			}
+			if session.server != nil {
+				_ = session.server.Close()
+				session.server = nil
+			}
+			codexLoginCurrent = nil
+		}()
+		return
+	}
+	if codexLoginCurrent.server != nil {
+		_ = codexLoginCurrent.server.Close()
+		codexLoginCurrent.server = nil
+	}
+	codexLoginCurrent = nil
 }
 
 // CancelCodexLogin tears down any active Codex login session.
@@ -265,8 +363,146 @@ func CurrentCodexLoginURL() string {
 	return codexLoginCurrent.AuthURL
 }
 
+// CurrentCodexLoginTargetAccountID returns the local account being linked by
+// the active persistent-profile login, or empty for ordinary add-account logins.
+func CurrentCodexLoginTargetAccountID() string {
+	codexLoginMu.Lock()
+	defer codexLoginMu.Unlock()
+	if codexLoginCurrent == nil {
+		return ""
+	}
+	return codexLoginCurrent.TargetAccountID
+}
+
+// OpenCodexLoginInCleanBrowser opens the active login in a compact Chrome app.
+// Ordinary logins use a temporary profile; account-linking logins use the
+// session's persistent profile so later Security actions reopen the same user.
+func OpenCodexLoginInCleanBrowser() error {
+	codexLoginMu.Lock()
+	session := codexLoginCurrent
+	codexLoginMu.Unlock()
+	if session == nil || session.AuthURL == "" {
+		return fmt.Errorf("no active codex login session")
+	}
+
+	profileDir := session.ProfileDir
+	removeProfileOnExit := false
+	if profileDir == "" {
+		var err error
+		profileDir, err = os.MkdirTemp("", "omniproxy-codex-login-")
+		if err != nil {
+			return fmt.Errorf("create temporary Chrome profile: %w", err)
+		}
+		removeProfileOnExit = true
+	} else if err := os.MkdirAll(profileDir, 0700); err != nil {
+		return fmt.Errorf("create Codex browser profile: %w", err)
+	}
+
+	browser, err := findCodexLoginBrowser()
+	if err != nil {
+		if removeProfileOnExit {
+			_ = os.RemoveAll(profileDir)
+		}
+		return err
+	}
+
+	return session.openBrowser(browser, profileDir, session.AuthURL, removeProfileOnExit)
+}
+
+// OpenCodexSecurityProfile opens the ChatGPT Security screen in an existing
+// account-scoped Chrome profile. It never accepts an arbitrary URL.
+func OpenCodexSecurityProfile(profileDir string) error {
+	if strings.TrimSpace(profileDir) == "" {
+		return fmt.Errorf("Codex browser profile is not configured")
+	}
+	if err := os.MkdirAll(profileDir, 0700); err != nil {
+		return fmt.Errorf("create Codex browser profile: %w", err)
+	}
+	browser, err := findCodexLoginBrowser()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(browser,
+		"--user-data-dir="+profileDir,
+		"--app=https://chatgpt.com/#settings/Security",
+		"--window-size=960,760",
+		"--disable-background-mode",
+		"--no-first-run",
+		"--no-default-browser-check",
+	)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start Chrome for Codex security settings: %w", err)
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
+}
+
+func (s *CodexLoginSession) openBrowser(browser, profileDir, pageURL string, removeProfileOnExit bool) error {
+	cmd := exec.Command(browser,
+		"--user-data-dir="+profileDir,
+		"--app="+pageURL,
+		"--window-size=480,740",
+		"--disable-background-mode",
+		"--no-first-run",
+		"--no-default-browser-check",
+	)
+
+	s.browserMu.Lock()
+	defer s.browserMu.Unlock()
+	if s.browserCmd != nil && s.browserCmd.Process != nil {
+		_ = s.browserCmd.Process.Kill()
+	}
+	if err := cmd.Start(); err != nil {
+		if removeProfileOnExit {
+			_ = os.RemoveAll(profileDir)
+		}
+		return fmt.Errorf("start Chrome for Codex login: %w", err)
+	}
+	s.browserCmd = cmd
+
+	// Temporary profiles contain throwaway login sessions; persistent profiles
+	// deliberately retain cookies for the verified account.
+	go func() {
+		_ = cmd.Wait()
+		if removeProfileOnExit {
+			_ = os.RemoveAll(profileDir)
+		}
+		s.browserMu.Lock()
+		if s.browserCmd == cmd {
+			s.browserCmd = nil
+		}
+		s.browserMu.Unlock()
+	}()
+	return nil
+}
+
+func (s *CodexLoginSession) closeCleanBrowser() {
+	s.browserMu.Lock()
+	defer s.browserMu.Unlock()
+	if s.browserCmd != nil && s.browserCmd.Process != nil {
+		_ = s.browserCmd.Process.Kill()
+	}
+}
+
+func findCodexLoginBrowser() (string, error) {
+	if runtime.GOOS == "darwin" {
+		const chromeApp = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+		if info, err := os.Stat(chromeApp); err == nil && !info.IsDir() {
+			return chromeApp, nil
+		}
+	}
+
+	for _, candidate := range []string{"google-chrome", "google-chrome-stable", "chromium", "chromium-browser"} {
+		if path, err := exec.LookPath(candidate); err == nil {
+			return path, nil
+		}
+	}
+	return "", fmt.Errorf("Google Chrome was not found; install Chrome to add a Codex account")
+}
+
 // postCodexToken posts URL-encoded form fields to the Codex token endpoint
-// and decodes the JSON response.
+// and decodes the JSON response. A refresh response may omit refresh_token;
+// the caller then keeps the currently persisted refresh token.
 func postCodexToken(form url.Values) (*CodexTokens, error) {
 	req, err := http.NewRequest("POST", codexTokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -296,8 +532,11 @@ func postCodexToken(form url.Values) (*CodexTokens, error) {
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return nil, fmt.Errorf("codex token: parse: %w", err)
 	}
-	if parsed.AccessToken == "" || parsed.RefreshToken == "" {
-		return nil, fmt.Errorf("codex token: response missing access_token or refresh_token")
+	if parsed.AccessToken == "" {
+		return nil, fmt.Errorf("codex token: response missing access_token")
+	}
+	if form.Get("grant_type") != "refresh_token" && parsed.RefreshToken == "" {
+		return nil, fmt.Errorf("codex token: authorization response missing refresh_token")
 	}
 	if parsed.ExpiresIn <= 0 {
 		parsed.ExpiresIn = 3600
@@ -308,10 +547,15 @@ func postCodexToken(form url.Values) (*CodexTokens, error) {
 		return nil, fmt.Errorf("codex token: access token JWT missing chatgpt_account_id")
 	}
 
+	expiresAt := time.Now().Unix() + int64(parsed.ExpiresIn)
+	if jwtInfo := extractCodexJWTClaims(parsed.AccessToken); jwtInfo.ExpiresAt > 0 {
+		expiresAt = jwtInfo.ExpiresAt
+	}
+
 	return &CodexTokens{
 		AccessToken:  parsed.AccessToken,
 		RefreshToken: parsed.RefreshToken,
-		ExpiresAt:    time.Now().Unix() + int64(parsed.ExpiresIn),
+		ExpiresAt:    expiresAt,
 		AccountID:    accountID,
 	}, nil
 }
@@ -359,10 +603,11 @@ type CodexJWTInfo struct {
 	PlanType  string // chatgpt_plan_type (free/plus/team/pro)
 	Email     string // profile.email
 	Name      string // profile.name
+	ExpiresAt int64  // exp, when present (Unix seconds)
 }
 
 // extractCodexJWTClaims decodes the JWT payload and returns all useful
-// claims: chatgpt_account_id, chatgpt_plan_type, email, name.
+// claims: chatgpt_account_id, chatgpt_plan_type, email, name, exp.
 func extractCodexJWTClaims(accessToken string) CodexJWTInfo {
 	var info CodexJWTInfo
 	parts := strings.Split(accessToken, ".")
@@ -379,6 +624,11 @@ func extractCodexJWTClaims(accessToken string) CodexJWTInfo {
 	var claims map[string]interface{}
 	if err := json.Unmarshal(payload, &claims); err != nil {
 		return info
+	}
+	// JSON numbers decode as float64. Only accept a positive, integral
+	// expiration; malformed/missing exp must not make callers discard a token.
+	if exp, ok := claims["exp"].(float64); ok && exp > 0 && exp == float64(int64(exp)) {
+		info.ExpiresAt = int64(exp)
 	}
 	if authClaim, ok := claims[codexJWTAuthClaim].(map[string]interface{}); ok {
 		info.AccountID, _ = authClaim["chatgpt_account_id"].(string)
@@ -413,5 +663,3 @@ func truncateForLog(b []byte) string {
 func ExtractCodexAccountIDPublic(accessToken string) string {
 	return extractCodexAccountID(accessToken)
 }
-
-

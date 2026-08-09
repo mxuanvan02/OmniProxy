@@ -13,11 +13,15 @@ package config
 import (
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -46,13 +50,19 @@ type Account struct {
 	RefreshToken string `json:"refreshToken"`           // OAuth refresh token for token renewal
 	ClientID     string `json:"clientId,omitempty"`     // OIDC client ID (for IdC auth)
 	ClientSecret string `json:"clientSecret,omitempty"` // OIDC client secret (for IdC auth)
-	AuthMethod   string `json:"authMethod"`             // Authentication method: "idc" (AWS IdC), "social" (GitHub/Google/SSO), "external_idp" (enterprise SSO)
-	Provider     string `json:"provider,omitempty"`     // Identity provider name (e.g., "BuilderId", "GitHub")
-	Region       string `json:"region"`                 // AWS region for OIDC endpoints
-	StartUrl     string `json:"startUrl,omitempty"`     // AWS SSO start URL
-	ExpiresAt    int64  `json:"expiresAt,omitempty"`    // Token expiration timestamp (Unix seconds)
-	MachineId    string `json:"machineId,omitempty"`    // UUID machine identifier for request tracking
-	ProfileArn   string `json:"profileArn,omitempty"`   // CodeWhisperer/Kiro profile ARN for generation requests
+	AuthMethod   string `json:"authMethod"`             // Authentication method: "idc" (AWS IdC), "social" (GitHub/Google/SSO), "external_idp" (enterprise SSO), "external_openai", "codex", "agentrouter"
+	Provider     string `json:"provider,omitempty"`     // Identity provider name (e.g., "BuilderId", "GitHub", "AgentRouter")
+	// SourceID identifies the originating provider connection (for example a
+	// 9router connection UUID). It is stable across imports and is preferred
+	// over display names for deduplication.
+	SourceID     string   `json:"sourceId,omitempty"`
+	ProviderKind string   `json:"providerKind,omitempty"` // chat, search, image, unsupported
+	Capabilities []string `json:"capabilities,omitempty"` // explicit service capabilities
+	Region       string   `json:"region"`                 // AWS region for OIDC endpoints
+	StartUrl     string   `json:"startUrl,omitempty"`     // AWS SSO start URL
+	ExpiresAt    int64    `json:"expiresAt,omitempty"`    // Token expiration timestamp (Unix seconds)
+	MachineId    string   `json:"machineId,omitempty"`    // UUID machine identifier for request tracking
+	ProfileArn   string   `json:"profileArn,omitempty"`   // CodeWhisperer/Kiro profile ARN for generation requests
 
 	// TokenRefreshedAt records the last time the access token was refreshed
 	// (via OAuth refresh-token flow). Used by the admin UI to show "last
@@ -79,6 +89,13 @@ type Account struct {
 	// (chatgpt-account-id) when using a ChatGPT subscription login.
 	ChatGPTAccountID string `json:"chatgptAccountId,omitempty"`
 
+	// CodexBrowserProfileVerified records that OmniProxy has completed an
+	// interactive OAuth login in the account-scoped Chrome profile and that
+	// the resulting JWT belongs to this ChatGPT account. The profile itself is
+	// stored beside config.json rather than inside this credential record.
+	CodexBrowserProfileVerified  bool   `json:"codexBrowserProfileVerified,omitempty"`
+	CodexBrowserProfileAccountID string `json:"codexBrowserProfileAccountId,omitempty"`
+
 	// Priority weight for load balancing (higher = more requests)
 	Weight int `json:"weight,omitempty"` // 0 or 1 = normal, 2+ = higher priority
 
@@ -101,9 +118,13 @@ type Account struct {
 
 	// Account status
 	Enabled   bool   `json:"enabled"`             // Whether account is active in the pool
-	BanStatus string `json:"banStatus,omitempty"` // Ban status: "ACTIVE", "BANNED", "SUSPENDED"
+	BanStatus string `json:"banStatus,omitempty"` // Status: "ACTIVE", "BANNED", "SUSPENDED", "DISABLED", "REAUTH_REQUIRED"
 	BanReason string `json:"banReason,omitempty"` // Reason for ban/suspension
 	BanTime   int64  `json:"banTime,omitempty"`   // Timestamp when ban was detected
+	AddedAt   int64  `json:"addedAt,omitempty"`   // Timestamp when this account was added to OmniProxy
+	// LegacyAddedAt accepts the former createdAt key, which was also used for
+	// the OmniProxy add/import timestamp. loadLocked moves it to AddedAt.
+	LegacyAddedAt int64 `json:"createdAt,omitempty"`
 
 	// Subscription information
 	SubscriptionType  string `json:"subscriptionType,omitempty"`  // Tier: FREE, PRO, PRO_PLUS, or POWER
@@ -125,11 +146,26 @@ type Account struct {
 	TrialExpiresAt    int64   `json:"trialExpiresAt,omitempty"`    // Trial expiration timestamp (Unix seconds)
 
 	// Runtime statistics (updated during operation)
-	RequestCount int     `json:"requestCount,omitempty"` // Total requests processed
-	ErrorCount   int     `json:"errorCount,omitempty"`   // Total errors encountered
-	LastUsed     int64   `json:"lastUsed,omitempty"`     // Last request timestamp
-	TotalTokens  int     `json:"totalTokens,omitempty"`  // Cumulative tokens processed
-	TotalCredits float64 `json:"totalCredits,omitempty"` // Cumulative credits consumed
+	RequestCount                 int     `json:"requestCount,omitempty"`                 // Total requests processed
+	ErrorCount                   int     `json:"errorCount,omitempty"`                   // Total errors encountered
+	LastUsed                     int64   `json:"lastUsed,omitempty"`                     // Last request timestamp
+	TotalTokens                  int     `json:"totalTokens,omitempty"`                  // Cumulative tokens processed
+	CodexTokensSincePrimaryReset int     `json:"codexTokensSincePrimaryReset,omitempty"` // Tokens processed since the current Codex primary quota window began
+	TotalCredits                 float64 `json:"totalCredits,omitempty"`                 // Cumulative credits consumed
+
+	// Web Search service statistics. These counters are separate from the
+	// model-request counters above because search providers expose different
+	// quota/rate-limit semantics and do not consume model tokens.
+	ServiceRequestCount       int    `json:"serviceRequestCount,omitempty"`
+	ServiceErrorCount         int    `json:"serviceErrorCount,omitempty"`
+	ServiceQuotaErrorCount    int    `json:"serviceQuotaErrorCount,omitempty"`
+	ServiceLastUsed           int64  `json:"serviceLastUsed,omitempty"`
+	ServiceLastStatus         int    `json:"serviceLastStatus,omitempty"`
+	ServiceRateLimit          string `json:"serviceRateLimit,omitempty"`
+	ServiceRateLimitRemaining string `json:"serviceRateLimitRemaining,omitempty"`
+	ServiceRateLimitReset     string `json:"serviceRateLimitReset,omitempty"`
+	ServiceRetryAfter         string `json:"serviceRetryAfter,omitempty"`
+	ServiceUsageCheckedAt     int64  `json:"serviceUsageCheckedAt,omitempty"`
 
 	// External provider credit balance (AuthMethod == "external_openai").
 	// Populated by fetching {BaseURL}/api/me with the account's AccessToken.
@@ -148,20 +184,38 @@ type Account struct {
 	// Codex (ChatGPT subscription) usage tracking.
 	// Populated from JWT claims at login/import and from x-codex-*
 	// response headers on each request. AuthMethod == "codex" only.
-	CodexPlanType            string `json:"codexPlanType,omitempty"`            // "free", "plus", "team", "pro"
-	CodexActiveLimit         string `json:"codexActiveLimit,omitempty"`         // "premium", "standard"
-	CodexEmail               string `json:"codexEmail,omitempty"`               // email from JWT profile
-	CodexName                string `json:"codexName,omitempty"`                // display name from JWT
-	CodexPrimaryUsedPercent  int    `json:"codexPrimaryUsedPercent,omitempty"`  // 0-100
-	CodexSecondaryUsedPercent int   `json:"codexSecondaryUsedPercent,omitempty"` // 0-100
+	CodexPlanType             string `json:"codexPlanType,omitempty"`             // "free", "plus", "team", "pro"
+	CodexActiveLimit          string `json:"codexActiveLimit,omitempty"`          // "premium", "standard"
+	CodexEmail                string `json:"codexEmail,omitempty"`                // email from JWT profile
+	CodexName                 string `json:"codexName,omitempty"`                 // display name from JWT
+	CodexPrimaryUsedPercent   int    `json:"codexPrimaryUsedPercent,omitempty"`   // 0-100
+	CodexSecondaryUsedPercent int    `json:"codexSecondaryUsedPercent,omitempty"` // 0-100
 	CodexPrimaryWindowMinutes int    `json:"codexPrimaryWindowMinutes,omitempty"` // rolling window (e.g. 10080 = 7d)
-	CodexPrimaryResetAt      int64  `json:"codexPrimaryResetAt,omitempty"`      // Unix seconds
-	CodexSecondaryResetAt    int64  `json:"codexSecondaryResetAt,omitempty"`    // Unix seconds
-	CodexCreditsBalance      int    `json:"codexCreditsBalance,omitempty"`      // purchased credits remaining
-	CodexCreditsUnlimited    bool   `json:"codexCreditsUnlimited,omitempty"`    // unlimited credits flag
-	CodexCreditsKnown        bool   `json:"codexCreditsKnown,omitempty"`        // true when upstream sent x-codex-credits-* headers (pay-as-you-go); false for ChatGPT Plus subscription (no credit balance)
-	CodexResetCreditsAvailable int  `json:"codexResetCreditsAvailable,omitempty"` // bank-reset credits available (from wham/usage rate_limit_reset_credits.available_count)
-	CodexUsageCheckedAt      int64  `json:"codexUsageCheckedAt,omitempty"`      // last header capture timestamp
+	CodexPrimaryResetAt       int64  `json:"codexPrimaryResetAt,omitempty"`       // Unix seconds
+	// CodexPrimaryWindowTokensInitialized prevents a migration backfill from
+	// treating a later primary reset as if all historical tokens were current.
+	CodexPrimaryWindowTokensInitialized bool   `json:"codexPrimaryWindowTokensInitialized,omitempty"`
+	CodexSecondaryResetAt               int64  `json:"codexSecondaryResetAt,omitempty"`      // Unix seconds
+	CodexCreditsBalance                 int    `json:"codexCreditsBalance,omitempty"`        // purchased credits remaining
+	CodexCreditsUnlimited               bool   `json:"codexCreditsUnlimited,omitempty"`      // unlimited credits flag
+	CodexCreditsKnown                   bool   `json:"codexCreditsKnown,omitempty"`          // true when upstream sent x-codex-credits-* headers (pay-as-you-go); false for ChatGPT Plus subscription (no credit balance)
+	CodexResetCreditsAvailable          int    `json:"codexResetCreditsAvailable,omitempty"` // bank-reset credits available (from wham/usage rate_limit_reset_credits.available_count)
+	CodexUsageCheckedAt                 int64  `json:"codexUsageCheckedAt,omitempty"`        // last header capture timestamp
+	ImageModel                          string `json:"imageModel,omitempty"`                 // model used by image-generation tests/requests
+	CodexImageModel                     string `json:"codexImageModel,omitempty"`            // model used with the Codex image_generation tool
+}
+
+const codexPrimaryWindowTolerance = 5 * time.Minute
+
+// CodexUsageUpdate describes a primary quota-window transition observed in
+// Codex response headers. A primary reset is only real when its deadline
+// advances to a new valid window, not when different upstream nodes disagree
+// on the reset timestamp by a few seconds.
+type CodexUsageUpdate struct {
+	PrimaryWindowChanged         bool
+	PrimaryWindowReset           bool
+	BootstrapCurrentWindowTokens bool
+	PrimaryResetAt               int64
 }
 
 // PromptFilterRule defines a single custom prompt sanitization rule.
@@ -224,11 +278,9 @@ type Config struct {
 	// Defaults to true. Set to false to only use the preferred endpoint.
 	EndpointFallback *bool `json:"endpointFallback,omitempty"`
 
-	// ClaudeSolFallback controls whether Claude API requests automatically
-	// fall back to gpt-5.6-sol when no Claude accounts are available (all
-	// exhausted/banned/disabled). The fallback adjusts the payload model ID
-	// and context window to match gpt-5.6-sol's limits (300K input / 128K
-	// output). Defaults to true.
+	// ClaudeSolFallback is retained for config-file compatibility. Model
+	// fallback is owned by the downstream agent; OmniProxy never changes a
+	// normal request's model implicitly.
 	ClaudeSolFallback *bool `json:"claudeSolFallback,omitempty"`
 
 	// AllowOverUsage allows accounts to continue serving requests even when their
@@ -251,15 +303,15 @@ type Config struct {
 	ProxyURL string `json:"proxyURL,omitempty"`
 
 	// Kiro API HTTP timeout. Can be overridden by API_TIMEOUT_MS env var.
-	// Default: 300000 (5 minutes). Matches the CLI's API_TIMEOUT_MS convention.
-	KiroApiTimeoutMs int `json:"apiTimeoutMs,omitempty"`
+	// Default: 900000 (15 minutes). Matches the CLI's API_TIMEOUT_MS convention.
+	KiroApiTimeoutMs int `json:"apiTimeoutMs"`
 
 	// Stream idle timeout: max seconds without any data from upstream after
 	// the HTTP 200 response headers arrive. When exceeded, the connection is
 	// killed and the request rotates to another account (TTFB + per-chunk idle
-	// deadline). Default: 60s. Env override: STREAM_IDLE_TIMEOUT_SECONDS.
+	// deadline). Default: 900s. Env override: STREAM_IDLE_TIMEOUT_SECONDS.
 	// Set to 0 to disable (falls back to the overall KiroApiTimeoutMs).
-	StreamIdleTimeoutSeconds int `json:"streamIdleTimeoutSeconds,omitempty"`
+	StreamIdleTimeoutSeconds int `json:"streamIdleTimeoutSeconds"`
 
 	// SanitizeClaudeCodePrompt is kept for backward-compatible JSON loading only.
 	// Migrated to FilterClaudeCode on first load. Do not use directly.
@@ -343,6 +395,27 @@ var (
 	cfg     *Config
 	cfgLock sync.RWMutex
 	cfgPath string
+
+	// saveBaseline tracks the runtime fields as they were last loaded or
+	// successfully saved. It lets a stats/token save from a stale in-memory
+	// snapshot preserve a newer value written to disk by another process.
+	saveBaseline        configSaveBaseline
+	extraModelsExplicit bool
+)
+
+type configSaveBaseline struct {
+	apiTimeoutMs             int
+	streamIdleTimeoutSeconds int
+	extraModels              []string
+	initialized              bool
+}
+
+const (
+	// Claude Code tasks can legitimately spend several minutes between stream
+	// chunks while the upstream model is reasoning or executing tools.
+	defaultKiroApiTimeoutMs      = 900_000
+	defaultStreamIdleTimeoutSecs = 900
+	defaultClaudeExtraModel      = "claude-fable-5"
 )
 
 // Init initializes the configuration system with the specified file path.
@@ -385,12 +458,22 @@ func loadLocked() error {
 			// Create default configuration.
 			// Binds to 0.0.0.0 by default for Docker/container compatibility.
 			cfg = &Config{
-				Password:      "changeme",
-				Port:          8080,
-				Host:          "0.0.0.0",
-				RequireApiKey: false,
-				Accounts:      []Account{},
+				Password:                 "changeme",
+				Port:                     8080,
+				Host:                     "0.0.0.0",
+				RequireApiKey:            false,
+				Accounts:                 []Account{},
+				KiroApiTimeoutMs:         defaultKiroApiTimeoutMs,
+				StreamIdleTimeoutSeconds: defaultStreamIdleTimeoutSecs,
+				ExtraModels:              []string{defaultClaudeExtraModel},
 			}
+			saveBaseline = configSaveBaseline{
+				apiTimeoutMs:             cfg.KiroApiTimeoutMs,
+				streamIdleTimeoutSeconds: cfg.StreamIdleTimeoutSeconds,
+				extraModels:              append([]string(nil), cfg.ExtraModels...),
+				initialized:              true,
+			}
+			extraModelsExplicit = false
 			return saveLocked()
 		}
 		return err
@@ -401,6 +484,33 @@ func loadLocked() error {
 		return err
 	}
 	cfg = &c
+	saveBaseline = configSaveBaseline{
+		apiTimeoutMs:             c.KiroApiTimeoutMs,
+		streamIdleTimeoutSeconds: c.StreamIdleTimeoutSeconds,
+		extraModels:              append([]string(nil), c.ExtraModels...),
+		initialized:              true,
+	}
+	extraModelsExplicit = false
+	var rawFields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &rawFields); err != nil {
+		return err
+	}
+	configMigrated := false
+	// Older running configurations omitted these fields because they were
+	// introduced after the original 5-minute/60-second defaults. Populate only
+	// missing fields so an explicit stream timeout of 0 remains meaningful.
+	if _, present := rawFields["apiTimeoutMs"]; !present || cfg.KiroApiTimeoutMs <= 0 {
+		cfg.KiroApiTimeoutMs = defaultKiroApiTimeoutMs
+		configMigrated = true
+	}
+	if _, present := rawFields["streamIdleTimeoutSeconds"]; !present {
+		cfg.StreamIdleTimeoutSeconds = defaultStreamIdleTimeoutSecs
+		configMigrated = true
+	}
+	if !hasModelID(cfg.ExtraModels, defaultClaudeExtraModel) {
+		cfg.ExtraModels = append(cfg.ExtraModels, defaultClaudeExtraModel)
+		configMigrated = true
+	}
 
 	// Migration: if a legacy single ApiKey is present and the new ApiKeys list is empty,
 	// promote it into the new structure. The migrated entry inherits the legacy
@@ -417,9 +527,7 @@ func loadLocked() error {
 			Migrated:  true,
 			CreatedAt: time.Now().Unix(),
 		})
-		if err := saveLocked(); err != nil {
-			return err
-		}
+		configMigrated = true
 	}
 
 	// Migration: per-account AllowOverage → OverageStatus.
@@ -430,7 +538,16 @@ func loadLocked() error {
 	// OverageStatus="ENABLED" (operators can refresh from AWS later). The
 	// legacy field is then cleared so future saves don't re-emit it.
 	overageMigrated := false
+	addedAtMigrated := false
 	for i := range cfg.Accounts {
+		if cfg.Accounts[i].AddedAt == 0 && cfg.Accounts[i].LegacyAddedAt > 0 {
+			cfg.Accounts[i].AddedAt = cfg.Accounts[i].LegacyAddedAt
+			addedAtMigrated = true
+		}
+		if cfg.Accounts[i].LegacyAddedAt != 0 {
+			cfg.Accounts[i].LegacyAddedAt = 0
+			addedAtMigrated = true
+		}
 		if cfg.Accounts[i].LegacyAllowOverage {
 			if cfg.Accounts[i].OverageStatus == "" {
 				cfg.Accounts[i].OverageStatus = "ENABLED"
@@ -439,12 +556,24 @@ func loadLocked() error {
 			overageMigrated = true
 		}
 	}
-	if overageMigrated {
+	if overageMigrated || addedAtMigrated {
+		configMigrated = true
+	}
+	if configMigrated {
 		if err := saveLocked(); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func hasModelID(models []string, wanted string) bool {
+	for _, model := range models {
+		if strings.EqualFold(strings.TrimSpace(model), wanted) {
+			return true
+		}
+	}
+	return false
 }
 
 // saveLocked persists cfg to disk. Caller MUST already hold cfgLock.
@@ -466,7 +595,140 @@ func Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(cfgPath, data, 0600)
+	data, err = preserveNewerRuntimeFields(data)
+	if err != nil {
+		return err
+	}
+
+	dir := filepath.Dir(cfgPath)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(cfgPath)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if err := tmp.Chmod(0600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, cfgPath); err != nil {
+		return err
+	}
+	saveBaseline = configSaveBaseline{
+		apiTimeoutMs:             cfg.KiroApiTimeoutMs,
+		streamIdleTimeoutSeconds: cfg.StreamIdleTimeoutSeconds,
+		extraModels:              append([]string(nil), cfg.ExtraModels...),
+		initialized:              true,
+	}
+	extraModelsExplicit = false
+	// Rename is atomic on the same filesystem. Sync the directory as well so
+	// a completed token rotation survives an abrupt host/process failure.
+	if runtime.GOOS != "windows" {
+		dirFile, err := os.Open(dir)
+		if err == nil {
+			err = dirFile.Sync()
+			closeErr := dirFile.Close()
+			// macOS does not support fsync on directory descriptors. The rename
+			// remains atomic there; do not turn a successful save into an error.
+			if err != nil && !errors.Is(err, syscall.EINVAL) {
+				return err
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+		}
+	}
+	return nil
+}
+
+// preserveNewerRuntimeFields protects settings that are commonly overwritten
+// by background stats writers holding an old config snapshot. Only fields
+// unchanged locally since the last load/save are eligible for this merge; an
+// explicit local update therefore keeps its normal last-write-wins behavior.
+func preserveNewerRuntimeFields(data []byte) ([]byte, error) {
+	if cfg == nil || cfgPath == "" || !saveBaseline.initialized {
+		return data, nil
+	}
+
+	diskData, err := os.ReadFile(cfgPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return data, nil
+		}
+		return nil, err
+	}
+	var diskFields map[string]json.RawMessage
+	if err := json.Unmarshal(diskData, &diskFields); err != nil {
+		return data, nil
+	}
+	var outputFields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &outputFields); err != nil {
+		return nil, err
+	}
+
+	if cfg.KiroApiTimeoutMs == saveBaseline.apiTimeoutMs {
+		if value, ok := validPersistedInt(diskFields["apiTimeoutMs"], false); ok && value != cfg.KiroApiTimeoutMs {
+			outputFields["apiTimeoutMs"] = diskFields["apiTimeoutMs"]
+		}
+	}
+	if cfg.StreamIdleTimeoutSeconds == saveBaseline.streamIdleTimeoutSeconds {
+		if value, ok := validPersistedInt(diskFields["streamIdleTimeoutSeconds"], true); ok && value != cfg.StreamIdleTimeoutSeconds {
+			outputFields["streamIdleTimeoutSeconds"] = diskFields["streamIdleTimeoutSeconds"]
+		}
+	}
+	if !extraModelsExplicit && stringSlicesEqual(cfg.ExtraModels, saveBaseline.extraModels) {
+		if models, ok := validPersistedModels(diskFields["extraModels"]); ok && !stringSlicesEqual(models, cfg.ExtraModels) {
+			outputFields["extraModels"] = diskFields["extraModels"]
+		}
+	}
+
+	return json.MarshalIndent(outputFields, "", "  ")
+}
+
+func validPersistedInt(raw json.RawMessage, allowZero bool) (int, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, false
+	}
+	var value int
+	if err := json.Unmarshal(raw, &value); err != nil || (!allowZero && value <= 0) || (allowZero && value < 0) {
+		return 0, false
+	}
+	return value, true
+}
+
+func validPersistedModels(raw json.RawMessage) ([]string, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, false
+	}
+	var models []string
+	if err := json.Unmarshal(raw, &models); err != nil {
+		return nil, false
+	}
+	return models, true
+}
+
+func stringSlicesEqual(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // SetPassword updates the admin password.
@@ -672,6 +934,9 @@ func FindAccountByEmail(email string) *Account {
 func AddAccount(account Account) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
+	if account.AddedAt == 0 {
+		account.AddedAt = time.Now().Unix()
+	}
 	cfg.Accounts = append(cfg.Accounts, account)
 	return Save()
 }
@@ -681,9 +946,39 @@ func UpdateAccount(id string, account Account) error {
 	defer cfgLock.Unlock()
 	for i, a := range cfg.Accounts {
 		if a.ID == id {
+			// AddedAt is set only when the account enters OmniProxy. Runtime
+			// refreshes commonly submit a partial/stale account copy, so retain
+			// the recorded add timestamp when that copy has no value.
+			if account.AddedAt == 0 {
+				account.AddedAt = a.AddedAt
+			}
 			cfg.Accounts[i] = account
 			return Save()
 		}
+	}
+	return nil
+}
+
+// UpdateAccountPreservingCredentials updates runtime metadata from a possibly
+// stale account snapshot without overwriting credentials refreshed by another
+// goroutine. Explicit login/import and admin credential edits must continue to
+// use UpdateAccount instead.
+func UpdateAccountPreservingCredentials(id string, account Account) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, current := range cfg.Accounts {
+		if current.ID != id {
+			continue
+		}
+		account.AccessToken = current.AccessToken
+		account.RefreshToken = current.RefreshToken
+		account.ExpiresAt = current.ExpiresAt
+		account.TokenRefreshedAt = current.TokenRefreshedAt
+		if account.AddedAt == 0 {
+			account.AddedAt = current.AddedAt
+		}
+		cfg.Accounts[i] = account
+		return Save()
 	}
 	return nil
 }
@@ -773,7 +1068,7 @@ func SetAccountBanStatus(id, status, reason string) error {
 			cfg.Accounts[i].BanStatus = status
 			cfg.Accounts[i].BanReason = reason
 			cfg.Accounts[i].BanTime = time.Now().Unix()
-			if status == "BANNED" || status == "DISABLED" {
+			if status == "BANNED" || status == "DISABLED" || status == "REAUTH_REQUIRED" {
 				cfg.Accounts[i].Enabled = false
 			}
 			return Save()
@@ -818,17 +1113,50 @@ func UpdateAccountChatGPTAccountID(id, accountID string) error {
 func UpdateAccountCodexUsage(id string, planType, activeLimit string,
 	primaryPct, secondaryPct, primaryWindow int,
 	primaryResetAt, secondaryResetAt int64,
-	creditsBalance int, creditsUnlimited bool, creditsKnown bool) error {
+	creditsBalance int, creditsUnlimited bool, creditsKnown bool) (CodexUsageUpdate, error) {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	for i, a := range cfg.Accounts {
 		if a.ID == id {
+			update := CodexUsageUpdate{PrimaryResetAt: a.CodexPrimaryResetAt}
+			if primaryResetAt > 0 && a.CodexPrimaryResetAt == 0 {
+				// First usable deadline for this account since the proxy started.
+				// It establishes the canonical deadline used by async stats writes.
+				cfg.Accounts[i].CodexPrimaryResetAt = primaryResetAt
+				update.PrimaryWindowChanged = true
+				update.PrimaryResetAt = primaryResetAt
+			} else if codexPrimaryWindowReset(a.CodexPrimaryResetAt, primaryResetAt, primaryWindow, time.Now()) {
+				cfg.Accounts[i].CodexTokensSincePrimaryReset = 0
+				cfg.Accounts[i].CodexPrimaryResetAt = primaryResetAt
+				cfg.Accounts[i].CodexPrimaryWindowTokensInitialized = true
+				update.PrimaryWindowChanged = true
+				update.PrimaryWindowReset = true
+				update.PrimaryResetAt = primaryResetAt
+			}
+
+			// The token-window counter was introduced after existing accounts had
+			// already received traffic. If the account entered OmniProxy during
+			// this same primary window, every cumulative token belongs to it.
+			if !update.PrimaryWindowReset &&
+				!cfg.Accounts[i].CodexPrimaryWindowTokensInitialized &&
+				cfg.Accounts[i].TotalTokens > 0 &&
+				accountAddedAtCodexPrimaryWindowStart(
+					cfg.Accounts[i].AddedAt,
+					update.PrimaryResetAt,
+					primaryWindow,
+				) {
+				cfg.Accounts[i].CodexTokensSincePrimaryReset = cfg.Accounts[i].TotalTokens
+				cfg.Accounts[i].CodexPrimaryWindowTokensInitialized = true
+				update.BootstrapCurrentWindowTokens = true
+			}
 			cfg.Accounts[i].CodexPlanType = planType
 			cfg.Accounts[i].CodexActiveLimit = activeLimit
 			cfg.Accounts[i].CodexPrimaryUsedPercent = primaryPct
 			cfg.Accounts[i].CodexSecondaryUsedPercent = secondaryPct
 			cfg.Accounts[i].CodexPrimaryWindowMinutes = primaryWindow
-			cfg.Accounts[i].CodexPrimaryResetAt = primaryResetAt
+			// Keep the canonical deadline stable inside one window. Upstream
+			// nodes can report it a few seconds apart, which must not look like
+			// a new weekly reset or invalidate queued stats writes.
 			cfg.Accounts[i].CodexSecondaryResetAt = secondaryResetAt
 			if creditsKnown {
 				cfg.Accounts[i].CodexCreditsBalance = creditsBalance
@@ -838,10 +1166,39 @@ func UpdateAccountCodexUsage(id string, planType, activeLimit string,
 				cfg.Accounts[i].CodexCreditsKnown = false
 			}
 			cfg.Accounts[i].CodexUsageCheckedAt = time.Now().Unix()
-			return Save()
+			return update, Save()
 		}
 	}
-	return nil
+	return CodexUsageUpdate{}, nil
+}
+
+func codexPrimaryWindowReset(previousResetAt, nextResetAt int64, windowMinutes int, now time.Time) bool {
+	if previousResetAt <= 0 || nextResetAt <= 0 || windowMinutes <= 0 {
+		return false
+	}
+
+	// Different upstream nodes can report the same deadline a few seconds
+	// apart. Keep the canonical deadline until a meaningful new window begins.
+	if nextResetAt <= previousResetAt+int64(codexPrimaryWindowTolerance/time.Second) {
+		return false
+	}
+
+	window := time.Duration(windowMinutes) * time.Minute
+	nextRemaining := time.Unix(nextResetAt, 0).Sub(now)
+	// The first request after an upstream reset may arrive well after the
+	// window opened. It still belongs to the new window as long as its reported
+	// deadline remains inside one configured Primary window from now.
+	return nextRemaining > 0 && nextRemaining <= window+codexPrimaryWindowTolerance
+}
+
+func accountAddedAtCodexPrimaryWindowStart(addedAt, resetAt int64, windowMinutes int) bool {
+	if addedAt <= 0 || resetAt <= 0 || windowMinutes <= 0 {
+		return false
+	}
+
+	windowStart := resetAt - int64(time.Duration(windowMinutes)*time.Minute/time.Second)
+	return addedAt >= windowStart-int64(codexPrimaryWindowTolerance/time.Second) &&
+		addedAt <= windowStart+int64(codexPrimaryWindowTolerance/time.Second)
 }
 
 // UpdateAccountCodexProfile stores JWT-extracted profile fields (email, name,
@@ -944,7 +1301,7 @@ func GetStats() (int, int, int, int, float64) {
 	return cfg.TotalRequests, cfg.SuccessRequests, cfg.FailedRequests, cfg.TotalTokens, cfg.TotalCredits
 }
 
-func UpdateAccountStats(id string, requestCount, errorCount, totalTokens int, totalCredits float64, lastUsed int64) error {
+func UpdateAccountStats(id string, requestCount, errorCount, totalTokens, codexTokensSincePrimaryReset int, codexPrimaryResetAt int64, totalCredits float64, lastUsed int64) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	for i, a := range cfg.Accounts {
@@ -952,10 +1309,54 @@ func UpdateAccountStats(id string, requestCount, errorCount, totalTokens int, to
 			cfg.Accounts[i].RequestCount = requestCount
 			cfg.Accounts[i].ErrorCount = errorCount
 			cfg.Accounts[i].TotalTokens = totalTokens
+			// A queued stats write from a prior Codex quota window must not
+			// restore its token count after the upstream has reset the window.
+			if codexPrimaryResetAt == cfg.Accounts[i].CodexPrimaryResetAt {
+				cfg.Accounts[i].CodexTokensSincePrimaryReset = codexTokensSincePrimaryReset
+			}
 			cfg.Accounts[i].TotalCredits = totalCredits
 			cfg.Accounts[i].LastUsed = lastUsed
 			return Save()
 		}
+	}
+	return nil
+}
+
+// UpdateAccountServiceStats persists one Web Search upstream attempt and the
+// rate-limit snapshot returned by that upstream. Empty headers are retained
+// from the previous snapshot because many providers omit some fields.
+func UpdateAccountServiceStats(id string, status int, isError, isQuotaError bool, headers map[string]string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, account := range cfg.Accounts {
+		if account.ID != id {
+			continue
+		}
+		cfg.Accounts[i].ServiceRequestCount++
+		if isError {
+			cfg.Accounts[i].ServiceErrorCount++
+		}
+		if isQuotaError {
+			cfg.Accounts[i].ServiceQuotaErrorCount++
+		}
+		cfg.Accounts[i].ServiceLastUsed = time.Now().Unix()
+		cfg.Accounts[i].ServiceLastStatus = status
+		cfg.Accounts[i].ServiceUsageCheckedAt = time.Now().Unix()
+		if headers != nil {
+			if value := headers["limit"]; value != "" {
+				cfg.Accounts[i].ServiceRateLimit = value
+			}
+			if value := headers["remaining"]; value != "" {
+				cfg.Accounts[i].ServiceRateLimitRemaining = value
+			}
+			if value := headers["reset"]; value != "" {
+				cfg.Accounts[i].ServiceRateLimitReset = value
+			}
+			if value := headers["retry-after"]; value != "" {
+				cfg.Accounts[i].ServiceRetryAfter = value
+			}
+		}
+		return Save()
 	}
 	return nil
 }
@@ -970,8 +1371,20 @@ func ResetAllAccountStats() error {
 		cfg.Accounts[i].RequestCount = 0
 		cfg.Accounts[i].ErrorCount = 0
 		cfg.Accounts[i].TotalTokens = 0
+		cfg.Accounts[i].CodexTokensSincePrimaryReset = 0
+		cfg.Accounts[i].CodexPrimaryWindowTokensInitialized = true
 		cfg.Accounts[i].TotalCredits = 0
 		cfg.Accounts[i].LastUsed = 0
+		cfg.Accounts[i].ServiceRequestCount = 0
+		cfg.Accounts[i].ServiceErrorCount = 0
+		cfg.Accounts[i].ServiceQuotaErrorCount = 0
+		cfg.Accounts[i].ServiceLastUsed = 0
+		cfg.Accounts[i].ServiceLastStatus = 0
+		cfg.Accounts[i].ServiceRateLimit = ""
+		cfg.Accounts[i].ServiceRateLimitRemaining = ""
+		cfg.Accounts[i].ServiceRateLimitReset = ""
+		cfg.Accounts[i].ServiceRetryAfter = ""
+		cfg.Accounts[i].ServiceUsageCheckedAt = 0
 	}
 	return Save()
 }
@@ -1170,9 +1583,8 @@ func UpdateEndpointFallback(enabled bool) error {
 	return Save()
 }
 
-// GetClaudeSolFallback returns whether Claude→gpt-5.6-sol fallback is enabled.
-// Defaults to true — when all Claude accounts are unavailable, Claude API
-// requests are retried with gpt-5.6-sol (adjusting context window / model ID).
+// GetClaudeSolFallback is retained for API compatibility with older clients.
+// It no longer controls request routing.
 func GetClaudeSolFallback() bool {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
@@ -1182,7 +1594,8 @@ func GetClaudeSolFallback() bool {
 	return *cfg.ClaudeSolFallback
 }
 
-// UpdateClaudeSolFallback sets the Claude→Sol fallback switch and persists it.
+// UpdateClaudeSolFallback persists the legacy compatibility field. It does not
+// change request routing; fallback decisions belong to the downstream agent.
 func UpdateClaudeSolFallback(enabled bool) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
@@ -1198,7 +1611,7 @@ func GetProxyURL() string {
 }
 
 // GetKiroApiTimeout returns the Kiro API HTTP client timeout.
-// Priority: API_TIMEOUT_MS env var > config file > default (5 minutes).
+// Priority: API_TIMEOUT_MS env var > config file > default (15 minutes).
 func GetKiroApiTimeout() time.Duration {
 	// Env var wins (CLI convention: API_TIMEOUT_MS in milliseconds)
 	if envVal := os.Getenv("API_TIMEOUT_MS"); envVal != "" {
@@ -1212,7 +1625,7 @@ func GetKiroApiTimeout() time.Duration {
 	if cfg != nil && cfg.KiroApiTimeoutMs > 0 {
 		return time.Duration(cfg.KiroApiTimeoutMs) * time.Millisecond
 	}
-	return 5 * time.Minute
+	return time.Duration(defaultKiroApiTimeoutMs) * time.Millisecond
 }
 
 // GetStreamIdleTimeout returns the max duration the proxy will wait for the
@@ -1221,7 +1634,7 @@ func GetKiroApiTimeout() time.Duration {
 // account. This catches "200 OK but no data" hangs (dead-but-not-disabled
 // upstream accounts) far faster than the overall KiroApiTimeout.
 //
-// Priority: STREAM_IDLE_TIMEOUT_SECONDS env var > config file > default (60s).
+// Priority: STREAM_IDLE_TIMEOUT_SECONDS env var > config file > default (900s).
 // Returns 0 to disable the idle reader (caller falls back to KiroApiTimeout).
 func GetStreamIdleTimeout() time.Duration {
 	if envVal := os.Getenv("STREAM_IDLE_TIMEOUT_SECONDS"); envVal != "" {
@@ -1234,10 +1647,10 @@ func GetStreamIdleTimeout() time.Duration {
 	}
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
-	if cfg != nil && cfg.StreamIdleTimeoutSeconds > 0 {
+	if cfg != nil {
 		return time.Duration(cfg.StreamIdleTimeoutSeconds) * time.Second
 	}
-	return 60 * time.Second
+	return time.Duration(defaultStreamIdleTimeoutSecs) * time.Second
 }
 
 // UpdateProxySettings updates the outbound proxy config

@@ -80,9 +80,9 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 			if callID == "" {
 				callID, _ = obj["tool_call_id"].(string)
 			}
-			out := stringifyArbitrary(obj["output"])
-			if out == "" {
-				out = stringifyArbitrary(obj["content"])
+			out := responsesToolOutput(obj["output"])
+			if isEmptyResponsesToolOutput(out) {
+				out = responsesToolOutput(obj["content"])
 			}
 			messages = append(messages, OpenAIMessage{
 				Role:       "tool",
@@ -148,6 +148,28 @@ func convertResponsesInputItems(items []json.RawMessage) ([]OpenAIMessage, error
 
 	flushPendingUser()
 	return messages, nil
+}
+
+func responsesToolOutput(v interface{}) interface{} {
+	if parts, ok := v.([]interface{}); ok {
+		for _, rawPart := range parts {
+			part, ok := rawPart.(map[string]interface{})
+			if ok && extractImageFromOpenAIPart(part) != nil {
+				return parts
+			}
+		}
+	}
+
+	if part, ok := v.(map[string]interface{}); ok && extractImageFromOpenAIPart(part) != nil {
+		return part
+	}
+
+	return stringifyArbitrary(v)
+}
+
+func isEmptyResponsesToolOutput(v interface{}) bool {
+	s, ok := v.(string)
+	return ok && s == ""
 }
 
 func buildMessageFromInputItem(obj map[string]interface{}, role string) *OpenAIMessage {

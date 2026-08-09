@@ -5,9 +5,9 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"omniproxy/config"
 	accountpool "omniproxy/pool"
+	"strings"
 	"testing"
 	"time"
 )
@@ -863,5 +863,104 @@ func TestUpstreamErrorStatus(t *testing.T) {
 	}
 	if upstreamErrorStatus(nil) != 500 {
 		t.Fatalf("upstreamErrorStatus(nil) = %d, want 500", upstreamErrorStatus(nil))
+	}
+}
+
+// ── upsertYAMLModelSection tests ─────────────────────────────────────
+
+func TestUpsertYAMLModelSectionExistingOmniroute(t *testing.T) {
+	// Simulates the hitokiri scenario: existing config with provider: omniroute
+	input := `model:
+  default: gpt-5.6-terra
+  provider: omniroute
+  api_key: sk-old-key
+  base_url: http://localhost:20128/v1
+  api_mode: chat_completions
+  context_length: 272000
+  max_tokens: 128000
+providers:
+  omniroute:
+    base_url: http://localhost:20128/v1
+`
+	out := upsertYAMLModelSection(input, "gpt-5.6-sol", "omniproxy", "http://localhost:20131/v1", "sk-new-key")
+
+	// Provider should be omniproxy
+	if !strings.Contains(out, "provider: omniproxy") {
+		t.Errorf("provider should be omniproxy, got:\n%s", out)
+	}
+	// Default model should be updated
+	if !strings.Contains(out, "default: gpt-5.6-sol") {
+		t.Errorf("default should be gpt-5.6-sol, got:\n%s", out)
+	}
+	// base_url should be updated
+	if !strings.Contains(out, "base_url: \"http://localhost:20131/v1\"") {
+		t.Errorf("base_url should be updated, got:\n%s", out)
+	}
+	// api_key should be updated
+	if !strings.Contains(out, "api_key: sk-new-key") {
+		t.Errorf("api_key should be updated, got:\n%s", out)
+	}
+	// api_mode should be openai
+	if !strings.Contains(out, "api_mode: openai") {
+		t.Errorf("api_mode should be openai, got:\n%s", out)
+	}
+	// context_length and max_tokens should be preserved
+	if !strings.Contains(out, "context_length: 272000") {
+		t.Errorf("context_length should be preserved, got:\n%s", out)
+	}
+	if !strings.Contains(out, "max_tokens: 128000") {
+		t.Errorf("max_tokens should be preserved, got:\n%s", out)
+	}
+	// Old omniroute provider should NOT be in model: section
+	if strings.Contains(out, "provider: omniroute") {
+		t.Errorf("old provider omniroute should be replaced, got:\n%s", out)
+	}
+	// providers: section should still be there
+	if !strings.Contains(out, "providers:") {
+		t.Errorf("providers: section should be preserved, got:\n%s", out)
+	}
+}
+
+func TestUpsertYAMLModelSectionEmpty(t *testing.T) {
+	out := upsertYAMLModelSection("", "gpt-5.6-sol", "omniproxy", "http://localhost:20131/v1", "sk-key")
+	if !strings.Contains(out, "model:") {
+		t.Errorf("should create model: section, got:\n%s", out)
+	}
+	if !strings.Contains(out, "provider: omniproxy") {
+		t.Errorf("provider should be omniproxy, got:\n%s", out)
+	}
+}
+
+func TestUpsertYAMLModelSectionNoModelSection(t *testing.T) {
+	input := `providers:
+  omniroute:
+    base_url: http://localhost:20128/v1
+`
+	out := upsertYAMLModelSection(input, "gpt-5.6-sol", "omniproxy", "http://localhost:20131/v1", "sk-key")
+	// model: section should be inserted at top
+	if !strings.HasPrefix(out, "model:") {
+		t.Errorf("model: should be at top, got:\n%s", out)
+	}
+	if !strings.Contains(out, "provider: omniproxy") {
+		t.Errorf("provider should be omniproxy, got:\n%s", out)
+	}
+	// providers: section should still be there
+	if !strings.Contains(out, "providers:") {
+		t.Errorf("providers: should be preserved, got:\n%s", out)
+	}
+}
+
+func TestUpsertYAMLModelSectionIdempotent(t *testing.T) {
+	input := `model:
+  default: gpt-5.6-sol
+  provider: omniproxy
+  base_url: "http://localhost:20131/v1"
+  api_key: sk-key
+  api_mode: openai
+`
+	out1 := upsertYAMLModelSection(input, "gpt-5.6-sol", "omniproxy", "http://localhost:20131/v1", "sk-key")
+	out2 := upsertYAMLModelSection(out1, "gpt-5.6-sol", "omniproxy", "http://localhost:20131/v1", "sk-key")
+	if out1 != out2 {
+		t.Errorf("upsert should be idempotent\n--- first ---\n%s\n--- second ---\n%s", out1, out2)
 	}
 }

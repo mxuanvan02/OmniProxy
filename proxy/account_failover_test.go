@@ -34,6 +34,7 @@ func TestAccountFailureClassifiers(t *testing.T) {
 		msg  string
 	}{
 		{name: "quota", fn: isQuotaErrorMessage, msg: "HTTP 429: quota exhausted"},
+		{name: "rate limit quota", fn: isQuotaErrorMessage, msg: `HTTP 403 from 10k: {"error":{"type":"rate_limit_error"}}`},
 		{name: "overage", fn: isOverageErrorMessage, msg: "HTTP 402 from Kiro IDE: OVERAGE limit exceeded"},
 		{name: "suspension", fn: isSuspensionErrorMessage, msg: "Your User ID temporarily is suspended"},
 		{name: "profile", fn: isProfileUnavailableErrorMessage, msg: "no available Kiro profile"},
@@ -44,5 +45,12 @@ func TestAccountFailureClassifiers(t *testing.T) {
 		if !tc.fn(tc.msg) {
 			t.Fatalf("%s classifier did not match %q", tc.name, tc.msg)
 		}
+	}
+}
+
+func TestRateLimit403IsNotAuthenticationFailure(t *testing.T) {
+	msg := `HTTP 403 from 10k: {"error":{"type":"rate_limit_error"}}`
+	if isAuthErrorMessage(msg) {
+		t.Fatalf("rate-limit response must not trigger token refresh: %s", msg)
 	}
 }

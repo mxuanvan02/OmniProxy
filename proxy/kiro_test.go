@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"omniproxy/config"
 	"os"
 	"os/exec"
 	"strings"
-	"omniproxy/config"
 	"testing"
 	"time"
 )
@@ -180,6 +180,13 @@ func TestBuildKiroTransportUsesExplicitProxyURL(t *testing.T) {
 	assertProxyURL(t, got, "http://proxy.local:8080")
 }
 
+func TestBuildKiroTransportBoundsResponseHeaderWait(t *testing.T) {
+	transport := buildKiroTransport("")
+	if transport.ResponseHeaderTimeout != initialStreamDataTimeout {
+		t.Fatalf("response header timeout = %s, want %s", transport.ResponseHeaderTimeout, initialStreamDataTimeout)
+	}
+}
+
 func TestBuildKiroTransportFallsBackToEnvironmentProxy(t *testing.T) {
 	const helperEnv = "SUPERKIRO_PROXY_ENV_HELPER"
 	if os.Getenv(helperEnv) == "1" {
@@ -230,6 +237,27 @@ func TestInitKiroHttpClientKeepsShortRestTimeout(t *testing.T) {
 	}
 	if restClient.Timeout != 30*time.Second {
 		t.Fatalf("expected REST timeout to stay 30s, got %s", restClient.Timeout)
+	}
+}
+
+func TestGetImageClientForProxyUsesLongImageTimeout(t *testing.T) {
+	proxyURL := "http://image-timeout-test.local:8080"
+	proxyClientCache.Delete("image:" + proxyURL)
+	t.Cleanup(func() { proxyClientCache.Delete("image:" + proxyURL) })
+
+	client := GetImageClientForProxy(proxyURL)
+	if client.Timeout != imageHTTPTimeout {
+		t.Fatalf("image client timeout = %s, want %s", client.Timeout, imageHTTPTimeout)
+	}
+	if client.Timeout <= 5*time.Minute {
+		t.Fatalf("image client timeout = %s, must exceed standard request timeout", client.Timeout)
+	}
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("image client transport = %T, want *http.Transport", client.Transport)
+	}
+	if transport.ResponseHeaderTimeout != imageHTTPTimeout {
+		t.Fatalf("image response header timeout = %s, want %s", transport.ResponseHeaderTimeout, imageHTTPTimeout)
 	}
 }
 

@@ -579,10 +579,10 @@ function renderTopology() {
 
   // Center OmniProxy node
   svg += '<g class="usage-topo-center">';
-  svg += '<title>' + (typeof t === 'function' ? t('usage.superKiroRouter') : 'OmniProxy Router') + '</title>';
+  svg += '<title>' + (typeof t === 'function' ? t('usage.omniProxyRouter') : 'OmniProxy Router') + '</title>';
   svg += '<rect x="' + (cx - centerNodeW / 2) + '" y="' + (cy - centerNodeH / 2) + '" width="' + centerNodeW + '" height="' + centerNodeH + '" ' +
     'fill="none" stroke="var(--primary)" stroke-width="2.5" rx="12" ry="12"/>';
-  svg += '<text x="' + cx + '" y="' + (cy + 5) + '" text-anchor="middle" fill="var(--foreground)" font-size="' + centerFontSize + '" font-weight="700">' + (typeof t === 'function' ? t('usage.superKiro') : 'OmniProxy') + '</text>';
+  svg += '<text x="' + cx + '" y="' + (cy + 5) + '" text-anchor="middle" fill="var(--foreground)" font-size="' + centerFontSize + '" font-weight="700">' + (typeof t === 'function' ? t('usage.omniProxy') : 'OmniProxy') + '</text>';
   if (activeSet.size > 0) {
     const badgeX = cx + centerNodeW / 2 - 10;
     const badgeW = 20;
@@ -714,22 +714,20 @@ function renderOverviewCards() {
     return;
   }
 
-  const cacheRead = stats.totalCacheReadTokens || 0;
-  const cacheCreate = stats.totalCacheCreateTokens || 0;
-  const cachedTokens = stats.totalCachedTokens || 0;
-  // cacheRead (Claude path) and cachedTokens (OpenAI path) both represent
-  // cache hits — they are mutually exclusive in correct data. Use max() not
-  // sum() to avoid double-counting legacy records that populated both fields.
-  const cacheHits = Math.max(cacheRead, cachedTokens);
-  const totalCached = cacheHits + cacheCreate;
-  const effectiveTokens = stats.totalEffectiveTokens || 0;
+  const totalPromptTokens = stats.totalPromptTokens || 0;
+  const totalCompletionTokens = stats.totalCompletionTokens || 0;
+  const reportedEffectiveTokens = stats.totalEffectiveTokens || 0;
+  // Legacy buckets can lack effective tokens. Treat them as uncached rather
+  // than incorrectly claiming all input was served from cache.
+  const effectiveTokens = reportedEffectiveTokens || (totalPromptTokens + totalCompletionTokens);
+  const cacheHits = Math.max(0, totalPromptTokens + totalCompletionTokens - effectiveTokens);
   const realCost = stats.totalRealCost || 0;
 
   container.innerHTML =
     '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.totalRequests') : 'Total Request') + '</div><div class="overview-card-value">' + fmtNum(stats.totalRequests) + '</div></div>' +
     '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.inputTokens') : 'Input Tokens') + '</div><div class="overview-card-value text-primary">' + fmtTokenFull(stats.totalPromptTokens) + '</div></div>' +
     '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.outputTokens') : 'Output Tokens') + '</div><div class="overview-card-value text-success">' + fmtTokenFull(stats.totalCompletionTokens) + '</div></div>' +
-    '<div class="usage-card overview-card"><div class="overview-card-title">Cached Tokens</div><div class="overview-card-value" style="color:#16a34a">' + fmtTokenFull(totalCached) + '</div></div>' +
+    '<div class="usage-card overview-card"><div class="overview-card-title">Cached Tokens</div><div class="overview-card-value" style="color:#16a34a">' + fmtTokenFull(cacheHits) + '</div></div>' +
     '<div class="usage-card overview-card"><div class="overview-card-title">Effective Tokens</div><div class="overview-card-value" style="color:#0ea5e9" title="' + (typeof t === 'function' ? t('usage.effectiveTokensHint') : '(Input - Cached) + Output — tokens actually processed') + '">' + fmtTokenFull(effectiveTokens) + '</div></div>' +
     '<div class="usage-card overview-card"><div class="overview-card-title">' + (typeof t === 'function' ? t('usage.realCost') : 'Real Cost') + '</div><div class="overview-card-value text-warning">' + fmtCost(realCost) + '</div><div class="overview-card-sub">' + (typeof t === 'function' ? t('usage.realCostDisclaimer') : 'Computed from official pricing × tokens') + '</div></div>';
 }
@@ -919,18 +917,12 @@ function renderUsageTable() {
   const sortOrder = usageState.sortOrder[tableView] || 'desc';
 
   let rows = Object.entries(groupMap).map(([key, val]) => {
-    const cr = val.cacheReadTokens || 0;
-    const cc = val.cacheCreateTokens || 0;
-    const ct = val.cachedTokens || 0;
-    // cacheRead (Claude) and cachedTokens (OpenAI) both represent cache hits
-    // and are mutually exclusive in correct data. Use max() to avoid
-    // double-counting legacy records that populated both fields.
-    const cached = Math.max(cr, ct) + cc;
     const promptTokens = val.promptTokens || 0;
     const completionTokens = val.completionTokens || 0;
-    // Effective tokens = (input - cached) + output. Recompute locally if the
-    // backend hasn't backfilled this field yet (legacy daily buckets).
-    const effectiveTokens = val.effectiveTokens || Math.max(0, promptTokens - cached) + completionTokens;
+    // Effective tokens are calculated per request by the backend. A missing
+    // legacy value is conservatively treated as no cache hit.
+    const effectiveTokens = val.effectiveTokens || (promptTokens + completionTokens);
+    const cached = Math.max(0, promptTokens + completionTokens - effectiveTokens);
     const realCost = val.realCost || 0;
     // Cost breakdown from backend (computed at ingestion). Falls back to 0
     // for legacy data — UI shows realCost only in that case.
@@ -1185,12 +1177,15 @@ function renderActiveTab() {
     connectUsageSSE();
   } else if (usageState.activeTab === 'cache') {
     disconnectUsageSSE();
+    if (cacheEl) cacheEl.classList.remove('hidden');
     fetchCacheStats();
   } else if (usageState.activeTab === 'compression') {
     disconnectUsageSSE();
+    if (compEl) compEl.classList.remove('hidden');
     fetchCompressionStats();
   } else if (usageState.activeTab === 'pool') {
     disconnectUsageSSE();
+    if (poolEl) poolEl.classList.remove('hidden');
     fetchPoolStrategy();
   } else {
     detailsEl.classList.remove('hidden');
@@ -1333,6 +1328,7 @@ function renderCacheTab() {
   const cacheRead = c.cacheRead || 0;
   const cacheCreate = c.cacheCreate || 0;
   const cachedTokens = c.cachedTokens || 0;
+  const cacheHits = Number.isFinite(c.cacheHits) ? c.cacheHits : Math.max(cacheRead, cachedTokens);
   const uncached = c.uncached || 0;
 
   // Period selector
@@ -1359,22 +1355,18 @@ function renderCacheTab() {
       <div class="usage-overview-card-label">${card.label}</div>
     </div>`).join('') + '</div>';
 
-  // Visual bar: cache composition. cacheRead (Claude) and cachedTokens (OpenAI)
-  // both represent cache hits and are mutually exclusive in correct data. Use
-  // max() not sum() to avoid double-counting legacy records.
-  const cacheHitsForBar = Math.max(cacheRead, cachedTokens);
-  const total = cacheHitsForBar + cacheCreate + uncached;
+  const total = cacheHits + cacheCreate + uncached;
   const barHtml = total > 0 ? `
     <div class="usage-card" style="margin-top:16px;padding:16px">
       <div class="usage-card-title" style="margin-bottom:12px">Cache Composition</div>
       <div class="cache-composition-bar">
-        <div class="cache-seg cache-seg-read" style="width:${(cacheHitsForBar/total*100).toFixed(1)}%" title="Cache Hits: ${fmtTokens(cacheHitsForBar)}"></div>
+        <div class="cache-seg cache-seg-read" style="width:${(cacheHits/total*100).toFixed(1)}%" title="Cache Hits: ${fmtTokens(cacheHits)}"></div>
         <div class="cache-seg cache-seg-create" style="width:${(cacheCreate/total*100).toFixed(1)}%" title="Cache Create: ${fmtTokens(cacheCreate)}"></div>
         <div class="cache-seg cache-seg-cached" style="width:0%" title="Cached (OpenAI): merged into Cache Hits"></div>
         <div class="cache-seg cache-seg-uncached" style="width:${(uncached/total*100).toFixed(1)}%" title="Uncached: ${fmtTokens(uncached)}"></div>
       </div>
       <div class="cache-legend">
-        <span class="cache-legend-item"><span class="cache-dot cache-dot-read"></span> Cache Hits (${fmtPct(cacheHitsForBar/total*100)})</span>
+        <span class="cache-legend-item"><span class="cache-dot cache-dot-read"></span> Cache Hits (${fmtPct(cacheHits/total*100)})</span>
         <span class="cache-legend-item"><span class="cache-dot cache-dot-create"></span> Cache Create (${fmtPct(cacheCreate/total*100)})</span>
         <span class="cache-legend-item"><span class="cache-dot cache-dot-uncached"></span> Uncached (${fmtPct(uncached/total*100)})</span>
       </div>
@@ -1385,7 +1377,7 @@ function renderCacheTab() {
     .filter(([_, s]) => s.cacheRead > 0 || s.cacheCreate > 0 || s.cachedTokens > 0)
     .map(([id, s]) => {
       const name = (c.accountNames && c.accountNames[id]) || id.slice(0, 8);
-      const acctSaved = (s.cacheRead || 0) + (s.cachedTokens || 0);
+      const acctSaved = Number.isFinite(s.cacheHits) ? s.cacheHits : Math.max(s.cacheRead || 0, s.cachedTokens || 0);
       const acctTotal = s.promptTokens || 0;
       const acctRatio = acctTotal > 0 ? (acctSaved / acctTotal * 100) : 0;
       return `<tr>
@@ -1414,7 +1406,7 @@ function renderCacheTab() {
   const modelRows = Object.entries(c.byModel || {})
     .filter(([_, s]) => s.cacheRead > 0 || s.cacheCreate > 0 || s.cachedTokens > 0)
     .map(([model, s]) => {
-      const mSaved = (s.cacheRead || 0) + (s.cachedTokens || 0);
+      const mSaved = Number.isFinite(s.cacheHits) ? s.cacheHits : Math.max(s.cacheRead || 0, s.cachedTokens || 0);
       const mTotal = s.promptTokens || 0;
       const mRatio = mTotal > 0 ? (mSaved / mTotal * 100) : 0;
       return `<tr>

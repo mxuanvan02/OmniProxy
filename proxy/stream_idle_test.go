@@ -55,6 +55,25 @@ func TestIdleTimeoutReaderPassesData(t *testing.T) {
 	}
 }
 
+func TestIdleTimeoutReaderUsesShorterDeadlineForFirstByte(t *testing.T) {
+	r := &idleTimeoutReader{
+		body:        &neverReader{},
+		idle:        time.Second,
+		initialIdle: 50 * time.Millisecond,
+		readCh:      make(chan readResult, 1),
+		closeCh:     make(chan struct{}),
+	}
+
+	start := time.Now()
+	_, err := r.Read(make([]byte, 16))
+	if err != ErrStreamIdleTimeout {
+		t.Fatalf("expected ErrStreamIdleTimeout, got %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 300*time.Millisecond {
+		t.Fatalf("first-byte deadline was not enforced: %v", elapsed)
+	}
+}
+
 // TestIdleTimeoutReaderDisabledWhenZero verifies that
 // newIdleTimeoutReader returns the body unchanged when the idle timeout
 // is disabled (env=0).

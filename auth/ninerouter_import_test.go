@@ -109,9 +109,64 @@ func TestReadNineRouterDB_CodexAndKiro(t *testing.T) {
 		t.Errorf("kiro profileArn = %q", kiro.ProfileArn)
 	}
 
-	// Skipped providers should include qwen + openrouter.
-	if len(result.Skipped) != 2 {
-		t.Fatalf("expected 2 skipped providers, got %d (%v)", len(result.Skipped), result.Skipped)
+	if len(result.Generic) != 2 {
+		t.Fatalf("expected 2 generic accounts, got %d", len(result.Generic))
+	}
+	if result.Generic[0].Provider != "qwen" || result.Generic[1].Provider != "openrouter" {
+		t.Fatalf("generic providers = %q, %q", result.Generic[0].Provider, result.Generic[1].Provider)
+	}
+	if result.Generic[1].APIKey != "sk-or-v1-test" {
+		t.Fatalf("openrouter api key was not parsed")
+	}
+	if result.Generic[1].ProviderKind != "image" {
+		t.Fatalf("openrouter provider kind = %q, want image", result.Generic[1].ProviderKind)
+	}
+	if len(result.Skipped) != 0 {
+		t.Fatalf("valid generic providers should not be skipped: %v", result.Skipped)
+	}
+}
+
+func TestReadNineRouterDB_SearchProviders(t *testing.T) {
+	db := `{
+  "providerConnections": [
+    {"id":"tavily-1","provider":"tavily","authType":"apikey","name":"Tavily","apiKey":"tv-key"},
+    {"id":"exa-1","provider":"exa","authType":"apikey","name":"Exa","apiKey":"exa-key"},
+    {"id":"firecrawl-1","provider":"firecrawl","authType":"apikey","name":"Firecrawl","apiKey":"fc-key"},
+    {"id":"jina-1","provider":"jina-reader","authType":"apikey","name":"Jina Reader","apiKey":"jina-key"}
+  ]
+}`
+	t.Setenv("NINEROUTER_DB", writeTestDB(t, db))
+
+	result, err := ReadNineRouterDB()
+	if err != nil {
+		t.Fatalf("ReadNineRouterDB: %v", err)
+	}
+	if len(result.Generic) != 4 {
+		t.Fatalf("search provider count = %d, want 4", len(result.Generic))
+	}
+	want := map[string]string{
+		"tavily":      "tv-key",
+		"exa":         "exa-key",
+		"firecrawl":   "fc-key",
+		"jina-reader": "jina-key",
+	}
+	for _, account := range result.Generic {
+		wantKey, ok := want[account.Provider]
+		if !ok {
+			t.Fatalf("unexpected generic provider %q", account.Provider)
+		}
+		if account.APIKey != wantKey || account.ProviderKind != "search" {
+			t.Errorf("%s: key=%q kind=%q", account.Provider, account.APIKey, account.ProviderKind)
+		}
+		if len(account.Capabilities) != 1 || account.Capabilities[0] != "search" {
+			t.Errorf("%s capabilities = %#v, want [search]", account.Provider, account.Capabilities)
+		}
+		if account.SourceID == "" {
+			t.Errorf("%s source ID is empty", account.Provider)
+		}
+	}
+	if len(result.Skipped) != 0 {
+		t.Fatalf("valid search providers should not be skipped: %v", result.Skipped)
 	}
 }
 

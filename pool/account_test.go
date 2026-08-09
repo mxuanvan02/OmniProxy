@@ -2,8 +2,11 @@ package pool
 
 import (
 	"errors"
+	"fmt"
 	"omniproxy/config"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -109,6 +112,8 @@ func TestIsAuthFailureIgnoresFalsePositives(t *testing.T) {
 	negatives := []string{
 		"status code 4011 found", // digit immediately after 401 → not a standalone token
 		"error 14013 exceeded",   // digit before and after 401
+		`HTTP 403 from 10k: {"error":{"type":"rate_limit_error"}}`,
+		"HTTP 403: too many requests",
 		"some random error",
 		"status 200 OK",
 	}
@@ -173,8 +178,6 @@ func TestIsTransientErrorDetectsKnownMessages(t *testing.T) {
 		"HTTP 504 Gateway Timeout",
 		"context deadline exceeded",
 		"connection reset by peer",
-		"rate_limit exceeded",
-		"too many requests",
 		"service unavailable",
 		"EOF",
 		"no such host",
@@ -190,6 +193,10 @@ func TestIsTransientErrorIgnoresNonTransient(t *testing.T) {
 	negatives := []string{
 		"HTTP 401 Unauthorized",
 		"HTTP 403 Forbidden",
+		`HTTP 403 from 10k: {"error":{"type":"rate_limit_error"}}`,
+		"HTTP 429: too many requests",
+		"stream idle timeout: upstream produced no data within idle window",
+		"net/http: timeout awaiting response headers",
 		"invalid_grant",
 		"some unrelated error",
 		"model_not_found",
@@ -320,6 +327,71 @@ func TestGetNextForModelExcludingSkipsExcludedAccount(t *testing.T) {
 	}
 }
 
+func TestGetNextForModelPrefersAgentRouterForClaude(t *testing.T) {
+	p := newTestPool(
+		config.Account{ID: "kiro", AuthMethod: "social"},
+		config.Account{ID: "agentrouter", AuthMethod: "agentrouter"},
+		config.Account{ID: "openai", AuthMethod: "external_openai"},
+	)
+
+	got := p.GetNextForModelExcluding("claude-opus-5", nil)
+	if got == nil {
+		t.Fatal("expected a Claude-capable external account")
+	}
+	if got.AuthMethod != "agentrouter" && got.AuthMethod != "external_openai" && got.AuthMethod != "external_agentrouter" {
+		t.Fatalf("selected %q (%s), want an external provider", got.ID, got.AuthMethod)
+	}
+}
+
+func TestAgentRouterCatalogFiltersUnsupportedModel(t *testing.T) {
+	p := newTestPool(config.Account{ID: "agentrouter", AuthMethod: "agentrouter"})
+	p.SetModelList("agentrouter", []string{"gpt-only-model"})
+
+	if got := p.GetNextForModelExcluding("claude-opus-5", nil); got != nil {
+		t.Fatalf("AgentRouter catalog does not contain claude-opus-5, got %#v", got)
+	}
+}
+
+func TestExternalCatalogMatchesClaudeAliasToSnapshot(t *testing.T) {
+	p := newTestPool(config.Account{ID: "external", AuthMethod: "external_openai"})
+	p.SetModelList("external", []string{"claude-opus-5-20260801"})
+
+	got := p.GetNextForModelExcluding("claude-opus-5[1m]", nil)
+	if got == nil || got.ID != "external" {
+		t.Fatalf("expected Claude alias to match dated snapshot, got %#v", got)
+	}
+}
+
+func TestGetNextForModelExhaustsAllMatchingAccounts(t *testing.T) {
+	p := newTestPool(
+		config.Account{ID: "match-1"},
+		config.Account{ID: "match-2"},
+		config.Account{ID: "match-3"},
+		config.Account{ID: "match-4"},
+		config.Account{ID: "match-5"},
+		config.Account{ID: "other-model"},
+	)
+	for i := 1; i <= 5; i++ {
+		p.SetModelList(fmt.Sprintf("match-%d", i), []string{"claude-opus-5"})
+	}
+	p.SetModelList("other-model", []string{"claude-sonnet-5"})
+
+	excluded := make(map[string]bool)
+	for len(excluded) < 5 {
+		account := p.GetNextForModelExcluding("claude-opus-5", excluded)
+		if account == nil {
+			t.Fatalf("routing stopped after %d matching accounts", len(excluded))
+		}
+		if account.ID == "other-model" {
+			t.Fatal("selected an account whose catalog lacks claude-opus-5")
+		}
+		excluded[account.ID] = true
+	}
+	if account := p.GetNextForModelExcluding("claude-opus-5", excluded); account != nil {
+		t.Fatalf("expected matching account set to be exhausted, got %#v", account)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Reload over-usage filtering
 // ---------------------------------------------------------------------------
@@ -372,16 +444,10 @@ func TestReloadDropsOverQuotaAccountWhenAllowOverUsageDisabled(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Model-lock fallback (503 "No available accounts" regression)
+// Model cooldown filtering
 // ---------------------------------------------------------------------------
 
-// TestGetNextForModelReturnsModelLockedAccountAsFallback verifies that when the
-// only account is model-locked (a purely in-memory penalty), GetNext still
-// returns it instead of nil. Previously the fallback pass skipped model-locked
-// accounts entirely, so a transient first-use failure on a freshly-added
-// account produced a 503 "No available accounts" that only a process restart
-// could clear.
-func TestGetNextForModelReturnsModelLockedAccountAsFallback(t *testing.T) {
+func TestGetNextForModelSkipsModelLockedAccount(t *testing.T) {
 	p := &AccountPool{
 		accounts:    []config.Account{{ID: "only", Enabled: true}},
 		cooldowns:   make(map[string]time.Time),
@@ -395,17 +461,12 @@ func TestGetNextForModelReturnsModelLockedAccountAsFallback(t *testing.T) {
 	}
 
 	acc := p.GetNextForModelExcluding("claude-sonnet-4.5", nil)
-	if acc == nil {
-		t.Fatal("expected model-locked account to be returned by fallback, got nil (503 regression)")
-	}
-	if acc.ID != "only" {
-		t.Fatalf("expected account 'only', got %q", acc.ID)
+	if acc != nil {
+		t.Fatalf("expected model-locked account to be skipped, got %#v", acc)
 	}
 }
 
-// TestGetNextForModelPrefersSoonestUnlocking verifies the fallback returns the
-// account whose in-memory penalty expires first when every candidate is locked.
-func TestGetNextForModelPrefersSoonestUnlocking(t *testing.T) {
+func TestGetNextForModelDoesNotReuseSoonestUnlockingAccount(t *testing.T) {
 	now := time.Now()
 	p := &AccountPool{
 		accounts: []config.Account{
@@ -422,11 +483,8 @@ func TestGetNextForModelPrefersSoonestUnlocking(t *testing.T) {
 	}
 
 	acc := p.GetNextForModelExcluding("m", nil)
-	if acc == nil {
-		t.Fatal("expected soonest-unlocking account, got nil")
-	}
-	if acc.ID != "soon" {
-		t.Fatalf("expected 'soon' (unlocks first), got %q", acc.ID)
+	if acc != nil {
+		t.Fatalf("expected all model-locked accounts to be skipped, got %#v", acc)
 	}
 }
 
@@ -445,5 +503,105 @@ func TestGetNextForModelStillExcludesExplicitlyExcluded(t *testing.T) {
 
 	if acc := p.GetNextForModelExcluding("m", map[string]bool{"only": true}); acc != nil {
 		t.Fatalf("expected nil when the only account is excluded, got %q", acc.ID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Prompt-cache routing and warmup control
+// ---------------------------------------------------------------------------
+
+func TestCacheWarmStateIsModelScoped(t *testing.T) {
+	p := newTestPool()
+	const (
+		accountID = "acct"
+		prefixKey = "prefix"
+		scope     = "https://chatgpt.example"
+	)
+
+	if !p.TryStartCacheWarm(accountID, "gpt-5.6-sol", prefixKey, scope) {
+		t.Fatal("first sol warmup should start")
+	}
+	p.CompleteCacheWarm(accountID, "gpt-5.6-sol", prefixKey, scope)
+
+	if p.TryStartCacheWarm(accountID, "gpt-5.6-sol", prefixKey, scope) {
+		t.Fatal("warm sol prefix should not start again before its TTL expires")
+	}
+	if !p.TryStartCacheWarm(accountID, "gpt-5.6-terra", prefixKey, scope) {
+		t.Fatal("warming sol must not suppress the same prefix for terra")
+	}
+}
+
+func TestTryStartCacheWarmDeduplicatesConcurrentRequests(t *testing.T) {
+	p := newTestPool()
+	var started int32
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if p.TryStartCacheWarm("acct", "gpt-5.6-sol", "prefix", "https://chatgpt.example") {
+				atomic.AddInt32(&started, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if started != 1 {
+		t.Fatalf("concurrent warmup reservations: got %d, want 1", started)
+	}
+}
+
+func TestCacheWarmFailureBackoffIsSharedByUpstreamScope(t *testing.T) {
+	p := newTestPool()
+	const scope = "https://chatgpt.example"
+	if !p.TryStartCacheWarm("a", "gpt-5.6-sol", "prefix-a", scope) {
+		t.Fatal("first warmup should start")
+	}
+	p.FailCacheWarm("a", "gpt-5.6-sol", "prefix-a", scope)
+
+	p.mu.RLock()
+	firstRetry := p.cacheWarmRetryAfter[cacheWarmScopeKey(scope)]
+	p.mu.RUnlock()
+	if remaining := time.Until(firstRetry); remaining < 29*time.Second || remaining > 31*time.Second {
+		t.Fatalf("first retry delay: got %s, want about 30s", remaining)
+	}
+	if p.TryStartCacheWarm("b", "gpt-5.6-terra", "prefix-b", scope) {
+		t.Fatal("a failed endpoint must pause warmups for every account sharing it")
+	}
+
+	// Advance only the circuit-breaker clock so a second failure can be observed.
+	p.mu.Lock()
+	p.cacheWarmRetryAfter[cacheWarmScopeKey(scope)] = time.Now().Add(-time.Second)
+	p.mu.Unlock()
+	if !p.TryStartCacheWarm("b", "gpt-5.6-terra", "prefix-b", scope) {
+		t.Fatal("warmup should resume after the retry window")
+	}
+	p.FailCacheWarm("b", "gpt-5.6-terra", "prefix-b", scope)
+
+	p.mu.RLock()
+	secondRetry := p.cacheWarmRetryAfter[cacheWarmScopeKey(scope)]
+	secondCount := p.cacheWarmFailureCount[cacheWarmScopeKey(scope)]
+	p.mu.RUnlock()
+	if secondCount != 2 {
+		t.Fatalf("failure count: got %d, want 2", secondCount)
+	}
+	if remaining := time.Until(secondRetry); remaining < 59*time.Second || remaining > 61*time.Second {
+		t.Fatalf("second retry delay: got %s, want about 1m", remaining)
+	}
+}
+
+func TestCacheStickinessIsModelScoped(t *testing.T) {
+	p := newTestPool(
+		config.Account{ID: "sol-account", Enabled: true},
+		config.Account{ID: "terra-account", Enabled: true},
+	)
+	p.RecordCacheStickiness("gpt-5.6-sol", "prefix", "sol-account")
+	p.RecordCacheStickiness("gpt-5.6-terra", "prefix", "terra-account")
+
+	if got := p.GetNextForModelWithCacheKey("gpt-5.6-sol", nil, "prefix"); got == nil || got.ID != "sol-account" {
+		t.Fatalf("sol sticky account: got %#v", got)
+	}
+	if got := p.GetNextForModelWithCacheKey("gpt-5.6-terra", nil, "prefix"); got == nil || got.ID != "terra-account" {
+		t.Fatalf("terra sticky account: got %#v", got)
 	}
 }

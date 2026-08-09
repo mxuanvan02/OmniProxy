@@ -4,9 +4,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"omniproxy/config"
 	"regexp"
 	"strings"
-	"omniproxy/config"
 	"time"
 
 	"github.com/google/uuid"
@@ -37,6 +37,19 @@ var modelAliases = []modelMapping{
 // Minor is capped at 1-2 digits with a \b boundary so dated snapshots
 // (claude-sonnet-4-20250514) are not accidentally rewritten.
 var claudeVersionPattern = regexp.MustCompile(`claude-(opus|sonnet|haiku)-(\d+)-(\d{1,2})\b`)
+
+// Claude Code appends [1m] to model IDs to request the 1M-context variant.
+// The gateway already selects the context window from its model policy, so
+// this client-only capability suffix must not be sent to Kiro or external
+// provider model registries.
+var claudeContextSuffixPattern = regexp.MustCompile(`(?i)\[1m\]$`)
+
+func stripClaudeContextSuffix(model string) string {
+	for claudeContextSuffixPattern.MatchString(model) {
+		model = claudeContextSuffixPattern.ReplaceAllString(model, "")
+	}
+	return model
+}
 
 // stripProviderPrefix removes a leading provider/vendor namespace from a model
 // name so that prefixed requests (e.g. "codezdev/claude-opus-4-8",
@@ -90,6 +103,8 @@ func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 		model = model[:len(model)-len(thinkingSuffix)]
 		lower = strings.ToLower(model)
 	}
+	model = stripClaudeContextSuffix(model)
+	lower = strings.ToLower(model)
 
 	// 1) Explicit aliases: dated snapshots, cross-family legacy IDs, non-Anthropic fallbacks.
 	for _, m := range modelAliases {
@@ -138,9 +153,9 @@ func stripThinkingSuffix(model, thinkingSuffix string) string {
 	lower := strings.ToLower(model)
 	suffixLower := strings.ToLower(thinkingSuffix)
 	if suffixLower != "" && strings.HasSuffix(lower, suffixLower) {
-		return model[:len(model)-len(thinkingSuffix)]
+		model = model[:len(model)-len(thinkingSuffix)]
 	}
-	return model
+	return stripClaudeContextSuffix(model)
 }
 
 // ==================== Claude API types ====================
@@ -223,6 +238,8 @@ type ClaudeUsage struct {
 
 const maxToolDescLen = 10237
 
+const claudeCodeToolExecutionGuidance = `Tool execution constraint: when the current task requires an action and a relevant tool is available, call the tool in this turn. Do not end the turn by merely promising, announcing, or describing an action that has not been performed. Ask the user only when required information or approval is genuinely missing.`
+
 func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	// Strip unsupported content types for this model (image/audio for models that don't support them).
 	stripFromClaudeRequest(req)
@@ -230,8 +247,17 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	modelID := MapModel(req.Model)
 	origin := "AI_EDITOR"
 
+	// Preserve Claude Code's action-oriented tool behavior across compatible
+	// providers. Some gateways otherwise treat its ordinary auto tool choice as
+	// permission to end with narration such as "running now" without a tool call.
+	rawSystemPrompt := extractSystemPrompt(req.System)
+	isClaudeCodeToolSession := len(req.Tools) > 0 && isClaudeCodeSystemPrompt(rawSystemPrompt)
+
 	// extract system prompt
 	systemPrompt := buildClaudeSystemPrompt(req.System, thinking)
+	if isClaudeCodeToolSession {
+		systemPrompt = appendPromptGuidance(systemPrompt, claudeCodeToolExecutionGuidance)
+	}
 
 	// build history messages
 	history := make([]KiroHistoryMessage, 0)
@@ -327,6 +353,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	// build payload
 	payload := &KiroPayload{}
 	payload.ToolNameMap = toolNameMap
+	payload.ToolChoice = cloneToolChoice(req.ToolChoice)
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.AgentTaskType = "vibe"
 	payload.ConversationState.AgentContinuationId = uuid.New().String()
@@ -380,6 +407,18 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	truncatePayloadToLimit(payload, systemPrompt != "")
 
 	return payload
+}
+
+func appendPromptGuidance(prompt, guidance string) string {
+	prompt = strings.TrimSpace(prompt)
+	guidance = strings.TrimSpace(guidance)
+	if guidance == "" || strings.Contains(prompt, guidance) {
+		return prompt
+	}
+	if prompt == "" {
+		return guidance
+	}
+	return prompt + "\n\n" + guidance
 }
 
 func buildClaudeSystemPrompt(system interface{}, thinking bool) string {
@@ -1030,6 +1069,7 @@ type OpenAIRequest struct {
 	TopP        float64         `json:"top_p,omitempty"`
 	Stream      bool            `json:"stream,omitempty"`
 	Tools       []OpenAITool    `json:"tools,omitempty"`
+	ToolChoice  interface{}     `json:"tool_choice,omitempty"`
 }
 
 type OpenAIMessage struct {
@@ -1287,6 +1327,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 
 	// build payload
 	payload := &KiroPayload{}
+	payload.ToolChoice = cloneToolChoice(req.ToolChoice)
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.ConversationID = buildConversationID(modelID, systemPrompt, firstOpenAIConversationAnchor(nonSystemMessages))
 	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
@@ -2127,11 +2168,15 @@ func KiroToOpenAIResponse(content string, toolUses []KiroToolUse, inputTokens, o
 	}
 }
 
-// extractThinkingFromContent extracts content from <thinking> tags
+// extractThinkingFromContent extracts content from <thinking> and <think> tags.
+// Both forms are accepted because upstream models (gpt-5.6-sol, some Claude
+// configs) may emit the short <think> form, while others use <thinking>.
+// Without stripping both, raw tags leak into the visible response.
 func extractThinkingFromContent(content string) (string, string) {
 	var reasoning string
 	result := content
 
+	// Strip <thinking>...</thinking> (long form, 10/11 char tags)
 	for {
 		start := strings.Index(result, "<thinking>")
 		if start == -1 {
@@ -2142,13 +2187,25 @@ func extractThinkingFromContent(content string) (string, string) {
 			break
 		}
 		end += start
-
-		// extract thinking content
 		thinkingContent := result[start+10 : end]
 		reasoning += thinkingContent
-
-		// remove thinking tags from result
 		result = result[:start] + result[end+11:]
+	}
+
+	// Strip <think>...</think> (short form, 6/7 char tags)
+	for {
+		start := strings.Index(result, "<think>")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(result[start:], "</think>")
+		if end == -1 {
+			break
+		}
+		end += start
+		thinkingContent := result[start+6 : end]
+		reasoning += thinkingContent
+		result = result[:start] + result[end+7:]
 	}
 
 	return strings.TrimSpace(result), reasoning

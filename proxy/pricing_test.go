@@ -15,6 +15,26 @@ func TestComputeCostGPT56Sol(t *testing.T) {
 	}
 }
 
+func TestComputeCostGPT56Terra(t *testing.T) {
+	// 1M input, 200K cached, 100K output -> uncached=800K.
+	// cost = 800K*2/1M + 200K*0.2/1M + 100K*12/1M = 1.6 + 0.04 + 1.2 = 2.84
+	got := ComputeCost("gpt-5.6-terra", 1_000_000, 200_000, 100_000)
+	want := 1.6 + 0.04 + 1.2
+	if math.Abs(got-want) > 1e-9 {
+		t.Fatalf("ComputeCost gpt-5.6-terra: got $%.4f, want $%.4f", got, want)
+	}
+}
+
+func TestComputeCostGPT56Luna(t *testing.T) {
+	// 1M input, 200K cached, 100K output -> uncached=800K.
+	// cost = 800K*0.2/1M + 200K*0.02/1M + 100K*1.2/1M = 0.284
+	got := ComputeCost("gpt-5.6-luna", 1_000_000, 200_000, 100_000)
+	want := 0.16 + 0.004 + 0.12
+	if math.Abs(got-want) > 1e-9 {
+		t.Fatalf("ComputeCost gpt-5.6-luna: got $%.4f, want $%.4f", got, want)
+	}
+}
+
 func TestComputeCostClaudeOpus48(t *testing.T) {
 	// 1M input, 800K cached, 50K output → uncached=200K
 	// cost = 200K*5/1M + 800K*0.5/1M + 50K*25/1M = 1 + 0.4 + 1.25 = 2.65
@@ -65,10 +85,10 @@ func TestEffectiveTokens(t *testing.T) {
 	cases := []struct {
 		input, cached, output, want int
 	}{
-		{1_000_000, 200_000, 100_000, 900_000},   // 800K + 100K
-		{1_000_000, 800_000, 50_000, 250_000},    // 200K + 50K
-		{100_000, 0, 50_000, 150_000},            // no cache
-		{100_000, 500_000, 50_000, 50_000},       // clamped cached=input → 0 + 50K
+		{1_000_000, 200_000, 100_000, 900_000}, // 800K + 100K
+		{1_000_000, 800_000, 50_000, 250_000},  // 200K + 50K
+		{100_000, 0, 50_000, 150_000},          // no cache
+		{100_000, 500_000, 50_000, 50_000},     // clamped cached=input → 0 + 50K
 	}
 	for _, c := range cases {
 		got := EffectiveTokens(c.input, c.cached, c.output)

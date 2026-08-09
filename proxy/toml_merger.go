@@ -29,14 +29,15 @@ type ConfigLine struct {
 
 // MergeState tracks the configuration state during merging
 type MergeState struct {
-	ActiveModel         string
-	ActiveProvider      string
-	SubagentModel       string
-	HasOmniProxySection bool
-	HasSubagentSection  bool
-	OmniProxySectionEnd int
-	SubagentSectionEnd  int
-	Lines               []ConfigLine
+	ActiveModel            string
+	ActiveProvider         string
+	ActiveReasoningEffort  string
+	SubagentModel          string
+	HasOmniProxySection    bool
+	HasSubagentSection     bool
+	OmniProxySectionEnd    int
+	SubagentSectionEnd     int
+	Lines                  []ConfigLine
 }
 
 // parseTomlValue strips an inline comment and matching surrounding quotes from
@@ -182,6 +183,8 @@ func scanConfig(lines []string) MergeState {
 					state.ActiveModel = cl.Value
 				} else if cl.Key == "model_provider" {
 					state.ActiveProvider = cl.Value
+				} else if cl.Key == "model_reasoning_effort" {
+					state.ActiveReasoningEffort = cl.Value
 				}
 			} else if currentSection == "agents.subagent" {
 				if cl.Key == "model" {
@@ -205,7 +208,7 @@ func scanConfig(lines []string) MergeState {
 }
 
 // MergeCodexConfig merges OmniProxy configuration into existing Codex config.toml
-func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
+func MergeCodexConfig(homeDir, model, baseURL, subagent, effort string) error {
 	configPath := filepath.Join(homeDir, ".codex", "config.toml")
 
 	// Read existing config or create empty
@@ -227,6 +230,7 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 
 	modelInjected := false
 	providerInjected := false
+	effortInjected := false
 	superKiroInjected := false
 	subagentInjected := false
 
@@ -242,6 +246,11 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 				output = append(output, fmt.Sprintf(`name = "OmniProxy"`))
 				output = append(output, fmt.Sprintf(`base_url = "%s"`, baseURL))
 				output = append(output, `wire_api = "responses"`)
+				// requires_openai_auth = true tells Codex CLI to use OpenAI
+				// authentication (auth.json with OPENAI_API_KEY) for this
+				// custom provider. Without this, Codex assumes no auth is
+				// needed and sends no API key → proxy rejects with 401.
+				output = append(output, `requires_openai_auth = true`)
 				superKiroInjected = true
 				skipUntilNextSection = true
 				continue
@@ -289,6 +298,17 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 					output = append(output, cl.Raw)
 					providerInjected = true
 				}
+			} else if cl.Key == "model_reasoning_effort" {
+				if effort != "" && cl.Value != effort {
+					output = append(output, "#"+cl.Raw)
+					if !effortInjected {
+						output = append(output, fmt.Sprintf(`model_reasoning_effort = "%s"`, effort))
+						effortInjected = true
+					}
+				} else {
+					output = append(output, cl.Raw)
+					effortInjected = true
+				}
 			} else {
 				// Other top-level settings, keep as-is
 				output = append(output, cl.Raw)
@@ -317,15 +337,21 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 			fmt.Sprintf(`# OmniProxy Configuration for Codex CLI`),
 			fmt.Sprintf(`model = "%s"`, model),
 			`model_provider = "omniproxy"`,
+		}
+		if effort != "" {
+			output = append(output, fmt.Sprintf(`model_reasoning_effort = "%s"`, effort))
+		}
+		output = append(output,
 			"",
 			"[model_providers.omniproxy]",
 			`name = "OmniProxy"`,
 			fmt.Sprintf(`base_url = "%s"`, baseURL),
 			`wire_api = "responses"`,
+			`requires_openai_auth = true`,
 			"",
 			"[agents.subagent]",
 			fmt.Sprintf(`model = "%s"`, subagent),
-		}
+		)
 	} else {
 		// Inject missing top-level settings at the start if not yet done
 		if !modelInjected || !providerInjected {
@@ -335,6 +361,9 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 			}
 			if !providerInjected {
 				header = append(header, `model_provider = "omniproxy"`)
+			}
+			if !effortInjected && effort != "" {
+				header = append(header, fmt.Sprintf(`model_reasoning_effort = "%s"`, effort))
 			}
 			header = append(header, "")
 			output = append(header, output...)
@@ -347,6 +376,7 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent string) error {
 			output = append(output, `name = "OmniProxy"`)
 			output = append(output, fmt.Sprintf(`base_url = "%s"`, baseURL))
 			output = append(output, `wire_api = "responses"`)
+			output = append(output, `requires_openai_auth = true`)
 		}
 
 		if !subagentInjected {

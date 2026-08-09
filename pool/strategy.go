@@ -107,7 +107,7 @@ func scoreAccount(acc config.Account, now time.Time) int {
 func scoreCostOptimized(acc config.Account) int {
 	// External OpenAI-compatible: rank by remaining credits (more = better).
 	// Negate by subtracting from a large base so higher remaining → lower score.
-	if acc.AuthMethod == "external_openai" && acc.ExtCreditLimit > 0 {
+	if isExternalAuthMethod(acc.AuthMethod) && acc.ExtCreditLimit > 0 {
 		remaining := acc.ExtCreditsRemaining
 		if remaining < 0 {
 			remaining = 0

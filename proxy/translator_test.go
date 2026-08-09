@@ -135,6 +135,73 @@ func TestOpenAIToKiroAssistantMapContentInHistory(t *testing.T) {
 	}
 }
 
+func TestClaudeCodeToolSessionAddsExecutionGuidance(t *testing.T) {
+	claudeCodeSystem := `You are Claude Code, Anthropic's official CLI for Claude.
+
+# Doing tasks
+Complete software engineering tasks for the user.
+
+# Using your tools
+Use the available tools when needed.`
+	tool := ClaudeTool{
+		Name:        "Bash",
+		Description: "Run a shell command",
+		InputSchema: map[string]interface{}{"type": "object"},
+	}
+
+	payload := ClaudeToKiro(&ClaudeRequest{
+		Model:    "claude-opus-5",
+		System:   claudeCodeSystem,
+		Messages: []ClaudeMessage{{Role: "user", Content: "run the tests"}},
+		Tools:    []ClaudeTool{tool},
+	}, false)
+
+	if len(payload.ConversationState.History) < 1 || payload.ConversationState.History[0].UserInputMessage == nil {
+		t.Fatal("expected system priming message")
+	}
+	got := payload.ConversationState.History[0].UserInputMessage.Content
+	if !strings.Contains(got, claudeCodeToolExecutionGuidance) {
+		t.Fatalf("Claude Code tool session missing execution guidance: %q", got)
+	}
+	if strings.Count(got, claudeCodeToolExecutionGuidance) != 1 {
+		t.Fatalf("execution guidance should appear exactly once: %q", got)
+	}
+}
+
+func TestToolExecutionGuidanceIsScopedToClaudeCodeToolSessions(t *testing.T) {
+	claudeCodeSystem := `You are Claude Code, Anthropic's official CLI for Claude.
+# Doing tasks
+# Using your tools`
+	tool := ClaudeTool{Name: "Bash", InputSchema: map[string]interface{}{"type": "object"}}
+
+	tests := []struct {
+		name   string
+		system string
+		tools  []ClaudeTool
+	}{
+		{name: "Claude Code without tools", system: claudeCodeSystem},
+		{name: "ordinary tool client", system: "You are a concise coding assistant.", tools: []ClaudeTool{tool}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := ClaudeToKiro(&ClaudeRequest{
+				Model:    "claude-opus-5",
+				System:   tc.system,
+				Messages: []ClaudeMessage{{Role: "user", Content: "help"}},
+				Tools:    tc.tools,
+			}, false)
+			if len(payload.ConversationState.History) == 0 || payload.ConversationState.History[0].UserInputMessage == nil {
+				t.Fatal("expected system priming message")
+			}
+			got := payload.ConversationState.History[0].UserInputMessage.Content
+			if strings.Contains(got, claudeCodeToolExecutionGuidance) {
+				t.Fatalf("unexpected execution guidance: %q", got)
+			}
+		})
+	}
+}
+
 func TestOpenAIToKiroAssistantToolCallsDoNotInjectPlaceholder(t *testing.T) {
 	req := &OpenAIRequest{
 		Model: "claude-sonnet-4.5",
@@ -416,6 +483,11 @@ func TestParseModelAndThinking(t *testing.T) {
 		{"haiku dash form", "claude-haiku-4-5", "claude-haiku-4.5", false},
 		{"haiku dot form", "claude-haiku-4.5", "claude-haiku-4.5", false},
 		{"future major bump", "claude-sonnet-5-0", "claude-sonnet-5.0", false},
+		{"fable 5", "claude-fable-5", "claude-fable-5", false},
+		{"fable 5 thinking", "claude-fable-5-thinking", "claude-fable-5", true},
+		{"fable 5 one million context", "claude-fable-5[1m]", "claude-fable-5", false},
+		{"opus 5 one million context", "claude-opus-5[1m]", "claude-opus-5", false},
+		{"sonnet 5 one million context", "claude-sonnet-5[1m]", "claude-sonnet-5", false},
 
 		// Bare family name passes through (no minor to normalize).
 		{"bare sonnet 4", "claude-sonnet-4", "claude-sonnet-4", false},

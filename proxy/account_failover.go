@@ -7,16 +7,13 @@ import (
 	"time"
 )
 
-// maxAccountRetryAttempts is no longer a fixed cap — the retry loops in handler.go
-// now iterate until all accounts are exhausted (GetNextForModelExcluding returns nil).
-// The constant is kept as a safety floor in case of refactoring gaps; actual iteration
-// is unbounded, bounded only by the pool's available unique accounts.
-const maxAccountRetryAttempts = 128
-
 func isQuotaErrorMessage(msg string) bool {
 	msg = strings.ToLower(msg)
 	return strings.Contains(msg, "429") ||
 		strings.Contains(msg, "quota") ||
+		strings.Contains(msg, "rate_limit") ||
+		strings.Contains(msg, "rate limit") ||
+		strings.Contains(msg, "too many requests") ||
 		strings.Contains(msg, "credit limit") ||
 		strings.Contains(msg, "usage_limit") ||
 		strings.Contains(msg, "usage limit")
@@ -41,6 +38,9 @@ func isProfileUnavailableErrorMessage(msg string) bool {
 
 func isAuthErrorMessage(msg string) bool {
 	msg = strings.ToLower(msg)
+	if isQuotaErrorMessage(msg) {
+		return false
+	}
 	// Match standalone status codes (no adjacent digits) — catches "401" from
 	// "refresh failed: 401 ..." and "HTTP 403 from ..." alike.
 	if hasStatusToken(msg, "401") || hasStatusToken(msg, "403") {
@@ -71,8 +71,8 @@ func isNetworkError(msg string) bool {
 		strings.Contains(lower, "eof") ||
 		strings.Contains(lower, "dial tcp") ||
 		strings.Contains(lower, "dial udp") ||
-		strings.Contains(lower, "timeout exceeded") ||      // Go http.Client.Timeout
-		strings.Contains(lower, "client.timeout") ||        // Go http.Client error prefix
+		strings.Contains(lower, "timeout exceeded") || // Go http.Client.Timeout
+		strings.Contains(lower, "client.timeout") || // Go http.Client error prefix
 		strings.Contains(lower, "context deadline exceeded") || // Request context timeout
 		strings.Contains(lower, "stream idle timeout") // idleTimeoutReader — upstream silent after 200
 }
@@ -110,7 +110,7 @@ func (h *Handler) disableAccount(account *config.Account, banStatus, banReason s
 	account.BanReason = truncateErrBody([]byte(banReason))
 	account.BanTime = time.Now().Unix()
 	account.Enabled = false
-	if err := config.UpdateAccount(account.ID, *account); err != nil {
+	if err := config.UpdateAccountPreservingCredentials(account.ID, *account); err != nil {
 		logger.Errorf("[AccountFailover] Failed to persist %s status for %s: %v", banStatus, account.Email, err)
 	} else {
 		logger.Warnf("[AccountFailover] Marked %s as %s: %s", account.Email, banStatus, banReason)

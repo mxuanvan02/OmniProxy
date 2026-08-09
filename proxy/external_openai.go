@@ -16,10 +16,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
-	"strings"
 	"omniproxy/config"
 	"omniproxy/logger"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -34,9 +34,13 @@ const externalAuthMethod = "external_openai"
 var ErrExternalCreditsNotSupported = fmt.Errorf("provider does not expose /api/me (credits API not supported)")
 
 // isExternalAccount reports whether the account routes to an external
-// OpenAI-compatible provider instead of the native Kiro/AWS backend.
+// OpenAI-compatible or AgentRouter provider instead of the native Kiro/AWS backend.
 func isExternalAccount(account *config.Account) bool {
-	return account != nil && account.AuthMethod == externalAuthMethod
+	if account == nil {
+		return false
+	}
+	m := strings.ToLower(strings.TrimSpace(account.AuthMethod))
+	return m == externalAuthMethod || m == "agentrouter" || m == "external_agentrouter"
 }
 
 // CallExternalOpenAI forwards a KiroPayload to an external OpenAI-compatible
@@ -73,7 +77,7 @@ func CallExternalOpenAI(account *config.Account, payload *KiroPayload, callback 
 		return fmt.Errorf("external call marshal: %w", err)
 	}
 
-	endpoint := baseURL + "/v1/chat/completions"
+	endpoint := openAICompatibleEndpoint(baseURL, "/v1/chat/completions")
 	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(reqBody))
 	if err != nil {
 		return fmt.Errorf("external call new request: %w", err)
@@ -153,7 +157,7 @@ func kiroPayloadToOpenAIRequest(payload *KiroPayload, account *config.Account) (
 	// Resolve against the provider's model list: some providers use dated
 	// snapshots (e.g. "claude-haiku-4-5-20251001") instead of short IDs.
 	// Prefix-match the cached list to pick the closest available model.
-	if account != nil {
+	if account != nil && !isAgentRouterAccount(account) {
 		modelID = resolveExternalModelID(account, modelID)
 	}
 
@@ -259,11 +263,9 @@ func kiroPayloadToOpenAIRequest(payload *KiroPayload, account *config.Account) (
 	// When CacheControlPassthrough is enabled, attach Anthropic-style
 	// cache_control breakpoints at stable prefix boundaries so upstream
 	// providers that honour prompt caching (e.g. Anthropic via OpenAI-
-	// compatible gateways) can cache the system prompt + tool definitions +
-	// conversation history. Anthropic allows up to 4 breakpoints; we place
-	// them at: system message, last history message, and the current user
-	// message (when distinct). This is a no-op for providers that ignore
-	// the field.
+	// compatible gateways) can cache the durable system prompt and conversation
+	// history. The current user turn is deliberately excluded: it changes on the
+	// next request and otherwise creates cache-write churn with little reuse.
 	if config.GetCacheControlPassthrough() && len(msgs) > 0 {
 		applyExternalCacheControl(msgs)
 	}
@@ -282,6 +284,9 @@ func kiroPayloadToOpenAIRequest(payload *KiroPayload, account *config.Account) (
 			})
 		}
 		body["tools"] = tools
+	}
+	if choice := openAIToolChoice(payload.ToolChoice, payload); choice != nil {
+		body["tool_choice"] = choice
 	}
 
 	if payload.InferenceConfig != nil {
@@ -305,15 +310,71 @@ func kiroPayloadToOpenAIRequest(payload *KiroPayload, account *config.Account) (
 	return body, nil
 }
 
+// openAIToolChoice converts Anthropic's tool_choice vocabulary to the
+// OpenAI-compatible vocabulary used by external chat-completions providers.
+// A nil choice is intentionally omitted so upstream keeps its default auto
+// behavior for ordinary turns.
+func openAIToolChoice(choice interface{}, payload *KiroPayload) interface{} {
+	switch value := choice.(type) {
+	case string:
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "any", "required":
+			return "required"
+		case "none", "auto":
+			return strings.ToLower(strings.TrimSpace(value))
+		default:
+			return value
+		}
+	case map[string]interface{}:
+		typeName, _ := value["type"].(string)
+		switch strings.ToLower(strings.TrimSpace(typeName)) {
+		case "any", "required":
+			return "required"
+		case "none", "auto":
+			return strings.ToLower(strings.TrimSpace(typeName))
+		case "tool", "function":
+			name, _ := value["name"].(string)
+			if name == "" {
+				if fn, ok := value["function"].(map[string]interface{}); ok {
+					name, _ = fn["name"].(string)
+				}
+			}
+			if name == "" {
+				return nil
+			}
+			return map[string]interface{}{
+				"type": "function",
+				"function": map[string]interface{}{
+					"name": restoreToolName(payload, name),
+				},
+			}
+		}
+	}
+	return choice
+}
+
+func cloneToolChoice(value interface{}) interface{} {
+	if value == nil {
+		return nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return value
+	}
+	var clone interface{}
+	if err := json.Unmarshal(data, &clone); err != nil {
+		return value
+	}
+	return clone
+}
+
 // applyExternalCacheControl attaches Anthropic-style cache_control breakpoints
 // to up to 4 stable prefix boundaries in the OpenAI chat messages list:
 //
 //  1. The system message (if present) — the most stable, highest-value prefix.
 //  2. The last non-tool history message before the current turn.
-//  3. The current user message (when it is not the only message).
 //
-// Anthropic caps cache_control at 4 breakpoints per request; we stay under
-// that limit. The field is added in-place to the message maps. Providers that
+// The field is added in-place to the message maps. Providers that
 // do not understand cache_control will ignore it (OpenAI) or reject it — the
 // operator is responsible for enabling this only for providers that honour it.
 //
@@ -349,16 +410,16 @@ func applyExternalCacheControl(msgs []map[string]interface{}) {
 		}
 	}
 
-	// 3) Current user message (final message) — only when there is enough
-	//    history that caching the prefix is worthwhile. We do NOT mark it
-	//    when it is the only message (no prefix to cache).
+	// 3) Current user message. This creates a cache breakpoint at the end of
+	// the stable prefix while leaving interior history messages untouched.
 	if breakpoints < maxBreakpoints && len(msgs) >= 3 {
-		lastIdx := len(msgs) - 1
-		if role, _ := msgs[lastIdx]["role"].(string); role == "user" || role == "tool" {
-			msgs[lastIdx]["cache_control"] = cacheControl
+		currentIdx := len(msgs) - 1
+		if role, _ := msgs[currentIdx]["role"].(string); role == "user" {
+			msgs[currentIdx]["cache_control"] = cacheControl
 			breakpoints++
 		}
 	}
+
 }
 
 func openAIUserContent(text string, images []KiroImage) interface{} {
@@ -469,12 +530,52 @@ func restoreToolName(payload *KiroPayload, name string) string {
 	return name
 }
 
+// restoreCallbackToolNames canonicalizes upstream tool calls before they reach
+// protocol-specific response handlers. In particular, Codex may return the
+// sanitized names it received (for example "read" instead of Claude's
+// case-sensitive "Read"). Unknown names pass through unchanged.
+func restoreCallbackToolNames(payload *KiroPayload, callback *KiroStreamCallback) *KiroStreamCallback {
+	if callback == nil || callback.OnToolUse == nil || payload == nil || len(payload.ToolNameMap) == 0 {
+		return callback
+	}
+
+	wrapped := *callback
+	originalOnToolUse := callback.OnToolUse
+	wrapped.OnToolUse = func(tu KiroToolUse) {
+		tu.Name = restoreToolName(payload, tu.Name)
+		originalOnToolUse(tu)
+	}
+	return &wrapped
+}
+
 // ==================== SSE parsing ====================
 
 type externalToolAccum struct {
 	ID        string
 	Name      string
 	Arguments string
+}
+
+// normalizeUpstreamStopReason maps the terminal names used by the upstream
+// providers to the values expected by the Claude adapter.
+func normalizeUpstreamStopReason(reason string) string {
+	switch strings.ToLower(strings.TrimSpace(reason)) {
+	case "", "stop", "completed", "end_turn":
+		return "end_turn"
+	case "length", "max_tokens", "max_output_tokens":
+		return "max_tokens"
+	case "tool_calls", "function_call":
+		return "tool_use"
+	default:
+		return strings.ToLower(strings.TrimSpace(reason))
+	}
+}
+
+type externalSSELineResult struct {
+	recognized bool
+	terminal   bool
+	stopReason string
+	err        error
 }
 
 // parseExternalOpenAISSE reads an OpenAI streaming chat-completion SSE stream
@@ -498,6 +599,8 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 	var inputTokens, outputTokens int
 	toolAccums := map[int]*externalToolAccum{}
 	var toolOrder []int
+	terminal := false
+	stopReason := ""
 
 	emitToolCalls := func() {
 		for _, idx := range toolOrder {
@@ -537,8 +640,13 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 			}
 			if err == io.EOF {
 				if strings.TrimSpace(line) != "" {
-					if handled := processExternalSSELine(line, callback, toolAccums, &toolOrder, &inputTokens, &outputTokens); handled {
-						// last line had content
+					result := processExternalSSELine(line, callback, toolAccums, &toolOrder, &inputTokens, &outputTokens)
+					if result.err != nil {
+						return result.err
+					}
+					terminal = terminal || result.terminal
+					if result.stopReason != "" {
+						stopReason = result.stopReason
 					}
 				}
 				break
@@ -558,6 +666,10 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
+			terminal = true
+			if stopReason == "" {
+				stopReason = "end_turn"
+			}
 			break
 		}
 
@@ -568,110 +680,74 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 		// the next model instead of treating the empty stream as success.
 		if errMsg := extractExternalSSEError([]byte(data)); errMsg != "" {
 			emitToolCalls()
-			if callback.OnComplete != nil {
-				callback.OnComplete(inputTokens, outputTokens)
-			}
 			return fmt.Errorf("external provider error: %s", errMsg)
 		}
-
-		var chunk struct {
-			Choices []struct {
-				Delta struct {
-					Content          string `json:"content"`
-					ReasoningContent string `json:"reasoning_content"`
-					ToolCalls        []struct {
-						Index    int    `json:"index"`
-						ID       string `json:"id"`
-						Type     string `json:"type"`
-						Function struct {
-							Name      string `json:"name"`
-							Arguments string `json:"arguments"`
-						} `json:"function"`
-					} `json:"tool_calls"`
-				} `json:"delta"`
-				FinishReason string `json:"finish_reason"`
-			} `json:"choices"`
-			Usage *struct {
-				PromptTokens     int `json:"prompt_tokens"`
-				CompletionTokens int `json:"completion_tokens"`
-				TotalTokens      int `json:"total_tokens"`
-				PromptTokensDetails *struct {
-					CachedTokens int `json:"cached_tokens"`
-				} `json:"prompt_tokens_details,omitempty"`
-			} `json:"usage"`
+		result := processExternalSSEData(data, callback, toolAccums, &toolOrder, &inputTokens, &outputTokens)
+		if result.err != nil {
+			return result.err
 		}
-		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
-			logger.Debugf("[ExternalOpenAI] unmarshal chunk failed: %v (data=%s)", err, data)
-			continue
+		terminal = terminal || result.terminal
+		if result.stopReason != "" {
+			stopReason = result.stopReason
 		}
-
-		for _, ch := range chunk.Choices {
-			if ch.Delta.Content != "" && callback.OnText != nil {
-				callback.OnText(ch.Delta.Content, false)
-			}
-			if ch.Delta.ReasoningContent != "" && callback.OnText != nil {
-				callback.OnText(ch.Delta.ReasoningContent, true)
-			}
-			for _, tc := range ch.Delta.ToolCalls {
-				acc, ok := toolAccums[tc.Index]
-				if !ok {
-					acc = &externalToolAccum{}
-					toolAccums[tc.Index] = acc
-					toolOrder = append(toolOrder, tc.Index)
-				}
-				if tc.ID != "" {
-					acc.ID = tc.ID
-				}
-				if tc.Function.Name != "" {
-					acc.Name = tc.Function.Name
-				}
-				acc.Arguments += tc.Function.Arguments
-			}
-		}
-
-		if chunk.Usage != nil {
-			inputTokens = chunk.Usage.PromptTokens
-			outputTokens = chunk.Usage.CompletionTokens
-			// Forward the upstream's native prompt-cache hit count so the
-			// handler reports real cached tokens to the client instead of
-			// the locally-simulated promptCacheTracker numbers.
-			if chunk.Usage.PromptTokensDetails != nil &&
-				chunk.Usage.PromptTokensDetails.CachedTokens > 0 &&
-				callback.OnCacheRead != nil {
-				callback.OnCacheRead(chunk.Usage.PromptTokensDetails.CachedTokens)
-			}
-		}
+	}
+	if !terminal {
+		return fmt.Errorf("external SSE stream ended before a terminal finish_reason or [DONE]")
 	}
 
 	emitToolCalls()
+	if stopReason == "" {
+		stopReason = "end_turn"
+	}
+	if callback.OnStopReason != nil {
+		callback.OnStopReason(stopReason)
+	}
 	if callback.OnComplete != nil {
 		callback.OnComplete(inputTokens, outputTokens)
 	}
 	return nil
 }
 
-// processExternalSSELine handles a single non-empty SSE data line. Returns true
-// if the line was a recognised data event (used by the EOF tail handler).
-// Note: inline error events are handled by extractExternalSSEError in the main
-// loop; this tail handler only processes content chunks for the final partial line.
-func processExternalSSELine(line string, callback *KiroStreamCallback, toolAccums map[int]*externalToolAccum, toolOrder *[]int, inputTokens, outputTokens *int) bool {
+// processExternalSSELine handles a single non-empty SSE data line, including
+// the final line returned together with io.EOF.
+func processExternalSSELine(line string, callback *KiroStreamCallback, toolAccums map[int]*externalToolAccum, toolOrder *[]int, inputTokens, outputTokens *int) externalSSELineResult {
 	if !strings.HasPrefix(line, "data:") {
-		return false
+		return externalSSELineResult{}
 	}
 	data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 	if data == "[DONE]" {
-		return true
+		return externalSSELineResult{recognized: true, terminal: true, stopReason: "end_turn"}
 	}
+	return processExternalSSEData(data, callback, toolAccums, toolOrder, inputTokens, outputTokens)
+}
+
+func processExternalSSEData(data string, callback *KiroStreamCallback, toolAccums map[int]*externalToolAccum, toolOrder *[]int, inputTokens, outputTokens *int) externalSSELineResult {
 	var chunk struct {
 		Choices []struct {
 			Delta struct {
 				Content          string `json:"content"`
 				ReasoningContent string `json:"reasoning_content"`
+				ToolCalls        []struct {
+					Index    int    `json:"index"`
+					ID       string `json:"id"`
+					Function struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
 			} `json:"delta"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
+		Usage *struct {
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			PromptTokensDetails *struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details,omitempty"`
+		} `json:"usage"`
 	}
-	if json.Unmarshal([]byte(data), &chunk) != nil {
-		return false
+	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+		return externalSSELineResult{err: fmt.Errorf("external SSE parse: %w", err)}
 	}
 	for _, ch := range chunk.Choices {
 		if ch.Delta.Content != "" && callback.OnText != nil {
@@ -680,8 +756,40 @@ func processExternalSSELine(line string, callback *KiroStreamCallback, toolAccum
 		if ch.Delta.ReasoningContent != "" && callback.OnText != nil {
 			callback.OnText(ch.Delta.ReasoningContent, true)
 		}
+		for _, tc := range ch.Delta.ToolCalls {
+			acc, ok := toolAccums[tc.Index]
+			if !ok {
+				acc = &externalToolAccum{}
+				toolAccums[tc.Index] = acc
+				*toolOrder = append(*toolOrder, tc.Index)
+			}
+			if tc.ID != "" {
+				acc.ID = tc.ID
+			}
+			if tc.Function.Name != "" {
+				acc.Name = tc.Function.Name
+			}
+			acc.Arguments += tc.Function.Arguments
+		}
 	}
-	return true
+	if chunk.Usage != nil {
+		*inputTokens = chunk.Usage.PromptTokens
+		*outputTokens = chunk.Usage.CompletionTokens
+		if chunk.Usage.PromptTokensDetails != nil &&
+			chunk.Usage.PromptTokensDetails.CachedTokens > 0 && callback.OnCacheRead != nil {
+			callback.OnCacheRead(chunk.Usage.PromptTokensDetails.CachedTokens)
+		}
+	}
+	for _, ch := range chunk.Choices {
+		if ch.FinishReason != "" {
+			return externalSSELineResult{
+				recognized: true,
+				terminal:   true,
+				stopReason: normalizeUpstreamStopReason(ch.FinishReason),
+			}
+		}
+	}
+	return externalSSELineResult{recognized: true}
 }
 
 // extractExternalSSEError checks whether a JSON SSE data payload is an
@@ -693,7 +801,9 @@ func processExternalSSELine(line string, callback *KiroStreamCallback, toolAccum
 // and combo fallback never triggers.
 func extractExternalSSEError(data []byte) string {
 	var probe struct {
-		Error  *struct{ Message string `json:"message"` } `json:"error"`
+		Error *struct {
+			Message string `json:"message"`
+		} `json:"error"`
 		Detail string `json:"detail"`
 	}
 	if err := json.Unmarshal(data, &probe); err != nil {
@@ -737,11 +847,12 @@ func parseExternalOpenAIJSON(body io.Reader, callback *KiroStreamCallback) error
 					} `json:"function"`
 				} `json:"tool_calls"`
 			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
 		} `json:"choices"`
 		Usage *struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			TotalTokens         int `json:"total_tokens"`
 			PromptTokensDetails *struct {
 				CachedTokens int `json:"cached_tokens"`
 			} `json:"prompt_tokens_details,omitempty"`
@@ -793,6 +904,16 @@ func parseExternalOpenAIJSON(body io.Reader, callback *KiroStreamCallback) error
 			callback.OnCacheRead(resp.Usage.PromptTokensDetails.CachedTokens)
 		}
 	}
+	stopReason := "end_turn"
+	for _, ch := range resp.Choices {
+		if ch.FinishReason != "" {
+			stopReason = normalizeUpstreamStopReason(ch.FinishReason)
+			break
+		}
+	}
+	if callback.OnStopReason != nil {
+		callback.OnStopReason(stopReason)
+	}
 	if callback.OnComplete != nil {
 		callback.OnComplete(inTok, outTok)
 	}
@@ -812,7 +933,7 @@ func fetchExternalProviderModels(account *config.Account) ([]ModelInfo, error) {
 		return nil, fmt.Errorf("no apiKey")
 	}
 
-	req, err := http.NewRequest("GET", baseURL+"/v1/models", nil)
+	req, err := http.NewRequest("GET", openAICompatibleEndpoint(baseURL, "/v1/models"), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -832,8 +953,13 @@ func fetchExternalProviderModels(account *config.Account) ([]ModelInfo, error) {
 
 	var result struct {
 		Data []struct {
-			ID      string `json:"id"`
-			OwnedBy string `json:"owned_by,omitempty"`
+			ID               string      `json:"id"`
+			OwnedBy          string      `json:"owned_by,omitempty"`
+			Modalities       interface{} `json:"modalities,omitempty"`
+			InputModalities  interface{} `json:"input_modalities,omitempty"`
+			OutputModalities interface{} `json:"output_modalities,omitempty"`
+			Capabilities     interface{} `json:"capabilities,omitempty"`
+			Type             string      `json:"type,omitempty"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -844,9 +970,66 @@ func fetchExternalProviderModels(account *config.Account) ([]ModelInfo, error) {
 		if m.ID == "" {
 			continue
 		}
-		out = append(out, ModelInfo{ModelId: m.ID, ModelName: m.ID})
+		provider := strings.TrimSpace(m.OwnedBy)
+		if provider == "" {
+			provider = "external"
+		}
+		out = append(out, ModelInfo{
+			ModelId:     m.ID,
+			ModelName:   m.ID,
+			Provider:    provider,
+			Modalities:  flattenModelMetadata(m.Modalities),
+			OutputTypes: append(flattenModelMetadata(m.OutputModalities), imageCapabilityMetadata(m.Capabilities)...),
+		})
 	}
 	return out, nil
+}
+
+// openAICompatibleEndpoint accepts either a provider root URL or a URL that
+// already ends in /v1. This keeps all OpenAI-compatible adapters from
+// producing invalid paths such as /v1/v1/models.
+func openAICompatibleEndpoint(baseURL, path string) string {
+	baseURL = strings.TrimRight(strings.TrimSpace(baseURL), "/")
+	path = "/" + strings.TrimLeft(strings.TrimSpace(path), "/")
+	if strings.HasSuffix(baseURL, "/v1") && strings.HasPrefix(path, "/v1/") {
+		path = strings.TrimPrefix(path, "/v1")
+	}
+	return baseURL + path
+}
+
+func flattenModelMetadata(value interface{}) []string {
+	var out []string
+	var visit func(interface{})
+	visit = func(current interface{}) {
+		switch item := current.(type) {
+		case string:
+			if value := strings.TrimSpace(item); value != "" {
+				out = append(out, value)
+			}
+		case []interface{}:
+			for _, child := range item {
+				visit(child)
+			}
+		case map[string]interface{}:
+			for key, child := range item {
+				visit(key)
+				visit(child)
+			}
+		}
+	}
+	visit(value)
+	return out
+}
+
+func imageCapabilityMetadata(value interface{}) []string {
+	values := flattenModelMetadata(value)
+	for _, item := range values {
+		lower := strings.ToLower(item)
+		if strings.Contains(lower, "image") && (strings.Contains(lower, "output") || strings.Contains(lower, "generate") || lower == "image") {
+			return []string{"image output"}
+		}
+	}
+	return nil
 }
 
 // dispatchChat routes a chat request to the appropriate upstream based on the
@@ -855,8 +1038,12 @@ func fetchExternalProviderModels(account *config.Account) ([]ModelInfo, error) {
 // (Claude/OpenAI, stream/non-stream) go through this so external accounts are
 // supported uniformly without per-handler branching.
 func dispatchChat(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+	callback = restoreCallbackToolNames(payload, callback)
 	if isCodexAccount(account) {
 		return CallExternalCodex(account, payload, callback)
+	}
+	if isAgentRouterAccount(account) {
+		return CallExternalAgentRouter(account, payload, callback)
 	}
 	if isExternalAccount(account) {
 		return CallExternalOpenAI(account, payload, callback)
@@ -869,21 +1056,30 @@ func dispatchChat(account *config.Account, payload *KiroPayload, callback *KiroS
 // upstream latency on success, or an error describing the failure.
 func testExternalProvider(account *config.Account) (time.Duration, error) {
 	start := time.Now()
+	if isAgentRouterAccount(account) {
+		if _, err := CallAgentRouterTest(account); err != nil {
+			return 0, err
+		}
+		return time.Since(start), nil
+	}
+
+	model := "auto"
 	payload := &KiroPayload{}
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.ConversationID = "omniproxy-test"
 	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
 		Content: "ping",
-		ModelID: "auto",
+		ModelID: model,
 		Origin:  "AI_EDITOR",
 	}
+	payload.OriginalModel = model
 	done := make(chan struct{})
 	var callErr error
 	cb := &KiroStreamCallback{
 		OnError: func(err error) { callErr = err },
 	}
 	go func() {
-		callErr = CallExternalOpenAI(account, payload, cb)
+		callErr = dispatchChat(account, payload, cb)
 		close(done)
 	}()
 	select {

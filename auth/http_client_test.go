@@ -3,6 +3,9 @@ package auth
 import (
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -18,18 +21,52 @@ func TestBuildAuthTransportUsesExplicitProxyURL(t *testing.T) {
 }
 
 func TestBuildAuthTransportFallsBackToEnvironmentProxy(t *testing.T) {
-	t.Setenv("HTTPS_PROXY", "http://env-proxy.local:2323")
-	t.Setenv("NO_PROXY", "")
-	t.Setenv("no_proxy", "")
+	const helperEnv = "GO_WANT_AUTH_ENV_PROXY_HELPER"
+	const wantProxy = "http://env-proxy.local:2323"
 
-	transport := buildAuthTransport("")
-	req := &http.Request{URL: mustParseURL(t, "https://oidc.us-east-1.amazonaws.com")}
+	if os.Getenv(helperEnv) == "1" {
+		transport := buildAuthTransport("")
+		req := &http.Request{URL: mustParseURL(t, "https://oidc.us-east-1.amazonaws.com")}
 
-	got, err := transport.Proxy(req)
-	if err != nil {
-		t.Fatalf("unexpected proxy error: %v", err)
+		got, err := transport.Proxy(req)
+		if err != nil {
+			t.Fatalf("unexpected proxy error: %v", err)
+		}
+		assertProxyURL(t, got, wantProxy)
+		return
 	}
-	assertProxyURL(t, got, "http://env-proxy.local:2323")
+
+	// http.ProxyFromEnvironment caches its first environment lookup per
+	// process. Run this assertion in a fresh test process so other auth tests
+	// cannot make its result depend on execution order.
+	cmd := exec.Command(os.Args[0], "-test.run=^TestBuildAuthTransportFallsBackToEnvironmentProxy$")
+	cmd.Env = append(withoutProxyEnvironment(os.Environ()),
+		helperEnv+"=1",
+		"HTTPS_PROXY="+wantProxy,
+		"HTTP_PROXY=",
+		"ALL_PROXY=",
+		"NO_PROXY=",
+		"https_proxy="+wantProxy,
+		"http_proxy=",
+		"all_proxy=",
+		"no_proxy=",
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("environment proxy helper failed: %v\n%s", err, output)
+	}
+}
+
+func withoutProxyEnvironment(environ []string) []string {
+	filtered := make([]string, 0, len(environ))
+	for _, entry := range environ {
+		key, _, _ := strings.Cut(entry, "=")
+		switch strings.ToLower(key) {
+		case "http_proxy", "https_proxy", "all_proxy", "no_proxy":
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return filtered
 }
 
 func mustParseURL(t *testing.T, raw string) *url.URL {

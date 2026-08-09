@@ -162,14 +162,14 @@
   const PROVIDER_ALIAS_NAMES = {
     cc: 'Claude Code', ag: 'Antigravity', cx: 'OpenAI Codex',
     if: 'iFlow AI', qw: 'Qwen Code', gc: 'Gemini CLI',
-    gh: 'GitHub Copilot', kr: 'Kiro AI',
+    gh: 'GitHub Copilot', kr: 'Kiro AI', 'kiro-proxy': 'Kiro AI',
     openrouter: 'OpenRouter', glm: 'GLM Coding', kimi: 'Kimi Coding',
     minimax: 'Minimax Coding', openai: 'OpenAI', anthropic: 'Anthropic',
-    gemini: 'Gemini'
+    gemini: 'Gemini', 'openai-codex': 'OpenAI Codex (ChatGPT sub)'
   };
   const PROVIDER_ALIAS_ORDER = [
-    'cc','ag','cx','if','qw','gc','gh','kr',
-    'openrouter','glm','kimi','minimax','openai','anthropic','gemini'
+    'cc','ag','cx','if','qw','gc','gh','kr','kiro-proxy',
+    'openrouter','glm','kimi','minimax','openai','openai-codex','anthropic','gemini'
   ];
 
   let pickerModels = [];

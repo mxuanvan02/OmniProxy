@@ -7,10 +7,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"omniproxy/config"
-	"omniproxy/logger"
 	"net/http"
 	"net/url"
+	"omniproxy/config"
+	"omniproxy/logger"
 	"os"
 	"regexp"
 	"strconv"
@@ -58,6 +58,8 @@ var kiroEndpoints = []kiroEndpoint{
 var kiroHttpStore atomic.Pointer[http.Client]
 var kiroRestHttpStore atomic.Pointer[http.Client]
 
+const imageHTTPTimeout = 15 * time.Minute
+
 // proxyClientCache caches http.Client instances keyed by proxy URL for per-account proxy support.
 var proxyClientCache sync.Map
 
@@ -101,6 +103,25 @@ func GetRestClientForProxy(proxyURL string) *http.Client {
 	return client
 }
 
+// GetImageClientForProxy returns a long-lived REST client for image generation.
+// Image generation can spend several minutes before returning its artifact;
+// the normal REST client is intentionally short-lived for metadata APIs.
+func GetImageClientForProxy(proxyURL string) *http.Client {
+	cacheKey := "image:" + proxyURL
+
+	if cached, ok := proxyClientCache.Load(cacheKey); ok {
+		return cached.(*http.Client)
+	}
+	transport := buildKiroTransport(proxyURL)
+	transport.ResponseHeaderTimeout = imageHTTPTimeout
+	client := &http.Client{
+		Timeout:   imageHTTPTimeout,
+		Transport: transport,
+	}
+	actual, _ := proxyClientCache.LoadOrStore(cacheKey, client)
+	return actual.(*http.Client)
+}
+
 // ResolveAccountProxyURL returns the effective proxy URL for an account.
 // Falls back to global config.GetProxyURL() if the account has no per-account proxy.
 func ResolveAccountProxyURL(account *config.Account) string {
@@ -113,11 +134,12 @@ func ResolveAccountProxyURL(account *config.Account) string {
 // buildKiroTransport constructs an HTTP Transport with optional outbound proxy support.
 func buildKiroTransport(proxyURL string) *http.Transport {
 	t := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 20,
-		IdleConnTimeout:     90 * time.Second,
-		DisableCompression:  false,
-		ForceAttemptHTTP2:   true,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   20,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: initialStreamDataTimeout,
+		DisableCompression:    false,
+		ForceAttemptHTTP2:     true,
 	}
 	if proxyURL != "" {
 		if u, err := url.Parse(proxyURL); err == nil {
@@ -163,6 +185,9 @@ type KiroPayload struct {
 	} `json:"conversationState"`
 	ProfileArn      string           `json:"profileArn,omitempty"`
 	InferenceConfig *InferenceConfig `json:"inferenceConfig,omitempty"`
+	// ToolChoice preserves the client's explicit tool-selection instruction for
+	// adapters that support it. Native Kiro does not accept this field.
+	ToolChoice interface{} `json:"-"`
 
 	// ToolNameMap maps sanitized tool names (sent to Kiro) back to the
 	// original names supplied by the client. Used to restore original names
@@ -238,30 +263,41 @@ type KiroToolUse struct {
 }
 
 type InferenceConfig struct {
-	MaxTokens        int                  `json:"maxTokens,omitempty"`
-	Temperature      float64              `json:"temperature,omitempty"`
-	TopP             float64              `json:"topP,omitempty"`
-	Thinking         *ClaudeThinkingConfig `json:"-"`
-	ReasoningEffort  string               `json:"-"`
+	MaxTokens       int                   `json:"maxTokens,omitempty"`
+	Temperature     float64               `json:"temperature,omitempty"`
+	TopP            float64               `json:"topP,omitempty"`
+	Thinking        *ClaudeThinkingConfig `json:"-"`
+	ReasoningEffort string                `json:"-"`
 }
 
 // ==================== Stream Callbacks ====================
 
 // KiroStreamCallback stream response callbacks
 type KiroStreamCallback struct {
-	OnText         func(text string, isThinking bool)
-	OnToolUse      func(toolUse KiroToolUse)
-	OnComplete     func(inputTokens, outputTokens int)
+	OnText    func(text string, isThinking bool)
+	OnToolUse func(toolUse KiroToolUse)
+	// OnOutput is called as soon as the upstream emits visible output or a
+	// tool call, before any downstream buffering. It prevents retrying a
+	// partially emitted response and replaying its prefix.
+	OnOutput func()
+	// HasOutput reports whether the current attempt has emitted output.
+	// Retry helpers use it to stop after a retry starts producing a partial
+	// response and then fails.
+	HasOutput  func() bool
+	OnComplete func(inputTokens, outputTokens int)
+	// OnReset clears per-attempt adapter state before a non-stream retry.
+	OnReset func()
+	// OnStopReason reports the normalized upstream terminal reason. The
+	// Claude adapter maps this to Anthropic's stop_reason values.
+	OnStopReason   func(reason string)
 	OnError        func(err error)
 	OnCredits      func(credits float64)
 	OnContextUsage func(percentage float64)
-	// OnCacheRead reports the number of prompt tokens served from the
-	// upstream provider's native prompt cache (e.g. OpenAI's
-	// prompt_tokens_details.cached_tokens). When non-zero, the handler
-	// reports these to the client as cached tokens instead of the
-	// locally-simulated promptCacheTracker numbers, so the client sees
-	// the real cache behaviour of the upstream provider.
-	OnCacheRead func(cachedTokens int)
+	// OnCacheRead and OnCacheCreate report usage explicitly returned by the
+	// upstream provider. They are the only cache values used for downstream
+	// usage, cost, and savings calculations.
+	OnCacheRead   func(cachedTokens int)
+	OnCacheCreate func(cacheCreateTokens int)
 }
 
 // ==================== API Call ====================
@@ -589,9 +625,13 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 			continue
 		}
 
-		inputTokens, outputTokens, evCacheRead := updateTokensAndCacheFromEvent(event, inputTokens, outputTokens)
-		if evCacheRead > 0 && callback.OnCacheRead != nil {
-			callback.OnCacheRead(evCacheRead)
+		var cacheUsage upstreamCacheTokenUsage
+		inputTokens, outputTokens, cacheUsage = updateTokensAndCacheUsageFromEvent(event, inputTokens, outputTokens)
+		if cacheUsage.ReadTokens > 0 && callback.OnCacheRead != nil {
+			callback.OnCacheRead(cacheUsage.ReadTokens)
+		}
+		if cacheUsage.CreateTokens > 0 && callback.OnCacheCreate != nil {
+			callback.OnCacheCreate(cacheUsage.CreateTokens)
 		}
 
 		if debugUsage {
@@ -678,6 +718,11 @@ func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, cur
 	return in, out
 }
 
+type upstreamCacheTokenUsage struct {
+	ReadTokens   int
+	CreateTokens int
+}
+
 // updateTokensAndCacheFromEvent mirrors updateTokensFromEvent but also
 // returns the largest cache-read token count observed in any usage-shaped
 // map within the event. cacheRead > 0 means the upstream provider reported
@@ -685,12 +730,21 @@ func updateTokensFromEvent(event map[string]interface{}, currentInputTokens, cur
 // cached_tokens), which the handler should forward to the client instead
 // of the locally-simulated promptCacheTracker numbers.
 func updateTokensAndCacheFromEvent(event map[string]interface{}, currentInputTokens, currentOutputTokens int) (int, int, int) {
+	in, out, cacheUsage := updateTokensAndCacheUsageFromEvent(event, currentInputTokens, currentOutputTokens)
+	return in, out, cacheUsage.ReadTokens
+}
+
+// updateTokensAndCacheUsageFromEvent extracts upstream-confirmed cache reads
+// and writes alongside input/output token counts. Keeping this separate from
+// promptCacheTracker prevents local predictions from being mistaken for billed
+// provider cache usage.
+func updateTokensAndCacheUsageFromEvent(event map[string]interface{}, currentInputTokens, currentOutputTokens int) (int, int, upstreamCacheTokenUsage) {
 	candidates := []map[string]interface{}{event}
 	collectUsageMaps(event, &candidates)
 
 	inputTokens := currentInputTokens
 	outputTokens := currentOutputTokens
-	cacheRead := 0
+	cacheUsage := upstreamCacheTokenUsage{}
 
 	for _, usage := range candidates {
 		if usage == nil {
@@ -704,6 +758,23 @@ func updateTokensAndCacheFromEvent(event map[string]interface{}, currentInputTok
 			outputTokens = v
 		}
 
+		uncached, _ := readTokenNumber(usage, "uncachedInputTokens", "uncached_input_tokens")
+		cr, _ := readTokenNumber(usage, "cacheReadInputTokens", "cache_read_input_tokens")
+		cacheWrite, _ := readTokenNumber(usage, "cacheWriteInputTokens", "cache_write_input_tokens", "cacheCreationInputTokens", "cache_creation_input_tokens")
+		if cr > cacheUsage.ReadTokens {
+			cacheUsage.ReadTokens = cr
+		}
+		if cacheWrite > cacheUsage.CreateTokens {
+			cacheUsage.CreateTokens = cacheWrite
+		}
+
+		// Read cache fields before handling the aggregate input field. Some
+		// OpenAI-compatible usage objects contain input_tokens together with
+		// prompt_tokens_details.cached_tokens; the latter must not be skipped.
+		if v, ok := readTokenNumber(usage, "cachedTokens", "cached_tokens"); ok && v > cacheUsage.ReadTokens {
+			cacheUsage.ReadTokens = v
+		}
+
 		if v, ok := readTokenNumber(usage,
 			"inputTokens", "promptTokens", "totalInputTokens",
 			"input_tokens", "prompt_tokens", "total_input_tokens",
@@ -712,21 +783,9 @@ func updateTokensAndCacheFromEvent(event map[string]interface{}, currentInputTok
 			continue
 		}
 
-		uncached, _ := readTokenNumber(usage, "uncachedInputTokens", "uncached_input_tokens")
-		cr, _ := readTokenNumber(usage, "cacheReadInputTokens", "cache_read_input_tokens")
-		cacheWrite, _ := readTokenNumber(usage, "cacheWriteInputTokens", "cache_write_input_tokens", "cacheCreationInputTokens", "cache_creation_input_tokens")
 		if uncached+cr+cacheWrite > 0 {
 			inputTokens = uncached + cr + cacheWrite
-			if cr > cacheRead {
-				cacheRead = cr
-			}
 			continue
-		}
-
-		// OpenAI-style prompt_tokens_details.cached_tokens (when upstream
-		// emits OpenAI usage shape inside a Kiro event).
-		if v, ok := readTokenNumber(usage, "cachedTokens", "cached_tokens"); ok && v > cacheRead {
-			cacheRead = v
 		}
 
 		total, ok := readTokenNumber(usage, "totalTokens", "total_tokens")
@@ -744,15 +803,14 @@ func updateTokensAndCacheFromEvent(event map[string]interface{}, currentInputTok
 		}
 	}
 
-	return inputTokens, outputTokens, cacheRead
+	return inputTokens, outputTokens, cacheUsage
 }
 
 // getContextWindowSize returns the context window size (in tokens) for a model.
 //
 // Per Kiro's ListAvailableModels, the 1M-token context window applies to
-// Claude 4.6 and newer (sonnet-4.6, opus-4.6, opus-4.7, opus-4.8, and future
-// 4.x releases), while 4.5 and earlier (opus-4.5, sonnet-4.5, sonnet-4,
-// haiku-4.5) use a 200K window. This value is used to convert the upstream
+// Claude 4.6 and newer (and configured Claude 5/Fable 5 models), while 4.5
+// and earlier use a 200K window. This value is used to convert the upstream
 // contextUsagePercentage into an absolute input-token count that clients rely
 // on to decide when to compact; an undersized window under-reports tokens and
 // prevents clients from compacting in time.
@@ -765,10 +823,28 @@ func getContextWindowSize(model string) int {
 
 // largeContextMinor matches "claude-<family>-<major>.<minor>" (dot or dash form)
 // and is used to classify 1M-window models by version.
-var claudeVersionExtractor = regexp.MustCompile(`claude-(?:opus|sonnet|haiku)-(\d+)[.-](\d+)`)
+var claudeVersionExtractor = regexp.MustCompile(`claude-(?:opus|sonnet|haiku|fable)-(\d+)[.-](\d+)`)
 
 func isLargeContextModel(model string) bool {
-	m := strings.ToLower(model)
+	m := strings.ToLower(strings.TrimSpace(model))
+	if idx := strings.IndexByte(m, '/'); idx >= 0 {
+		m = strings.TrimSpace(m[idx+1:])
+	}
+	// [1m] is a Claude Code capability suffix, not part of the model ID.
+	m = stripClaudeContextSuffix(m)
+
+	// Claude 5 model IDs may be major-only (for example claude-opus-5), so
+	// they do not match claudeVersionExtractor, which requires a minor number.
+	// Keep the family boundary explicit so a malformed ID such as opus-50 is
+	// not accidentally treated as a known Claude 5 model.
+	if strings.HasPrefix(m, "claude-opus-5") ||
+		strings.HasPrefix(m, "claude-sonnet-5") ||
+		strings.HasPrefix(m, "claude-haiku-5") ||
+		strings.HasPrefix(m, "claude-fable-5") {
+		return true
+	}
+	// Claude Code's Fable 5 identifier has no minor component, so it cannot
+	// be classified by claudeVersionExtractor below.
 	if match := claudeVersionExtractor.FindStringSubmatch(m); match != nil {
 		major, errMaj := strconv.Atoi(match[1])
 		minor, errMin := strconv.Atoi(match[2])

@@ -15,7 +15,13 @@ let testModalAccountId = '';
 let testModalModels = [];
 let testModalLoadingModels = false;
 let testModalModelError = false;
+let testModalImageModels = [];
+let testModalLoadingImageModels = false;
+let testModalImageModelError = false;
+let testModalImageSupported = true;
+let testModalImageReason = '';
 let testModalRunning = false;
+let testModalMode = 'chat';
 
   async function loadAccounts() {
     const res = await api('/accounts');
@@ -41,14 +47,14 @@ let testModalRunning = false;
   }
   // getFilteredAccountsGrouped returns the filtered accounts grouped by
   // category for the grouped list view. Returns an array of
-  // { category, label, icon, accounts } in display order: kiro, codex, external, other.
+  // { category, label, icon, accounts } in display order.
   function getFilteredAccountsGrouped() {
     const filtered = getFilteredAccounts();
-    const groups = { kiro: [], codex: [], external: [], other: [] };
+    const groups = { kiro: [], codex: [], search: [], image: [], external: [], other: [] };
     for (const a of filtered) {
       groups[accountCategory(a)].push(a);
     }
-    const order = ['kiro', 'codex', 'external', 'other'];
+    const order = ['kiro', 'codex', 'search', 'image', 'external', 'other'];
     const out = [];
     for (const cat of order) {
       if (groups[cat].length > 0) {
@@ -151,6 +157,7 @@ let testModalRunning = false;
     if (normalized === 'external_idp') return t('auth.enterpriseSso');
     if (normalized === 'social') return t('auth.social');
     if (normalized === 'external_openai') return t('auth.externalOpenai');
+    if (normalized === 'agentrouter' || normalized === 'external_agentrouter') return t('auth.agentrouter');
     if (normalized === 'codex') return t('auth.codex');
     if (normalized === 'builderid') return 'BuilderID';
     if (normalized === 'github') return t('local.providerGithub');
@@ -158,15 +165,37 @@ let testModalRunning = false;
     return method;
   }
 
-  // accountCategory returns the category bucket for an account:
-  //   'kiro'     — native Kiro/AWS auth (social, idc, external_idp, builderid, api_key)
-  //   'codex'    — ChatGPT subscription Codex OAuth
-  //   'external' — external OpenAI-compatible provider
-  //   'other'    — anything else
+  function accountCapabilities(a) {
+    const capabilities = Array.isArray(a && a.capabilities) ? a.capabilities : [];
+    const kind = String((a && a.providerKind) || '').toLowerCase();
+    const result = capabilities.map(value => String(value).toLowerCase().trim()).filter(Boolean);
+    if (kind === 'search' && !result.includes('search')) result.push('search');
+    if (kind === 'image' && !result.includes('image')) result.push('image');
+    return result;
+  }
+  function hasCapability(a, capability) {
+    return accountCapabilities(a).includes(capability);
+  }
+  function isServiceAccountUI(a) {
+    return hasCapability(a, 'search') || hasCapability(a, 'image');
+  }
+  function isCodexAccountUI(a) {
+    return String((a && a.authMethod) || '').toLowerCase() === 'codex';
+  }
+  function isAgentRouterAccountUI(a) {
+    const method = String((a && a.authMethod) || '').toLowerCase();
+    return method === 'agentrouter' || method === 'external_agentrouter';
+  }
+
+  // accountCategory returns the category bucket for an account. Service
+  // accounts are identified by their explicit capability metadata, not by
+  // authMethod (all 9router service accounts use an API key).
   function accountCategory(a) {
+    if (hasCapability(a, 'search')) return 'search';
+    if (hasCapability(a, 'image')) return 'image';
     const m = String(a.authMethod || '').toLowerCase();
     if (m === 'codex') return 'codex';
-    if (m === 'external_openai') return 'external';
+    if (m === 'external_openai' || m === 'agentrouter' || m === 'external_agentrouter') return 'external';
     if (m === 'social' || m === 'idc' || m === 'external_idp' ||
         m === 'builderid' || m === 'api_key' || m === '' ) return 'kiro';
     return 'other';
@@ -174,17 +203,26 @@ let testModalRunning = false;
   function categoryLabel(cat) {
     if (cat === 'kiro') return t('category.kiro');
     if (cat === 'codex') return t('category.codex');
+    if (cat === 'search') return t('category.search');
+    if (cat === 'image') return t('category.image');
     if (cat === 'external') return t('category.external');
     return t('category.other');
   }
   function categoryIcon(cat) {
     if (cat === 'kiro') return 'fa-solid fa-cloud';
     if (cat === 'codex') return 'fa-solid fa-robot';
+    if (cat === 'search') return 'fa-solid fa-magnifying-glass';
+    if (cat === 'image') return 'fa-solid fa-image';
     if (cat === 'external') return 'fa-solid fa-plug';
     return 'fa-solid fa-circle-question';
   }
   function getStatusBadge(a) {
     const out = [];
+    if (a.banStatus === 'REAUTH_REQUIRED') {
+      out.push('<span class="badge badge-reauth-required">' + escapeHtml(t('accounts.reauthRequired')) + '</span>');
+      out.push('<span class="badge badge-warning">' + escapeHtml(t('accounts.disabled')) + '</span>');
+      return out.join('');
+    }
     const isBanned = a.banStatus && a.banStatus !== 'ACTIVE';
     if (isBanned) {
       if (a.banStatus === 'BANNED') out.push('<span class="badge badge-banned">' + escapeHtml(t('accounts.banned')) + '</span>');
@@ -313,6 +351,9 @@ let testModalRunning = false;
       const trialClass = trialPct > 90 ? 'critical' : trialPct > 70 ? 'high' : '';
       const isExternal = (a.authMethod === 'external_openai');
       const isCodex = (a.authMethod === 'codex');
+      const isSearch = hasCapability(a, 'search');
+      const isImage = hasCapability(a, 'image');
+      const isService = isSearch || isImage;
       const extLimit = a.extCreditLimit || 0;
       const extUsed = a.extCreditsUsed || 0;
       const extRemaining = a.extCreditsRemaining || 0;
@@ -321,11 +362,12 @@ let testModalRunning = false;
       const isSelected = selectedAccounts.has(a.id);
       const weight = a.weight || 0;
       // Kiro-only badges: subscription type, trial, weight, overage.
-      // Codex/external accounts have their own tier indicators and don't
-      // use Kiro's overage/weight/machine-id system.
-      const isKiroNative = !isCodex && !isExternal;
+      // Codex/external/service accounts have their own metadata and don't use
+      // Kiro's overage/weight/machine-id system.
+      const isKiroNative = !isCodex && !isExternal && !isService;
       const weightBadge = isKiroNative && weight >= 2 ? '<span class="badge badge-warning">' + escapeHtml(t('accounts.weightShort')) + ':' + weight + '</span>' : '';
       const overageBadge = isKiroNative ? renderOverageBadge(a) : '';
+      const reauthRequired = isCodex && a.banStatus === 'REAUTH_REQUIRED';
       const banned = a.banStatus && a.banStatus !== 'ACTIVE';
       const idAttr = escapeAttr(a.id);
       const displayEmail = getDisplayEmail(a.email, a.id);
@@ -335,6 +377,7 @@ let testModalRunning = false;
       const userSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
       const copySvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
       const keySvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 8.5m0 0l3 3L22 8l-3-3m-3.5 3.5L19 5"/></svg>';
+      const externalLinkSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>';
 
       // Codex accounts: show plan + active-limit + chatgpt_account_id badges.
       // These replace the Kiro subscription badge (which defaults to "Free"
@@ -344,9 +387,13 @@ let testModalRunning = false;
          getCodexLimitBadge(a.codexActiveLimit) +
          (a.chatgptAccountId ? '<span class="badge badge-info">ID: ' + escapeHtml(String(a.chatgptAccountId).slice(0, 8)) + '</span>' : ''))
         : '';
+      const serviceBadges = isService ?
+        '<span class="badge badge-info">' + escapeHtml(a.provider || a.providerKind || t('accounts.serviceProvider')) + '</span>' +
+        accountCapabilities(a).map(cap => '<span class="badge badge-success">' + escapeHtml(cap === 'search' ? t('category.search') : t('category.image')) + '</span>').join('') +
+        (a.sourceId ? '<span class="badge badge-muted">ID: ' + escapeHtml(String(a.sourceId).slice(0, 8)) + '</span>' : '') : '';
 
       return '' +
-        '<div class="account-card' + (isSelected ? ' selected' : '') + '" data-id="' + idAttr + '">' +
+        '<div class="account-card' + (isSelected ? ' selected' : '') + (reauthRequired ? ' reauth-required' : '') + '" data-id="' + idAttr + '">' +
         '<div class="account-header">' +
         '<div class="account-info">' +
         '<input type="checkbox" class="account-checkbox" ' + (isSelected ? 'checked' : '') + ' data-id="' + idAttr + '" aria-label="' + escapeAttr(selectLabel) + '" />' +
@@ -360,16 +407,19 @@ let testModalRunning = false;
         overageBadge +
         '<span class="badge badge-info">' + escapeHtml(formatAuthMethod(a.provider || a.authMethod)) + '</span>' +
         codexBadge +
+        serviceBadges +
         getStatusBadge(a) +
         '</div>' +
         '</div>' +
         '</div>' +
         '<div class="account-actions">' +
         '<button class="btn btn-icon btn-sm btn-ghost" data-action="refresh" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.refresh')) + '">' + refreshSvg + '</button>' +
-        (a.refreshToken ? '<button class="btn btn-icon btn-sm btn-ghost" data-action="refreshToken" data-id="' + idAttr + '" title="' + escapeAttr(t('detail.refreshToken')) + '">' + keySvg + '</button>' : '') +
+        (a.refreshToken && !isService ? '<button class="btn btn-icon btn-sm btn-ghost" data-action="refreshToken" data-id="' + idAttr + '" title="' + escapeAttr(t('detail.refreshToken')) + '">' + keySvg + '</button>' : '') +
+        (isCodex ? '<button class="btn btn-icon btn-sm btn-ghost" data-action="changeCodexPassword" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.changeCodexPassword')) + '">' + externalLinkSvg + '</button>' : '') +
         '<button class="btn btn-icon btn-sm btn-ghost" data-action="detail" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.detail')) + '">' + userSvg + '</button>' +
         '<button class="btn btn-icon btn-sm btn-ghost" data-action="copyJSON" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.copyJSON')) + '">' + copySvg + '</button>' +
-        (banned && isCodex ? '<button class="btn btn-sm btn-warning" data-action="reauth" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.reauth')) + '">' + escapeHtml(t('accounts.reauth')) + '</button>' : '') +
+        (reauthRequired ? '<button class="btn btn-sm btn-danger" data-action="loginAgain" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.reauthRequiredHint')) + '">' + escapeHtml(t('accounts.loginAgain')) + '</button>' : '') +
+        (banned && isCodex && !reauthRequired ? '<button class="btn btn-sm btn-warning" data-action="reauth" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.reauth')) + '">' + escapeHtml(t('accounts.reauth')) + '</button>' : '') +
         (banned ? '' :
           '<button class="btn btn-sm ' + (a.enabled ? 'btn-outline' : 'btn-primary') + '" data-action="toggle" data-id="' + idAttr + '" data-enabled="' + (!a.enabled) + '">' +
           escapeHtml(a.enabled ? t('accounts.disable') : t('accounts.enable')) +
@@ -472,6 +522,41 @@ let testModalRunning = false;
     }
     return false;
   }
+  async function restoreCodexRefreshToken(id) {
+    const input = $('restoreCodexRefreshTokenInput');
+    const refreshToken = input ? input.value.trim() : '';
+    if (!refreshToken) {
+      toastWarning(t('detail.restoreRefreshTokenRequired'));
+      return;
+    }
+    const ok = await confirmAction(t('detail.restoreRefreshTokenConfirm'), {
+      title: t('detail.restoreRefreshToken'),
+      confirmText: t('detail.restoreRefreshToken'),
+      variant: 'warning'
+    });
+    if (!ok) return;
+
+    const dismiss = toast(t('detail.restoreRefreshToken') + '...', 'info', { duration: 0 });
+    try {
+      const res = await api('/accounts/' + encodeURIComponent(id) + '/restore-refresh-token', {
+        method: 'POST',
+        body: JSON.stringify({ refreshToken })
+      });
+      const d = await res.json();
+      dismiss();
+      if (d.success) {
+        if (input) input.value = '';
+        toast(t('detail.restoreRefreshTokenSuccess'), 'success');
+        await loadAccounts();
+        if (accountsData.some(a => a.id === id)) showDetail(id);
+        return;
+      }
+      toastError(t('detail.restoreRefreshTokenFailed') + ': ' + (d.error || ''));
+    } catch (e) {
+      dismiss();
+      toastError(t('detail.restoreRefreshTokenFailed'));
+    }
+  }
   async function toggleAccount(id, enabled) {
     await api('/accounts/' + id, { method: 'PUT', body: JSON.stringify({ enabled }) });
     loadAccounts();
@@ -526,6 +611,50 @@ let testModalRunning = false;
       toastError(t('accounts.reauthFailed'));
     }
     if (btn) { btn.disabled = false; btn.textContent = t('accounts.reauth'); }
+  }
+  function loginCodexAgain(id) {
+    const account = accountsData.find(a => a.id === id);
+    if (!account) return;
+    showModal('codexLogin');
+    const nicknameInput = $('codexLoginNickname');
+    if (nicknameInput) nicknameInput.value = account.nickname || account.email || '';
+  }
+  async function changeCodexPassword(id) {
+    const dismiss = toast(t('accounts.openingCodexSecurity'), 'info', { duration: 0 });
+    try {
+      const res = await api('/accounts/' + encodeURIComponent(id) + '/codex-security', { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.success === false) throw new Error(data.error || t('common.failed'));
+      if (data.setupRequired) {
+        dismiss();
+        toast(t('accounts.codexProfileSetup'), 'info', { duration: 5000 });
+        pollCodexSecuritySetup(id);
+        return;
+      }
+      dismiss();
+      toast(t('accounts.codexSecurityOpened'), 'success');
+    } catch (e) {
+      dismiss();
+      toastError((e && e.message) || t('common.failed'));
+    }
+  }
+
+  function pollCodexSecuritySetup(id) {
+    setTimeout(async () => {
+      try {
+        const res = await api('/auth/codex/poll', { method: 'POST', body: JSON.stringify({}) });
+        const data = await res.json().catch(() => ({}));
+        if (data.pending) {
+          pollCodexSecuritySetup(id);
+          return;
+        }
+        if (!res.ok || data.success === false) throw new Error(data.error || t('common.failed'));
+        await loadAccounts();
+        toast(t('accounts.codexProfileLinked'), 'success');
+      } catch (e) {
+        toastError((e && e.message) || t('common.failed'));
+      }
+    }, 2000);
   }
   // reauthAllBanned bulk-recovers every banned Codex account in one call.
   async function reauthAllBanned() {
@@ -704,7 +833,10 @@ let testModalRunning = false;
       loadAccounts();
       const msg = d.message || t('accounts.refreshAllDone', d.refreshed || 0);
       const banned = d.banned || 0;
-      if (banned > 0) {
+      const reauthRequired = d.reauthRequired || 0;
+      if (reauthRequired > 0) {
+        toast(msg + ' (' + reauthRequired + ' ' + t('accounts.reauthRequired') + ')', 'warning');
+      } else if (banned > 0) {
         toast(msg + ' (' + banned + ' banned)', 'warning');
       } else {
         toast(msg, 'success');
@@ -756,22 +888,48 @@ let testModalRunning = false;
     const a = accountsData.find(x => x.id === id);
     if (!a) return;
     const idAttr = escapeAttr(id);
-    const isCodex = a.authMethod === 'codex';
-    const isExternal = a.authMethod === 'external_openai';
+    const isCodex = String(a.authMethod || '').toLowerCase() === 'codex';
+    const isExternal = String(a.authMethod || '').toLowerCase() === 'external_openai';
+    const isSearch = hasCapability(a, 'search');
+    const isImage = hasCapability(a, 'image');
+    const isService = isSearch || isImage;
     // Kiro-native accounts use Machine ID, Weight, Overage, and the Kiro
     // subscription/quota system. Codex and external providers don't.
-    const isKiroNative = !isCodex && !isExternal;
+    const isKiroNative = !isCodex && !isExternal && !isService;
     $('detailBody').innerHTML =
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.basicInfo')) + '</h4><div class="detail-grid">' +
       detailItem(t('detail.email'), getDisplayEmail(a.email, null)) +
       detailItem(t('detail.userId'), a.userId || '-') +
       detailItem(t('detail.authMethod'), formatAuthMethod(a.provider || a.authMethod)) +
       detailItem(t('detail.region'), a.region || 'us-east-1') +
+      (isService ? detailItem(t('detail.providerKind'), a.providerKind || '-') : '') +
+      (isService ? detailItem(t('detail.capabilities'), accountCapabilities(a).join(', ') || '-') : '') +
+      (isService ? detailItem(t('detail.sourceId'), a.sourceId || '-') : '') +
       (a.baseUrl ? detailItem(t('external.baseUrlLabel'), a.baseUrl) : '') +
       (isCodex && a.codexEmail ? detailItem(t('detail.codexEmail'), a.codexEmail) : '') +
       (isCodex && a.codexName ? detailItem(t('detail.codexName'), a.codexName) : '') +
       (isCodex && a.chatgptAccountId ? detailItem(t('detail.codexChatGPTId'), a.chatgptAccountId) : '') +
       '</div></div>' +
+
+      (isService ?
+        '<div class="detail-section"><h4>' + escapeHtml(t('detail.service')) + '</h4><div class="detail-grid">' +
+        detailItem(t('accounts.serviceProvider'), a.provider || '-') +
+        detailItem(t('accounts.serviceCapabilities'), accountCapabilities(a).join(', ') || '-') +
+        (a.sourceId ? detailItem(t('detail.sourceId'), a.sourceId) : '') +
+        (a.baseUrl ? detailItem(t('external.baseUrlLabel'), a.baseUrl) : '') +
+        '</div>' +
+        (isSearch ? '<div class="detail-grid" style="margin-top:0.5rem">' +
+          detailItem(t('detail.serviceRequests'), a.serviceRequestCount || 0) +
+          detailItem(t('detail.serviceErrors'), a.serviceErrorCount || 0) +
+          detailItem(t('detail.serviceQuotaErrors'), a.serviceQuotaErrorCount || 0) +
+          detailItem(t('detail.serviceLastStatus'), a.serviceLastStatus || '-') +
+          detailItem(t('detail.serviceRateLimit'), a.serviceRateLimit || '-') +
+          detailItem(t('detail.serviceRateRemaining'), a.serviceRateLimitRemaining || '-') +
+          detailItem(t('detail.serviceRateReset'), a.serviceRateLimitReset || '-') +
+          detailItem(t('detail.serviceRetryAfter'), a.serviceRetryAfter || '-') +
+          (a.serviceUsageCheckedAt ? detailItem(t('detail.serviceLastChecked'), new Date(a.serviceUsageCheckedAt * 1000).toLocaleString()) : detailItem(t('detail.serviceLastChecked'), '-')) +
+          '</div>' : '') +
+        '<p class="help-block">' + escapeHtml(t('detail.serviceNoModels')) + '</p></div>' : '') +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.nickname')) + '</h4><div class="machine-id-row">' +
       '<input type="text" id="nicknameInput" value="' + escapeAttr(a.nickname || '') + '" placeholder="' + escapeHtml(t('detail.nicknamePlaceholder')) + '" maxlength="30" />' +
@@ -847,18 +1005,31 @@ let testModalRunning = false;
         '<p class="help-block">' + escapeHtml(t('detail.codexUsageHint')) + '</p>' +
         '</div>' : '') +
 
+      '<div class="detail-section"><h4>' + escapeHtml(t('accounts.imageModel')) + '</h4>' +
+      '<div class="machine-id-row">' +
+      '<input type="text" id="imageModelInput" value="' + escapeAttr(a.imageModel || a.codexImageModel || '') + '" placeholder="gpt-5.4" />' +
+      '<button class="btn btn-sm btn-primary" data-detail-action="saveImageModel" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
+      '</div>' +
+      '<p class="help-block">' + escapeHtml(t('accounts.imageModelHint')) + '</p></div>' +
+
       // Token section — shown for all account types. Includes a manual
       // "Refresh token" button that forces the OAuth refresh-token flow
       // regardless of expiry, plus the last-refreshed timestamp. External
       // OpenAI-compatible providers use a static API key (no refresh token),
       // so the button is hidden for them.
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.tokenSection')) +
-      (!isExternal ? ' <button class="btn btn-sm btn-outline" data-detail-action="refreshToken" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.refreshToken')) + '</button>' : '') +
+      (!isExternal && !isService && a.refreshToken ? ' <button class="btn btn-sm btn-outline" data-detail-action="refreshToken" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.refreshToken')) + '</button>' : '') +
       '</h4><div class="detail-grid">' +
       detailItem(t('detail.tokenExpiry'), formatTokenExpiry(a.expiresAt)) +
       (a.expiresAt ? detailItem(t('detail.tokenExpiryAbs'), new Date(a.expiresAt * 1000).toLocaleString()) : '') +
       (a.tokenRefreshedAt ? detailItem(t('detail.tokenRefreshedAt'), new Date(a.tokenRefreshedAt * 1000).toLocaleString()) : '') +
       '</div></div>' +
+
+      (isCodex ? '<div class="detail-section"><h4>' + escapeHtml(t('detail.restoreRefreshToken')) + '</h4>' +
+      '<div class="form-group"><label for="restoreCodexRefreshTokenInput">' + escapeHtml(t('codex.refreshTokenLabel')) + '</label>' +
+      '<textarea id="restoreCodexRefreshTokenInput" class="font-mono" rows="2" autocomplete="off" spellcheck="false" placeholder="' + escapeAttr(t('detail.restoreRefreshTokenPlaceholder')) + '"></textarea></div>' +
+      '<button class="btn btn-sm btn-warning" data-detail-action="restoreCodexRefreshToken" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.restoreRefreshToken')) + '</button>' +
+      '<p class="help-block">' + escapeHtml(t('detail.restoreRefreshTokenHint')) + '</p></div>' : '') +
 
       // Proxy URL — Kiro only (Codex/external don't use per-account proxy
       // for upstream calls; they have BaseURL instead)
@@ -890,13 +1061,13 @@ let testModalRunning = false;
       detailItem(t('detail.totalCredits'), (a.totalCredits || 0).toFixed(2)) +
       '</div></div>' +
 
-      '<div class="detail-section">' +
+      (isService ? '' : '<div class="detail-section">' +
       '<h4>' + escapeHtml(t('detail.models')) +
       ' <button class="btn btn-sm btn-outline" data-detail-action="loadModels" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.loadModels')) + '</button>' +
       ' <button class="btn btn-sm btn-outline" data-detail-action="refreshModels" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.refreshModelCache')) + '</button>' +
       '</h4>' +
       '<div id="modelsList" class="model-list"></div>' +
-      '</div>';
+      '</div>');
 
     openDialog('detailModal');
   }
@@ -1049,15 +1220,41 @@ let testModalRunning = false;
     const nickname = $('nicknameInput').value.trim();
     await putAccount(id, { nickname: nickname }, t('detail.saved'));
   }
+  async function saveCodexImageModel(id) {
+    const model = $('codexImageModelInput').value.trim();
+    await putAccount(id, { codexImageModel: model }, t('detail.saved'));
+  }
+  async function saveImageModel(id) {
+    const input = $('imageModelInput');
+    await putAccount(id, { imageModel: input ? input.value.trim() : '' }, t('detail.saved'));
+  }
   function closeDetailModal() { closeDialog('detailModal'); }
 
   // Test flow
   function getTestAccount(id) {
     return accountsData.find(a => a.id === id) || null;
   }
-  function getTestModelValue() {
+  function getTestRequest() {
+    const acc = getTestAccount(testModalAccountId);
+    if (testModalMode === 'image') {
+      const customModel = $('testImageModelCustom') && $('testImageModelCustom').value.trim();
+      const selectedModel = $('testImageModelChoice') && $('testImageModelChoice').value;
+      return {
+        capability: 'image',
+        prompt: (($('testImagePrompt') && $('testImagePrompt').value.trim()) || t('accounts.imagePromptDefault')),
+        model: customModel || selectedModel || ''
+      };
+    }
+    if (testModalMode === 'search' && acc && hasCapability(acc, 'search')) {
+      return {
+        capability: 'search',
+        query: (($('testSearchQuery') && $('testSearchQuery').value.trim()) || 'OmniProxy health check'),
+        url: (($('testSearchURL') && $('testSearchURL').value.trim()) || '')
+      };
+    }
+    if (isAgentRouterAccountUI(acc)) return { model: 'claude-opus-5' };
     const choice = $('testModelChoice');
-    return (choice && choice.value.trim()) || 'claude-sonnet-4';
+    return { model: (choice && choice.value.trim()) || 'claude-sonnet-4' };
   }
   function renderTestLog() {
     const c = $('testModalLog');
@@ -1091,12 +1288,55 @@ let testModalRunning = false;
     const idAttr = escapeAttr(testModalAccountId);
     const email = acc ? getDisplayEmail(acc.email, acc.id) : testModalAccountId;
     const proxy = acc ? (acc.proxyURL || t('accounts.testLog.globalProxy')) : '?';
-    const statusText = testModalLoadingModels
-      ? t('accounts.testModelsLoading')
+    const isSearch = acc && hasCapability(acc, 'search');
+    const isImage = acc && hasCapability(acc, 'image');
+    const isCodex = isCodexAccountUI(acc);
+    const isAgentRouter = isAgentRouterAccountUI(acc);
+    const isImageTest = testModalMode === 'image';
+    const isService = isSearch || isImage;
+    const statusText = isImageTest
+        ? (testModalLoadingImageModels ? t('accounts.imageModelsLoading') : testModalImageModelError ? t('accounts.imageModelsFallback') : testModalImageSupported ? t('accounts.imageTestReady') : t('accounts.imageGenerationUnsupported'))
+      : testModalMode === 'search'
+        ? t('accounts.searchTestReady')
+      : isAgentRouter
+        ? 'AgentRouter probe: claude-opus-5 / Say OK'
+      : testModalLoadingModels
+        ? t('accounts.testModelsLoading')
       : testModalModelError
         ? t('accounts.testModelsFallback')
         : t('accounts.testModelsReady', testModalModels.length);
-    const modelField = testModalLoadingModels
+    const modeField = '<div class="segmented-control test-mode-control" role="tablist">' +
+        '<button type="button" class="btn btn-sm ' + (testModalMode === 'chat' ? 'btn-primary' : 'btn-outline') + '" data-test-mode="chat">' + escapeHtml(t('accounts.testChatMode')) + '</button>' +
+        '<button type="button" class="btn btn-sm ' + (testModalMode === 'image' ? 'btn-primary' : 'btn-outline') + '" data-test-mode="image">' + escapeHtml(t('accounts.testImageMode')) + '</button>' +
+        (isSearch ? '<button type="button" class="btn btn-sm ' + (testModalMode === 'search' ? 'btn-primary' : 'btn-outline') + '" data-test-mode="search">' + escapeHtml(t('accounts.testSearchMode')) + '</button>' : '') +
+        '</div>';
+    const imageModel = acc && (acc.imageModel || acc.codexImageModel) || '';
+    const imageModelOptions = ['<option value="">' + escapeHtml(t('accounts.selectTestModel')) + '</option>'];
+    const imageModelIds = new Set();
+    testModalImageModels.forEach(m => {
+      const modelId = String((m && m.id) || m || '').trim();
+      if (!modelId || imageModelIds.has(modelId)) return;
+      imageModelIds.add(modelId);
+      imageModelOptions.push('<option value="' + escapeAttr(modelId) + '">' + escapeHtml((m && m.name) || modelId) + '</option>');
+    });
+    if (imageModel && !imageModelIds.has(imageModel)) {
+      imageModelOptions.push('<option value="' + escapeAttr(imageModel) + '">' + escapeHtml(imageModel) + '</option>');
+    }
+    const modelField = testModalMode === 'search' && isSearch
+      ? '<div class="form-group"><label for="testSearchQuery">' + escapeHtml(t('accounts.searchQuery')) + '</label><input type="text" id="testSearchQuery" value="OmniProxy health check" /></div>' +
+        '<div class="form-group"><label for="testSearchURL">' + escapeHtml(t('accounts.searchURL')) + '</label><input type="url" id="testSearchURL" placeholder="https://example.com/docs" /></div>'
+      : isImageTest
+        ? '<div class="form-group"><label for="testImagePrompt">' + escapeHtml(t('accounts.imagePrompt')) + '</label><textarea id="testImagePrompt" rows="3">' + escapeHtml(t('accounts.imagePromptDefault')) + '</textarea></div>' +
+          '<div class="form-group"><label for="testImageModelChoice">' + escapeHtml(t('accounts.selectTestModel')) + '</label>' +
+          (testModalLoadingImageModels ? '<div class="test-model-loading">' + escapeHtml(t('accounts.imageModelsLoading')) + '</div>' : '') +
+          '<select id="testImageModelChoice">' + imageModelOptions.join('') + '</select>' +
+          '<label for="testImageModelCustom">' + escapeHtml(t('accounts.imageModelCustom')) + '</label>' +
+          '<input type="text" id="testImageModelCustom" value="" placeholder="' + escapeAttr(imageModel || t('accounts.imageModelCustom')) + '" />' +
+          (!testModalImageSupported && testModalImageReason ? '<p class="help-block">' + escapeHtml(testModalImageReason) + '</p>' : '') +
+          '<button type="button" class="btn btn-sm btn-outline" data-test-action="refresh-image-models">' + escapeHtml(t('accounts.refreshImageModels')) + '</button></div>'
+      : isAgentRouter
+      ? '<input type="text" id="testModelChoice" value="claude-opus-5" readonly />'
+      : testModalLoadingModels
       ? '<div class="test-model-loading">' + escapeHtml(t('accounts.testModelsLoading')) + '</div>'
       : testModalModels.length
         ? '<select id="testModelChoice">' +
@@ -1117,7 +1357,8 @@ let testModalRunning = false;
       '</div>' +
       '<div class="test-modal-grid">' +
       '<div class="form-group test-model-field">' +
-      '<label for="testModelChoice">' + escapeHtml(t('accounts.selectModel')) + '</label>' +
+      modeField +
+      (testModalMode === 'chat' ? '<label for="testModelChoice">' + escapeHtml(t('accounts.selectModel')) + '</label>' : '') +
       modelField +
       '</div>' +
       '<div class="test-log-card">' +
@@ -1130,37 +1371,88 @@ let testModalRunning = false;
       '</div>' +
       '<div class="modal-footer">' +
       '<button class="btn btn-secondary" id="testModalCancelBtn" type="button">' + escapeHtml(t('common.close')) + '</button>' +
-      '<button class="btn btn-primary" id="testRunBtn" data-id="' + idAttr + '" type="button" ' + (testModalLoadingModels ? 'disabled' : '') + '>' + escapeHtml(t('accounts.test')) + '</button>' +
+      '<button class="btn btn-primary" id="testRunBtn" data-id="' + idAttr + '" type="button" ' + ((!isAgentRouter && testModalMode === 'chat' && testModalLoadingModels) || (testModalMode === 'image' && testModalLoadingImageModels) ? 'disabled' : '') + '>' + escapeHtml(t('accounts.test')) + '</button>' +
       '</div>';
 
-    if (!testModalLoadingModels) enhanceCustomSelects(body);
+    if (!testModalLoadingModels && !testModalLoadingImageModels) enhanceCustomSelects(body);
     renderTestLog();
   }
   async function testAccount(id) {
     testModalAccountId = id;
+    const acc = getTestAccount(id);
     testModalModels = [];
-    testModalLoadingModels = true;
+    testModalImageModels = [];
+    testModalMode = 'chat';
+    testModalLoadingModels = !isAgentRouterAccountUI(acc);
     testModalModelError = false;
+    testModalLoadingImageModels = true;
+    testModalImageModelError = false;
+    testModalImageSupported = true;
+    testModalImageReason = '';
     testModalRunning = false;
     testLogs = [];
     renderTestModal();
     openDialog('testModal');
+    const encodedId = encodeURIComponent(id);
+    await Promise.all([
+      (async () => {
+        if (isAgentRouterAccountUI(acc)) return;
+        try {
+          const res = await api('/accounts/' + encodedId + '/models/cached');
+          const d = await res.json();
+          testModalModels = Array.isArray(d.models) ? d.models.slice().sort() : [];
+        } catch (e) { testModalModelError = true; }
+        testModalLoadingModels = false;
+        renderTestModal();
+      })(),
+      (async () => {
+        try {
+          const res = await api('/accounts/' + encodedId + '/image-models');
+          const d = await res.json();
+          testModalImageModels = Array.isArray(d.models) ? d.models : [];
+          testModalImageSupported = d.supported !== false;
+          testModalImageReason = d.reason || '';
+        } catch (e) {
+          testModalImageModelError = true;
+          testModalImageSupported = false;
+          testModalImageReason = t('accounts.imageModelsFallback');
+        }
+        testModalLoadingImageModels = false;
+        renderTestModal();
+      })()
+    ]);
+  }
+  async function refreshTestImageModels(id) {
+    const encodedId = encodeURIComponent(id);
+    const prompt = $('testImagePrompt') ? $('testImagePrompt').value : '';
+    const customModel = $('testImageModelCustom') ? $('testImageModelCustom').value : '';
+    const selectedModel = $('testImageModelChoice') ? $('testImageModelChoice').value : '';
+    testModalLoadingImageModels = true;
+    testModalImageModelError = false;
+    renderTestModal();
     try {
-      const res = await api('/accounts/' + id + '/models/cached');
+      const res = await api('/accounts/' + encodedId + '/image-models');
       const d = await res.json();
-      testModalModels = Array.isArray(d.models) ? d.models.slice().sort() : [];
+      testModalImageModels = Array.isArray(d.models) ? d.models : [];
+      testModalImageSupported = d.supported !== false;
+      testModalImageReason = d.reason || '';
     } catch (e) {
-      testModalModelError = true;
+      testModalImageModelError = true;
+      testModalImageSupported = false;
+      testModalImageReason = t('accounts.imageModelsFallback');
     } finally {
-      testModalLoadingModels = false;
+      testModalLoadingImageModels = false;
       renderTestModal();
+      if ($('testImagePrompt')) $('testImagePrompt').value = prompt;
+      if ($('testImageModelCustom')) $('testImageModelCustom').value = customModel;
+      if ($('testImageModelChoice')) $('testImageModelChoice').value = selectedModel;
     }
   }
   function closeTestModal() {
     closeAllCustomSelects();
     closeDialog('testModal');
   }
-  async function runTestAccount(id, model) {
+  async function runTestAccount(id, request) {
     if (testModalRunning) return;
     testModalRunning = true;
     const modalBtn = $('testRunBtn');
@@ -1168,10 +1460,18 @@ let testModalRunning = false;
     const acc = accountsData.find(a => a.id === id);
     const email = acc ? getDisplayEmail(acc.email, acc.id) : id;
     const proxy = acc ? (acc.proxyURL || t('accounts.testLog.globalProxy')) : '?';
-    addTestLog(t('accounts.testLog.start', email, model, proxy), 'info');
+    let startMessage;
+    if (request.capability === 'image') {
+      startMessage = t('accounts.testLog.startImage', email, request.prompt || '-', request.model || t('accounts.testLog.defaultModel'), proxy);
+    } else if (request.capability === 'search') {
+      startMessage = t('accounts.testLog.startSearch', email, request.query || request.url || '-', proxy);
+    } else {
+      startMessage = t('accounts.testLog.start', email, request.model || '-', proxy);
+    }
+    addTestLog(startMessage, 'info');
     try {
       const startTime = Date.now();
-      const res = await api('/accounts/' + id + '/test', { method: 'POST', body: JSON.stringify({ model }) });
+      const res = await api('/accounts/' + encodeURIComponent(id) + '/test', { method: 'POST', body: JSON.stringify(request) });
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       const d = await res.json();
       if (d.success) {
@@ -1226,6 +1526,7 @@ let testModalRunning = false;
     const modal = $('addModal');
     const title = $('modalTitle');
     const body = $('modalBody');
+    if (type !== 'codexLogin') stopCodexLoginPolling();
     if (type === 'add') modalAdd(title, body);
     else if (type === 'builderid') modalBuilderId(title, body);
     else if (type === 'iam') modalIam(title, body);
@@ -1240,13 +1541,16 @@ let testModalRunning = false;
     else if (type === 'credentials') modalCredentials(title, body);
     else if (type === 'apikey') modalApiKey(title, body);
     else if (type === 'external') modalExternal(title, body);
+    else if (type === 'agentrouter') modalAgentRouter(title, body);
     else if (type === 'cookie') modalCookie(title, body);
     else if (type === 'codex') modalCodex(title, body);
+    else if (type === 'codexLogin') modalCodexLogin(title, body);
     else if (type === 'ninerouter') modalNineRouter(title, body);
     if (!modal.classList.contains('active')) openDialog('addModal');
     enhanceCustomSelects(body);
   }
   function closeModal() {
+    stopCodexLoginPolling();
     closeDialog('addModal');
     iamSession = '';
     if (builderIdPollTimer) { clearTimeout(builderIdPollTimer); builderIdPollTimer = null; }
@@ -1278,6 +1582,7 @@ let testModalRunning = false;
       methodCard('credentials', t('modal.credentialsTitle'), t('modal.credentialsDesc')) +
       methodCard('apikey', t('modal.apikeyTitle'), t('modal.apikeyDesc')) +
       methodCard('external', t('modal.externalTitle'), t('modal.externalDesc')) +
+      methodCard('agentrouter', t('modal.agentrouterTitle'), t('modal.agentrouterDesc')) +
       methodCard('cookie', t('modal.cookieTitle'), t('modal.cookieDesc')) +
       '</div>' +
       '</div>' +
@@ -1723,6 +2028,47 @@ let testModalRunning = false;
       '</div>';
     $('importExternalBtn').addEventListener('click', importExternal);
   }
+
+  function modalAgentRouter(title, body) {
+    title.textContent = t('modal.agentrouterTitle');
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('modal.agentrouterDesc')) + '</p>' +
+      '<div class="form-group"><label>' + escapeHtml(t('external.baseUrlLabel')) + '</label>' +
+      '<input type="text" id="agentrouterBaseUrl" class="font-mono" value="https://ps.air-outer.com" placeholder="https://ps.air-outer.com" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('external.apiKeyLabel')) + '</label>' +
+      '<input type="password" id="agentrouterApiKey" class="font-mono" placeholder="sk-..." autocomplete="off" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('external.nameLabel')) + '</label>' +
+      '<input type="text" id="agentrouterName" placeholder="AgentRouter Account" /></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="importAgentRouterBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
+      '</div>';
+    $('importAgentRouterBtn').addEventListener('click', importAgentRouter);
+  }
+
+  async function importAgentRouter() {
+    const baseUrl = $('agentrouterBaseUrl').value.trim() || 'https://ps.air-outer.com';
+    const apiKey = $('agentrouterApiKey').value.trim();
+    if (!apiKey) return toastWarning(t('external.apiKeyLabel') + ' is required');
+    const name = $('agentrouterName').value.trim() || 'AgentRouter Account';
+    const btn = $('importAgentRouterBtn');
+    btn.disabled = true; btn.textContent = t('common.loading') || '...';
+    try {
+      const res = await api('/auth/external-provider', { method: 'POST', body: JSON.stringify({ baseUrl, apiKey, name, authMethod: 'agentrouter' }) });
+      const d = await res.json();
+      if (d.success) {
+        closeModal(); loadAccounts(); loadStats();
+        toastPrimary(t('external.importSuccess') + ': ' + (d.account?.email || d.account?.id), { duration: 5000 });
+        autoRefreshNewAccount(d.account?.id);
+      } else {
+        toastWarning(d.error || 'Import failed');
+      }
+    } catch (e) {
+      toastWarning(e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = t('common.add');
+    }
+  }
   async function importExternal() {
     const baseUrl = $('externalBaseUrl').value.trim();
     const apiKey = $('externalApiKey').value.trim();
@@ -1779,11 +2125,21 @@ let testModalRunning = false;
   // modalCodexLogin — PKCE browser flow. Starts the OAuth session, shows
   // the authorize URL, polls until the user completes browser auth.
   var codexPollTimer = null;
+  var codexLoginGeneration = 0;
+  function stopCodexLoginPolling() {
+    codexLoginGeneration++;
+    if (codexPollTimer) {
+      clearTimeout(codexPollTimer);
+      codexPollTimer = null;
+    }
+  }
   function modalCodexLogin(title, body) {
     title.textContent = t('codex.loginTitle');
     body.innerHTML =
       '<p class="help-block">' + escapeHtml(t('codex.loginDesc')) + '</p>' +
       '<div id="codexStep1">' +
+      '<div class="form-group"><label>' + escapeHtml(t('detail.nickname')) + '</label>' +
+      '<input type="text" id="codexLoginNickname" placeholder="' + escapeAttr(t('codex.nicknamePlaceholder')) + '" /></div>' +
       '<div class="modal-footer">' +
       '<button class="btn btn-secondary" data-modal-goto="codex" type="button">' + escapeHtml(t('common.back')) + '</button>' +
       '<button class="btn btn-primary" id="startCodexLoginBtn" type="button">' + escapeHtml(t('codex.startLogin')) + '</button>' +
@@ -1804,36 +2160,71 @@ let testModalRunning = false;
   }
   async function startCodexLogin() {
     const btn = $('startCodexLoginBtn');
+    const nicknameInput = $('codexLoginNickname');
+    if (!btn || !nicknameInput) return;
+    const nickname = nicknameInput.value.trim();
+    stopCodexLoginPolling();
+    const generation = codexLoginGeneration;
     btn.disabled = true; btn.textContent = t('common.loading') || '...';
     try {
       const res = await api('/auth/codex/login', { method: 'POST' });
       const d = await res.json();
-      if (d.error) { toastError(d.error); return; }
-      $('codexStep1').classList.add('hidden');
-      $('codexStep2').classList.remove('hidden');
-      $('codexAuthUrl').textContent = d.authUrl;
-      $('codexOpenBtn').addEventListener('click', () => window.open(d.authUrl, '_blank'));
-      $('codexCopyBtn').addEventListener('click', async () => {
+      if (generation !== codexLoginGeneration) return;
+      if (d.error) {
+        toastError(d.error);
+        return;
+      }
+      const step1 = $('codexStep1');
+      const step2 = $('codexStep2');
+      const authURL = $('codexAuthUrl');
+      const openBtn = $('codexOpenBtn');
+      const copyBtn = $('codexCopyBtn');
+      const cancelBtn = $('codexCancelBtn');
+      if (!step1 || !step2 || !authURL || !openBtn || !copyBtn || !cancelBtn) return;
+      step1.classList.add('hidden');
+      step2.classList.remove('hidden');
+      authURL.textContent = d.authUrl;
+      if (d.browserError) toastWarning(d.browserError);
+      openBtn.addEventListener('click', openCodexLoginBrowser);
+      copyBtn.addEventListener('click', async () => {
         await copyText(d.authUrl);
         toastPrimary(t('common.copied'));
       });
-      $('codexCancelBtn').addEventListener('click', cancelCodexLogin);
-      pollCodexLogin();
+      cancelBtn.addEventListener('click', cancelCodexLogin);
+      pollCodexLogin(nickname, generation);
     } catch (e) {
       toastError(t('common.failed') + ': ' + (e.message || e));
     } finally {
       btn.disabled = false; btn.textContent = t('codex.startLogin');
     }
   }
-  function pollCodexLogin() {
+  async function openCodexLoginBrowser() {
+    const btn = $('codexOpenBtn');
+    btn.disabled = true;
+    try {
+      const res = await api('/auth/codex/open-browser', { method: 'POST' });
+      const d = await res.json();
+      if (d.success) return;
+      toastError(d.error || t('common.failed'));
+    } catch (e) {
+      toastError(t('common.failed') + ': ' + (e.message || e));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+  function pollCodexLogin(nickname, generation) {
     if (codexPollTimer) clearTimeout(codexPollTimer);
     codexPollTimer = setTimeout(async () => {
+      if (generation !== codexLoginGeneration) return;
       try {
-        const res = await api('/auth/codex/poll', { method: 'POST' });
+        const res = await api('/auth/codex/poll', { method: 'POST', body: JSON.stringify({ nickname }) });
         const d = await res.json();
+        if (generation !== codexLoginGeneration) return;
         if (d.pending) {
-          $('codexStatus').textContent = t('builderid.waiting');
-          pollCodexLogin();
+          const status = $('codexStatus');
+          if (!status) return;
+          status.textContent = t('builderid.waiting');
+          pollCodexLogin(nickname, generation);
           return;
         }
         if (d.error) {
@@ -1852,7 +2243,7 @@ let testModalRunning = false;
     }, 2000);
   }
   async function cancelCodexLogin() {
-    if (codexPollTimer) { clearTimeout(codexPollTimer); codexPollTimer = null; }
+    stopCodexLoginPolling();
     try { await api('/auth/codex/cancel', { method: 'POST' }); } catch {}
     showModal('codex');
   }
@@ -1925,8 +2316,9 @@ let testModalRunning = false;
       }
       const codex = d.codex || [];
       const kiro = d.kiro || [];
+      const providers = d.providers || [];
       const skipped = d.skipped || [];
-      if (codex.length === 0 && kiro.length === 0) {
+      if (codex.length === 0 && kiro.length === 0 && providers.length === 0) {
         container.innerHTML = '<div class="message message-info"><p>' + escapeHtml(t('ninerouter.noAccounts')) + '</p></div>';
         return;
       }
@@ -1942,7 +2334,7 @@ let testModalRunning = false;
           const checked = c.hasToken ? 'checked' : '';
           const disabled = c.hasToken ? '' : 'disabled';
           html += '<label class="ninerouter-row' + (c.hasToken ? '' : ' muted-text') + '">' +
-            '<input type="checkbox" class="ninerouter-codex-cb" data-idx="' + i + '" ' + checked + ' ' + disabled + ' />' +
+            '<input type="checkbox" class="ninerouter-codex-cb" data-idx="' + i + '" data-source-id="' + escapeHtml(c.sourceId || '') + '" ' + checked + ' ' + disabled + ' />' +
             '<span class="ninerouter-name">' + escapeHtml(c.name || '(unnamed)') + '</span>' +
             (c.chatgptAccountId ? '<span class="badge badge-info">ID: ' + escapeHtml(String(c.chatgptAccountId).slice(0, 8)) + '</span>' : '') +
             (c.planType ? '<span class="badge badge-free">' + escapeHtml(c.planType) + '</span>' : '') +
@@ -1962,10 +2354,33 @@ let testModalRunning = false;
           const checked = k.hasToken ? 'checked' : '';
           const disabled = k.hasToken ? '' : 'disabled';
           html += '<label class="ninerouter-row' + (k.hasToken ? '' : ' muted-text') + '">' +
-            '<input type="checkbox" class="ninerouter-kiro-cb" data-idx="' + i + '" ' + checked + ' ' + disabled + ' />' +
+            '<input type="checkbox" class="ninerouter-kiro-cb" data-idx="' + i + '" data-source-id="' + escapeHtml(k.sourceId || '') + '" ' + checked + ' ' + disabled + ' />' +
             '<span class="ninerouter-name">' + escapeHtml(k.name || '(unnamed)') + '</span>' +
             (k.profileArn ? '<span class="text-xs">' + escapeHtml(k.profileArn.split('/').pop()) + '</span>' : '') +
             (k.hasToken ? '' : '<span class="text-xs">' + escapeHtml(t('ninerouter.noToken')) + '</span>') +
+            '</label>';
+        });
+        html += '</div>';
+      }
+      // Generic provider group (search/image/chat connections).
+      if (providers.length > 0) {
+        html += '<div class="account-category-header" style="margin-top:0.75rem;">' +
+          '<span class="account-category-icon"><i class="fa-solid fa-plug"></i></span>' +
+          '<span class="account-category-title">Providers (' + providers.length + ')</span>' +
+          '</div>';
+        html += '<div class="ninerouter-list">';
+        providers.forEach((p, i) => {
+          const checked = p.hasToken ? 'checked' : '';
+          const disabled = p.hasToken ? '' : 'disabled';
+          const kind = p.providerKind ? ' · ' + p.providerKind : '';
+          const caps = Array.isArray(p.capabilities) && p.capabilities.length > 0
+            ? ' · ' + p.capabilities.join(', ')
+            : '';
+          html += '<label class="ninerouter-row' + (p.hasToken ? '' : ' muted-text') + '">' +
+            '<input type="checkbox" class="ninerouter-provider-cb" data-idx="' + i + '" data-source-id="' + escapeHtml(p.sourceId || '') + '" ' + checked + ' ' + disabled + ' />' +
+            '<span class="ninerouter-name">' + escapeHtml(p.name || p.provider || '(unnamed)') + '</span>' +
+            '<span class="text-xs">' + escapeHtml((p.provider || '') + kind + caps) + '</span>' +
+            (p.hasToken ? '' : '<span class="text-xs">' + escapeHtml(t('ninerouter.noToken')) + '</span>') +
             '</label>';
         });
         html += '</div>';
@@ -1984,13 +2399,39 @@ let testModalRunning = false;
       container.innerHTML = '<div class="message message-error"><p>' + escapeHtml(t('common.failed') + ': ' + (e.message || e)) + '</p></div>';
     }
   }
+  function selectedNineRouterAccounts(selector) {
+    const sourceIds = [];
+    const indexes = [];
+    qsa(selector).forEach(function(cb) {
+      if (!cb.checked) return;
+      const sourceId = (cb.dataset.sourceId || '').trim();
+      if (sourceId) sourceIds.push(sourceId);
+      else indexes.push(Number(cb.dataset.idx));
+    });
+    return { sourceIds: sourceIds, indexes: indexes };
+  }
   async function importFrom9Router() {
-    const importCodex = Array.from(qsa('.ninerouter-codex-cb')).some(cb => cb.checked);
-    const importKiro = Array.from(qsa('.ninerouter-kiro-cb')).some(cb => cb.checked);
+    const codexSelection = selectedNineRouterAccounts('.ninerouter-codex-cb');
+    const kiroSelection = selectedNineRouterAccounts('.ninerouter-kiro-cb');
+    const providerSelection = selectedNineRouterAccounts('.ninerouter-provider-cb');
+    const importCodex = codexSelection.sourceIds.length > 0 || codexSelection.indexes.length > 0;
+    const importKiro = kiroSelection.sourceIds.length > 0 || kiroSelection.indexes.length > 0;
+    const importProviders = providerSelection.sourceIds.length > 0 || providerSelection.indexes.length > 0;
     const btn = $('import9RouterBtn');
     btn.disabled = true; btn.textContent = t('common.loading') || '...';
     try {
-      const res = await api('/auth/import-9router', { method: 'POST', body: JSON.stringify({ importCodex, importKiro, refreshKiro: true }) });
+      const res = await api('/auth/import-9router', { method: 'POST', body: JSON.stringify({
+        importCodex: importCodex,
+        importKiro: importKiro,
+        importProviders: importProviders,
+        codexSourceIds: codexSelection.sourceIds,
+        codexIndexes: codexSelection.indexes,
+        kiroSourceIds: kiroSelection.sourceIds,
+        kiroIndexes: kiroSelection.indexes,
+        providerSourceIds: providerSelection.sourceIds,
+        providerIndexes: providerSelection.indexes,
+        refreshKiro: true
+      }) });
       const d = await res.json();
       if (d.success) {
         closeModal(); loadAccounts(); loadStats();
@@ -2516,4 +2957,3 @@ let testModalRunning = false;
     a.click();
     URL.revokeObjectURL(url);
   }
-

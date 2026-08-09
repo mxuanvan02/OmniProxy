@@ -6,10 +6,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
-	"strings"
 	"omniproxy/config"
 	accountpool "omniproxy/pool"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -55,6 +55,62 @@ func TestResponsesParseArrayInput(t *testing.T) {
 	}
 	if got, _ := msgs[2].Content.(string); got != "42" {
 		t.Fatalf("expected tool output 42, got %v", msgs[2].Content)
+	}
+}
+
+func TestResponsesParseToolImageOutputAsMultimodalContent(t *testing.T) {
+	const imageData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	raw := json.RawMessage(`[
+		{"type":"message","role":"user","content":[{"type":"input_text","text":"inspect it"}]},
+		{"type":"function_call","call_id":"call_img","name":"view_image","arguments":"{\"path\":\"image.png\"}"},
+		{"type":"function_call_output","call_id":"call_img","output":[
+			{"type":"input_text","text":"screenshot"},
+			{"type":"input_image","detail":"original","image_url":"data:image/png;base64,` + imageData + `"}
+		]}
+	]`)
+
+	msgs, err := parseResponsesInput(raw)
+	if err != nil {
+		t.Fatalf("parse tool image output: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 messages, got %d", len(msgs))
+	}
+	parts, ok := msgs[2].Content.([]interface{})
+	if !ok {
+		t.Fatalf("expected multimodal tool content, got %T", msgs[2].Content)
+	}
+	if len(parts) != 2 {
+		t.Fatalf("expected text and image parts, got %d", len(parts))
+	}
+
+	payload := OpenAIToKiro(&OpenAIRequest{Model: "gpt-5.6-sol", Messages: msgs}, false)
+	current := payload.ConversationState.CurrentMessage.UserInputMessage
+	if len(current.Images) != 1 {
+		t.Fatalf("expected one tool image in Kiro payload, got %d", len(current.Images))
+	}
+	if current.Images[0].Source.Bytes != imageData {
+		t.Fatal("expected decoded image payload to exclude the data URL prefix")
+	}
+	if strings.Contains(current.Content, imageData) {
+		t.Fatal("tool image base64 leaked into text content")
+	}
+}
+
+func TestResponsesParseNonImageStructuredToolOutputAsJSON(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"type":"function_call_output","call_id":"call_data","output":[{"value":42}]}
+	]`)
+
+	msgs, err := parseResponsesInput(raw)
+	if err != nil {
+		t.Fatalf("parse structured tool output: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected one message, got %d", len(msgs))
+	}
+	if got, ok := msgs[0].Content.(string); !ok || got != `[{"value":42}]` {
+		t.Fatalf("expected non-image output to remain JSON text, got %T %v", msgs[0].Content, msgs[0].Content)
 	}
 }
 
@@ -356,6 +412,51 @@ func TestResponsesNonStreamRoundTrip(t *testing.T) {
 	}
 }
 
+func TestResponsesNonStreamImageUsageEstimateIsBounded(t *testing.T) {
+	h, cleanup := setupResponsesTestHandler(t)
+	defer cleanup()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+			"content": "image usage test OK",
+		}))
+	}))
+	defer server.Close()
+	defer swapKiroEndpointsForTest(t, server)()
+
+	// This mirrors the large data URL retained by Codex Desktop after view_image.
+	// The estimator must charge a bounded image allowance instead of tokenizing
+	// the base64 payload as ordinary text.
+	imageData := strings.Repeat("A", 3_300_000)
+	body := strings.NewReader(`{"model":"gpt-5.6-sol","input":[
+		{"type":"message","role":"user","content":"inspect the screenshot"},
+		{"type":"function_call","call_id":"call_img","name":"view_image","arguments":"{\"path\":\"image.png\"}"},
+		{"type":"function_call_output","call_id":"call_img","output":[
+			{"type":"input_text","text":"screenshot"},
+			{"type":"input_image","image_url":"data:image/png;base64,` + imageData + `"}
+		]}
+	],"store":false}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	rec := httptest.NewRecorder()
+
+	h.handleOpenAIResponses(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp ResponsesObject
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Usage.InputTokens >= 10_000 {
+		t.Fatalf("image usage estimate was not bounded: %d input tokens", resp.Usage.InputTokens)
+	}
+	if resp.Usage.InputTokens < estimatedOpenAIImageTokens {
+		t.Fatalf("image usage estimate is unexpectedly low: %d input tokens", resp.Usage.InputTokens)
+	}
+}
+
 func TestResponsesStreamSSE(t *testing.T) {
 	h, cleanup := setupResponsesTestHandler(t)
 	defer cleanup()
@@ -389,5 +490,59 @@ func TestResponsesStreamSSE(t *testing.T) {
 	}
 	if !strings.Contains(bodyStr, "stream chunk") {
 		t.Fatalf("expected stream content delta, got:\n%s", bodyStr)
+	}
+}
+
+// TestResponsesRequestParsesReasoningEffort verifies that the reasoning.effort
+// field sent by Codex CLI (when model_reasoning_effort is set in config.toml)
+// is correctly parsed into ResponsesRequest.Reasoning.Effort.
+func TestResponsesReasoningEffortWithoutInferenceConfig(t *testing.T) {
+	h, cleanup := setupResponsesTestHandler(t)
+	defer cleanup()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(awsEventStreamFrame(t, "assistantResponseEvent", map[string]interface{}{
+			"content": "reasoning request OK",
+		}))
+	}))
+	defer server.Close()
+	defer swapKiroEndpointsForTest(t, server)()
+
+	body := strings.NewReader(`{"model":"claude-sonnet-4.5","input":"hi","reasoning":{"effort":"high"},"store":false}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", body)
+	rec := httptest.NewRecorder()
+
+	h.handleOpenAIResponses(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestResponsesRequestParsesReasoningEffort(t *testing.T) {
+	raw := `{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":"hi"}],"reasoning":{"effort":"high"}}`
+	var req ResponsesRequest
+	if err := json.Unmarshal([]byte(raw), &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if req.Reasoning == nil {
+		t.Fatal("Reasoning should not be nil when reasoning field is present")
+	}
+	if req.Reasoning.Effort != "high" {
+		t.Errorf("Effort: got %q, want %q", req.Reasoning.Effort, "high")
+	}
+}
+
+// TestResponsesRequestNoReasoning verifies that a request without the
+// reasoning field leaves Reasoning as nil (no error, no phantom value).
+func TestResponsesRequestNoReasoning(t *testing.T) {
+	raw := `{"model":"gpt-5.6-sol","input":[{"type":"message","role":"user","content":"hi"}]}`
+	var req ResponsesRequest
+	if err := json.Unmarshal([]byte(raw), &req); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if req.Reasoning != nil {
+		t.Errorf("Reasoning should be nil when not present, got %+v", req.Reasoning)
 	}
 }

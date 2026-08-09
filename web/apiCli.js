@@ -143,22 +143,9 @@
     el.classList.remove('hidden');
   }
 
-  // Default model IDs for the 3 Claude CLI slots — user can override via /model
-  // opus  → claude-opus-4.8   (flagship Claude, 1M context)
-  // sonnet → claude-sonnet-5  (balanced Claude, 1M context)
-  // haiku  → gpt-5.6-sol      (fallback model, 300K context)
-  var CLAUDE_DEFAULT_MODELS = {
-    opus: 'claude-opus-4.8',
-    sonnet: 'claude-sonnet-5',
-    haiku: 'gpt-5.6-sol'
-  };
-
-  function claudeManualConfig(endpoint, apiKey, opus, sonnet, haiku) {
+  function claudeManualConfig(endpoint, apiKey) {
     endpoint = endpoint.replace(/\/v1$/, "");
-    var env = { ANTHROPIC_BASE_URL: endpoint, ANTHROPIC_AUTH_TOKEN: apiKey, ANTHROPIC_API_KEY: apiKey };
-    if (opus) env.ANTHROPIC_DEFAULT_OPUS_MODEL = opus;
-    if (sonnet) env.ANTHROPIC_DEFAULT_SONNET_MODEL = sonnet;
-    if (haiku) env.ANTHROPIC_DEFAULT_HAIKU_MODEL = haiku;
+    var env = { ANTHROPIC_BASE_URL: endpoint, ANTHROPIC_API_KEY: apiKey };
     return [{ filename: '~/.claude/settings.json', content: JSON.stringify({ hasCompletedOnboarding: true, env: env }, null, 2) }];
   }
 
@@ -169,23 +156,6 @@
     var prefix = 'claude';
     var html = '<div style="padding:1rem;border-top:1px solid var(--border);">';
     html += renderEndpointApiKeyFields(prefix);
-    html += '<div class="form-group"><label data-i18n="cliTools.model"></label>';
-    var slots = [
-      { key: 'opus', label: t('cliTools.opus'), param: 'ANTHROPIC_DEFAULT_OPUS_MODEL', hint: 'claude-opus-4.8' },
-      { key: 'sonnet', label: t('cliTools.sonnet'), param: 'ANTHROPIC_DEFAULT_SONNET_MODEL', hint: 'claude-sonnet-5' },
-      { key: 'haiku', label: t('cliTools.haiku'), param: 'ANTHROPIC_DEFAULT_HAIKU_MODEL', hint: 'gpt-5.6-sol' }
-    ];
-    var claudeState = window.claudeSlotState || {};
-    slots.forEach(function (s, idx) {
-      var val = claudeState[s.key] || CLAUDE_DEFAULT_MODELS[s.key] || '';
-      html += '<div class="cli-model-slot" style="display:flex;gap:0.5rem;align-items:center;margin-top:' + (idx > 0 ? '0.5rem' : '0.5rem') + ';">' +
-        '<span style="font-size:0.75rem;font-weight:600;color:var(--muted-foreground);min-width:3.5rem;">' + s.label + '</span>' +
-        '<input type="text" class="form-control claude-slot-input" style="flex:1;" data-i18n-placeholder="cliTools.modelPlaceholder" placeholder="provider/model-id" value="' + escapeAttr(val) + '" autocomplete="off" data-slot="' + s.key + '" />' +
-        (val ? '<button class="btn btn-outline btn-sm claude-slot-clear" type="button" data-slot="' + s.key + '" style="padding:0.25rem 0.5rem;" data-i18n-title="cliTools.clear" title="Clear">&times;</button>' : '') +
-        '<button class="btn btn-outline btn-sm claude-slot-select" type="button" data-slot="' + s.key + '" data-i18n="cliTools.selectModel"></button>' +
-        '</div>';
-    });
-    html += '</div>';
     html += '<div id="' + prefix + '_status" class="hidden" style="margin-top:0.75rem;padding:0.5rem 0.75rem;border-radius:6px;font-size:0.8125rem;"></div>';
     html += '<div style="margin-top:1rem;display:flex;gap:0.5rem;">' +
       '<button class="btn btn-secondary" onclick="claudeShowManual()" type="button" data-i18n="cliTools.manualConfig"></button>' +
@@ -202,14 +172,7 @@
     var endpoint = getEndpointValue(prefix);
     if (!endpoint) { showToolStatus(prefix, 'Please select an endpoint', 'error'); return; }
     var apiKey = await getCliApiKey(prefix + '_ak', prefix + '_akCustom');
-    var state = window.claudeSlotState || {};
-    var env = { ANTHROPIC_BASE_URL: endpoint, ANTHROPIC_AUTH_TOKEN: apiKey };
-    var opusModel = state.opus || CLAUDE_DEFAULT_MODELS.opus;
-    var sonnetModel = state.sonnet || CLAUDE_DEFAULT_MODELS.sonnet;
-    var haikuModel = state.haiku || CLAUDE_DEFAULT_MODELS.haiku;
-    if (opusModel) env.ANTHROPIC_DEFAULT_OPUS_MODEL = opusModel;
-    if (sonnetModel) env.ANTHROPIC_DEFAULT_SONNET_MODEL = sonnetModel;
-    if (haikuModel) env.ANTHROPIC_DEFAULT_HAIKU_MODEL = haikuModel;
+    var env = { ANTHROPIC_BASE_URL: endpoint, ANTHROPIC_API_KEY: apiKey };
     var applyBtn = document.querySelector('.cli-tool-detail-body .btn-primary');
     if (applyBtn) { applyBtn.disabled = true; applyBtn.textContent = t('cliTools.applying'); }
     try {
@@ -231,8 +194,7 @@
     populateAkSelect('claude');
     var endpoint = getEndpointValue('claude');
     var apiKey = await getCliApiKey('claude_ak', 'claude_akCustom');
-    var state = window.claudeSlotState || {};
-    showManualConfigModal(claudeManualConfig(endpoint, apiKey || 'sk-your-api-key', state.opus || CLAUDE_DEFAULT_MODELS.opus, state.sonnet || CLAUDE_DEFAULT_MODELS.sonnet, state.haiku || CLAUDE_DEFAULT_MODELS.haiku));
+    showManualConfigModal(claudeManualConfig(endpoint, apiKey || 'sk-your-api-key'));
   };
   window.claudeReset = async function () {
     var confirmed = await confirmAction('Reset Claude Code configuration?', { confirmText: 'Reset', variant: 'danger' });
@@ -427,7 +389,7 @@
   // ================================================================
   function renderCodexConfig() {
     var prefix = 'codex';
-    var state = window.__codexState || { model: '', subagentModel: '' };
+    var state = window.__codexState || { model: '', subagentModel: '', reasoningEffort: 'medium' };
     var html = '<div style="padding:1rem;border-top:1px solid var(--border);">';
     html += renderEndpointApiKeyFields(prefix);
     html += '<div class="form-group"><label data-i18n="cliTools.model"></label>' +
@@ -444,6 +406,13 @@
       (state.subagentModel ? '<button onclick="codexClearSubagent()" type="button" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);padding:2px 6px;border:none;background:none;cursor:pointer;font-size:0.85rem;color:var(--muted-foreground);">&times;</button>' : '') +
       '</div>' +
       '<button class="btn btn-outline btn-sm" onclick="codexPickSubagent()" type="button" data-i18n="cliTools.codexSelect">Select</button></div></div>';
+    html += '<div class="form-group"><label>Reasoning Effort</label>' +
+      '<select id="codexEffort" class="form-control" data-native-select="true">' +
+      '<option value="low"' + (state.reasoningEffort === 'low' ? ' selected' : '') + '>Low — fast & cheap</option>' +
+      '<option value="medium"' + (state.reasoningEffort === 'medium' ? ' selected' : '') + '>Medium — balanced</option>' +
+      '<option value="high"' + (state.reasoningEffort === 'high' ? ' selected' : '') + '>High — deep reasoning</option>' +
+      '</select>' +
+      '<small style="display:block;margin-top:0.25rem;color:var(--muted-foreground);">Sets <code>model_reasoning_effort</code> in config.toml. Controls how many reasoning tokens the model spends before answering.</small></div>';
     html += '<div id="' + prefix + '_status" class="hidden" style="margin-top:0.75rem;padding:0.5rem 0.75rem;border-radius:6px;font-size:0.8125rem;"></div>';
     html += '<div style="margin-top:1rem;display:flex;gap:0.5rem;">' +
       '<button class="btn btn-secondary" onclick="codexShowManual()" type="button" data-i18n="cliTools.manualConfig"></button>' +
@@ -452,7 +421,7 @@
       '</div></div>';
     return html;
   }
-  window.__codexState = { model: '', subagentModel: '' };
+  window.__codexState = { model: '', subagentModel: '', reasoningEffort: 'medium' };
   window.codexPickModel = function () {
     if (typeof openModelPicker === 'function') {
       window.__cliModelCallback = function (model) {
@@ -492,10 +461,13 @@
     var apiKey = await getCliApiKey(prefix + '_ak', prefix + '_akCustom');
     var model = window.__codexState.model || '';
     var subagentModel = window.__codexState.subagentModel || model;
+    var effortEl = $('codexEffort');
+    var effort = effortEl ? effortEl.value : 'medium';
+    window.__codexState.reasoningEffort = effort;
     var applyBtn = document.querySelector('.cli-tool-detail-body .btn-primary');
     if (applyBtn) { applyBtn.disabled = true; applyBtn.textContent = t('cliTools.applying'); }
     try {
-      var res = await api('/cli-tools/codex', { method: 'POST', body: JSON.stringify({ baseUrl: endpoint, apiKey: apiKey || null, model: model, subagentModel: subagentModel }) });
+      var res = await api('/cli-tools/codex', { method: 'POST', body: JSON.stringify({ baseUrl: endpoint, apiKey: apiKey || null, model: model, subagentModel: subagentModel, reasoningEffort: effort }) });
       if (res.ok) { showToolStatus(prefix, t('cliTools.configSuccess'), 'success'); updateCliBadge('codex', true); }
       else { var d = await res.json().catch(function () { return {}; }); showToolStatus(prefix, (d && d.error) || t('cliTools.configFailed'), 'error'); }
     } catch (e) { showToolStatus(prefix, e.message || t('cliTools.configFailed'), 'error'); }
@@ -507,7 +479,9 @@
     var apiKey = await getCliApiKey('codex_ak', 'codex_akCustom');
     var model = window.__codexState.model || 'provider/model-id';
     var subagentModel = window.__codexState.subagentModel || model;
-    var configContent = '# OmniProxy Configuration for Codex CLI\nmodel = "' + model + '"\nmodel_provider = "omniproxy"\n\n[model_providers.omniproxy]\nname = "OmniProxy"\nbase_url = "' + endpoint + '"\nwire_api = "responses"\n\n[agents.subagent]\nmodel = "' + subagentModel + '"\n';
+    var effort = window.__codexState.reasoningEffort || 'medium';
+    var effortLine = (effort && effort !== 'medium') ? 'model_reasoning_effort = "' + effort + '"\n' : '';
+    var configContent = '# OmniProxy Configuration for Codex CLI\nmodel = "' + model + '"\nmodel_provider = "omniproxy"\n' + effortLine + '\n[model_providers.omniproxy]\nname = "OmniProxy"\nbase_url = "' + endpoint + '"\nwire_api = "responses"\nrequires_openai_auth = true\n\n[agents.subagent]\nmodel = "' + subagentModel + '"\n';
     showManualConfigModal([
       { filename: '~/.codex/config.toml', content: configContent },
       { filename: '~/.codex/auth.json', content: JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: apiKey }, null, 2) }
@@ -963,6 +937,18 @@
       '<div style="display:flex;gap:0.5rem;">' +
       '<input type="text" id="openclawModel" class="form-control" style="flex:1;" data-i18n-placeholder="cliTools.modelPlaceholder" placeholder="provider/model-id" value="' + escapeAttr(state.model) + '" autocomplete="off" />' +
       '<button class="btn btn-outline btn-sm" onclick="openClawPickModel()" type="button" data-i18n="cliTools.selectModel"></button></div></div>';
+    var agentIds = Object.keys(state.agentModels || {}).filter(function (id) { return id !== 'default'; });
+    if (agentIds.length > 0) {
+      html += '<div class="form-group"><label data-i18n="cliTools.subagent"></label>';
+      agentIds.forEach(function (id) {
+        var inputId = 'openclawAgent_' + id.replace(/[^a-zA-Z0-9_-]/g, '_');
+        html += '<div style="display:flex;gap:0.5rem;margin-top:0.4rem;align-items:center;">' +
+          '<span style="min-width:7rem;font-size:0.8rem;" title="' + escapeAttr(id) + '">' + escapeHtml(id) + '</span>' +
+          '<input type="text" id="' + escapeAttr(inputId) + '" class="form-control" style="flex:1;" value="' + escapeAttr(state.agentModels[id]) + '" oninput="window.__openClawState.agentModels[' + JSON.stringify(id) + ']=this.value" />' +
+          '<button class="btn btn-outline btn-sm" onclick="openClawPickAgentModel(' + JSON.stringify(id) + ')" type="button" data-i18n="cliTools.selectModel"></button></div>';
+      });
+      html += '</div>';
+    }
     html += '<div id="' + prefix + '_status" class="hidden" style="margin-top:0.75rem;padding:0.5rem 0.75rem;border-radius:6px;font-size:0.8125rem;"></div>';
     html += '<div style="margin-top:1rem;display:flex;gap:0.5rem;">' +
       '<button class="btn btn-secondary" onclick="openClawShowManual()" type="button" data-i18n="cliTools.manualConfig"></button>' +
@@ -982,6 +968,15 @@
       openModelPicker();
     }
   };
+  window.openClawPickAgentModel = function (agentId) {
+    if (typeof openModelPicker !== 'function') return;
+    window.__cliModelCallback = function (model) {
+      window.__openClawState.agentModels[agentId] = model;
+      closeDialog('modelPickerModal');
+      reRenderDetailBody();
+    };
+    openModelPicker();
+  };
   window.openClawApply = async function () {
     var prefix = 'openclaw';
     populateAkSelect(prefix);
@@ -992,7 +987,7 @@
     var applyBtn = document.querySelector('.cli-tool-detail-body .btn-primary');
     if (applyBtn) { applyBtn.disabled = true; applyBtn.textContent = t('cliTools.applying'); }
     try {
-      var res = await api('/cli-tools/openclaw', { method: 'POST', body: JSON.stringify({ baseUrl: endpoint, apiKey: apiKey || null, model: model, agentModels: {} }) });
+      var res = await api('/cli-tools/openclaw', { method: 'POST', body: JSON.stringify({ baseUrl: endpoint, apiKey: apiKey || null, model: model, agentModels: window.__openClawState.agentModels || {} }) });
       if (res.ok) { showToolStatus(prefix, t('cliTools.configSuccess'), 'success'); updateCliBadge('openclaw', true); }
       else { var d = await res.json().catch(function () { return {}; }); showToolStatus(prefix, (d && d.error) || t('cliTools.configFailed'), 'error'); }
     } catch (e) { showToolStatus(prefix, e.message || t('cliTools.configFailed'), 'error'); }
@@ -1648,16 +1643,8 @@
     switch (toolId) {
       case 'claude':
         if (s.env) {
-          if (!window.claudeSlotState) window.claudeSlotState = {};
-          ['opus','sonnet','haiku'].forEach(function(k) {
-            var envKey = 'ANTHROPIC_DEFAULT_' + k.toUpperCase() + '_MODEL';
-            var modelVal = s.env[envKey] || (CLAUDE_DEFAULT_MODELS[k] || '');
-            if (modelVal) {
-              window.claudeSlotState[k] = modelVal;
-              var inp = document.querySelector('.claude-slot-input[data-slot="' + k + '"]');
-              if (inp) inp.value = modelVal;
-            }
-          });
+          // Model routing is owned by Claude Code settings, not OmniProxy's
+          // endpoint form. Keep this branch for compatibility with old state.
         }
         break;
       case 'opencode':
@@ -1730,9 +1717,9 @@
         break;
       case 'openclaw':
         if (s.model || s.agentModels) {
-          if (!window.__openclawState) window.__openclawState = { model: '', agentModels: {} };
-          if (s.model) window.__openclawState.model = s.model;
-          if (s.agentModels) window.__openclawState.agentModels = s.agentModels;
+          if (!window.__openClawState) window.__openClawState = { model: '', agentModels: {} };
+          if (s.model) window.__openClawState.model = s.model;
+          if (s.agentModels) window.__openClawState.agentModels = s.agentModels;
           needsReRender = true;
         }
         break;
@@ -1813,37 +1800,7 @@
     populateAkSelect(cliToolDetailId);
   }
 
-  function bindClaudeEvents() { bindEndpointApiKeyEvents('claude'); bindClaudeSlotEvents(); }
-  function bindClaudeSlotEvents() {
-    document.querySelectorAll('.claude-slot-input').forEach(function (inp) {
-      inp.addEventListener('input', function () {
-        if (!window.claudeSlotState) window.claudeSlotState = {};
-        window.claudeSlotState[this.dataset.slot] = this.value;
-      });
-    });
-    document.querySelectorAll('.claude-slot-clear').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        var slot = this.dataset.slot;
-        if (!window.claudeSlotState) window.claudeSlotState = {};
-        window.claudeSlotState[slot] = '';
-        reRenderDetailBody();
-      });
-    });
-    document.querySelectorAll('.claude-slot-select').forEach(function (btn) {
-      btn.addEventListener('click', function () {
-        if (typeof openModelPicker === 'function') {
-          var slot = this.dataset.slot;
-          window.__cliModelCallback = function (model) {
-            if (!window.claudeSlotState) window.claudeSlotState = {};
-            window.claudeSlotState[slot] = model;
-            reRenderDetailBody();
-            closeDialog('modelPickerModal');
-          };
-          openModelPicker();
-        }
-      });
-    });
-  }
+  function bindClaudeEvents() { bindEndpointApiKeyEvents('claude'); }
   function bindClineEvents() {
     bindEndpointApiKeyEvents('cline');
     var m = document.getElementById('clineModel');

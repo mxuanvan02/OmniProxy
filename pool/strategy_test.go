@@ -80,6 +80,20 @@ func TestStrategyCostOptimizedExternalPrefersMoreRemaining(t *testing.T) {
 	}
 }
 
+func TestStrategyCostOptimizedAgentRouterUsesExternalCredits(t *testing.T) {
+	strategyTestSetup(t)
+	config.SetStringSetting("poolRoutingStrategy", "cost-optimized")
+	defer config.SetStringSetting("poolRoutingStrategy", "")
+
+	accs := []config.Account{
+		{ID: "less", AuthMethod: "agentrouter", ExtCreditLimit: 100, ExtCreditsRemaining: 10},
+		{ID: "more", AuthMethod: "agentrouter", ExtCreditLimit: 100, ExtCreditsRemaining: 80},
+	}
+	if got := pickByStrategy(accs, time.Now()); got == nil || got.ID != "more" {
+		t.Fatalf("AgentRouter strategy picked %#v, want more-credit account", got)
+	}
+}
+
 // TestStrategyResetAwareAvoidsSoonReset verifies reset-aware deprioritises
 // accounts whose CodexPrimaryResetAt is within the lead time.
 func TestStrategyResetAwareAvoidsSoonReset(t *testing.T) {

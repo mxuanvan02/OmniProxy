@@ -20,6 +20,8 @@ import (
 // refactor the message.
 var ErrStreamIdleTimeout = errors.New("stream idle timeout: upstream produced no data within idle window")
 
+const initialStreamDataTimeout = 45 * time.Second
+
 // idleTimeoutReader wraps an upstream response body and aborts the read
 // when no byte arrives within the idle window. It serves two purposes:
 //
@@ -39,13 +41,15 @@ var ErrStreamIdleTimeout = errors.New("stream idle timeout: upstream produced no
 // back to the pool (otherwise the stalled socket lingers until the
 // transport's idle timeout reaps it).
 type idleTimeoutReader struct {
-	body       io.ReadCloser
-	idle       time.Duration
-	timer      *time.Timer
-	done       chan struct{} // closed by the timer goroutine on fire
-	readCh     chan readResult
-	closeCh    chan struct{}
-	closed     bool
+	body        io.ReadCloser
+	idle        time.Duration
+	initialIdle time.Duration
+	seenData    bool
+	timer       *time.Timer
+	done        chan struct{} // closed by the timer goroutine on fire
+	readCh      chan readResult
+	closeCh     chan struct{}
+	closed      bool
 }
 
 type readResult struct {
@@ -61,11 +65,19 @@ func newIdleTimeoutReader(body io.ReadCloser) io.ReadCloser {
 		return body
 	}
 	return &idleTimeoutReader{
-		body:    body,
-		idle:    idle,
-		readCh:  make(chan readResult, 1),
-		closeCh: make(chan struct{}),
+		body:        body,
+		idle:        idle,
+		initialIdle: boundedInitialStreamTimeout(idle),
+		readCh:      make(chan readResult, 1),
+		closeCh:     make(chan struct{}),
 	}
+}
+
+func boundedInitialStreamTimeout(idle time.Duration) time.Duration {
+	if idle <= 0 || idle < initialStreamDataTimeout {
+		return idle
+	}
+	return initialStreamDataTimeout
 }
 
 func (r *idleTimeoutReader) Read(p []byte) (int, error) {
@@ -77,7 +89,11 @@ func (r *idleTimeoutReader) Read(p []byte) (int, error) {
 	// rather than reusing one across reads — simpler than juggling Reset
 	// races, and Read calls are not on the hottest path (one per SSE
 	// chunk, which is at most a few hundred per request).
-	timer := time.NewTimer(r.idle)
+	deadline := r.idle
+	if !r.seenData && r.initialIdle > 0 && r.initialIdle < deadline {
+		deadline = r.initialIdle
+	}
+	timer := time.NewTimer(deadline)
 	defer timer.Stop()
 
 	// Kick off the actual read in a goroutine so we can race it against
@@ -94,6 +110,9 @@ func (r *idleTimeoutReader) Read(p []byte) (int, error) {
 
 	select {
 	case res := <-r.readCh:
+		if res.n > 0 {
+			r.seenData = true
+		}
 		return res.n, res.err
 	case <-timer.C:
 		// Idle window elapsed — kill the connection and surface a sentinel

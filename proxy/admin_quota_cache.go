@@ -45,19 +45,20 @@ type quotaAccountRow struct {
 	UsagePercent     float64 `json:"usagePercent"`
 	NextResetDate    string  `json:"nextResetDate"`
 	DaysRemaining    int     `json:"daysRemaining"`
+	AddedAt          int64   `json:"addedAt,omitempty"`
 	// Quotas is the 9router-style per-account quota rows: each row has its own
 	// name, used, total, remaining %, resetAt, and recurring flag. Multiple
 	// rows per account are common (Codex primary+secondary, Qoder personal+org).
 	Quotas []quotaRow `json:"quotas"`
 	// Codex (kept for backward compat)
-	CodexPlanType             string `json:"codexPlanType,omitempty"`
-	CodexPrimaryUsedPercent   int    `json:"codexPrimaryUsedPercent,omitempty"`
-	CodexSecondaryUsedPercent int    `json:"codexSecondaryUsedPercent,omitempty"`
-	CodexPrimaryResetAt       int64  `json:"codexPrimaryResetAt,omitempty"`
-	CodexSecondaryResetAt     int64  `json:"codexSecondaryResetAt,omitempty"`
-	CodexCreditsBalance       *int   `json:"codexCreditsBalance,omitempty"`
-	CodexCreditsUnlimited     bool   `json:"codexCreditsUnlimited,omitempty"`
-	CodexResetCreditsAvailable int   `json:"codexResetCreditsAvailable,omitempty"`
+	CodexPlanType              string `json:"codexPlanType,omitempty"`
+	CodexPrimaryUsedPercent    int    `json:"codexPrimaryUsedPercent,omitempty"`
+	CodexSecondaryUsedPercent  int    `json:"codexSecondaryUsedPercent,omitempty"`
+	CodexPrimaryResetAt        int64  `json:"codexPrimaryResetAt,omitempty"`
+	CodexSecondaryResetAt      int64  `json:"codexSecondaryResetAt,omitempty"`
+	CodexCreditsBalance        *int   `json:"codexCreditsBalance,omitempty"`
+	CodexCreditsUnlimited      bool   `json:"codexCreditsUnlimited,omitempty"`
+	CodexResetCreditsAvailable int    `json:"codexResetCreditsAvailable,omitempty"`
 	// External
 	ExtCreditLimit      float64 `json:"extCreditLimit,omitempty"`
 	ExtCreditsRemaining float64 `json:"extCreditsRemaining,omitempty"`
@@ -75,13 +76,13 @@ type quotaAccountRow struct {
 
 // quotaRow is a single quota bar inside an account block (9router-style).
 type quotaRow struct {
-	Name      string  `json:"name"`      // display name: "Primary", "Secondary", "Usage", "Credits"
-	Used      float64 `json:"used"`      // current usage
-	Total     float64 `json:"total"`     // limit (0 = unlimited)
-	Remaining int     `json:"remaining"` // remaining % (0-100)
-	ResetAt   *int64  `json:"resetAt,omitempty"`   // unix seconds
-	Recurring bool    `json:"recurring"`           // true = resets periodically, false = one-time credits
-	Unit      string  `json:"unit,omitempty"`      // "credits", "tokens", "%", etc.
+	Name      string  `json:"name"`              // display name: "Primary", "Secondary", "Usage", "Credits"
+	Used      float64 `json:"used"`              // current usage
+	Total     float64 `json:"total"`             // limit (0 = unlimited)
+	Remaining int     `json:"remaining"`         // remaining % (0-100)
+	ResetAt   *int64  `json:"resetAt,omitempty"` // unix seconds
+	Recurring bool    `json:"recurring"`         // true = resets periodically, false = one-time credits
+	Unit      string  `json:"unit,omitempty"`    // "credits", "tokens", "%", etc.
 }
 
 // apiGetQuotaOverview GET /admin/api/quota/overview
@@ -119,10 +120,19 @@ func (h *Handler) apiGetQuotaOverview(w http.ResponseWriter, r *http.Request) {
 			UsagePercent:     a.UsagePercent,
 			NextResetDate:    a.NextResetDate,
 			DaysRemaining:    a.DaysRemaining,
+			AddedAt:          a.AddedAt,
+		}
+
+		// The upstream reports a percentage and the primary reset deadline, but
+		// not a token count. Derive that count from the persisted per-account
+		// usage aggregation for the current upstream-reported window.
+		windowTokens := 0
+		if start, ok := codexPrimaryWindowStart(a); ok && h.usageTracker != nil {
+			windowTokens = h.usageTracker.TokensForAccountSince(a.ID, start)
 		}
 
 		// Build 9router-style quotas[] array — one row per quota dimension.
-		row.Quotas = buildAccountQuotas(a)
+		row.Quotas = buildAccountQuotas(a, windowTokens)
 
 		// Codex fields (backward compat)
 		if a.CodexPlanType != "" || a.CodexPrimaryUsedPercent > 0 || isCodexAccount(&a) {
@@ -237,13 +247,36 @@ func remainingPct(used, total float64) int {
 	return int((total - used) / total * 100)
 }
 
+func codexPrimaryQuotaName(windowMinutes int) string {
+	if windowMinutes == 5*60 {
+		return "Primary (5h)"
+	}
+	return "Primary"
+}
+
+// codexPrimaryWindowStart returns the start of the quota window currently
+// reported by Codex. Both values must come from upstream; without either one
+// there is no defensible boundary for a "This Reset" token total.
+func codexPrimaryWindowStart(a config.Account) (time.Time, bool) {
+	if a.CodexPrimaryResetAt <= 0 || a.CodexPrimaryWindowMinutes <= 0 {
+		return time.Time{}, false
+	}
+	resetAt := time.Unix(a.CodexPrimaryResetAt, 0).UTC()
+	window := time.Duration(a.CodexPrimaryWindowMinutes) * time.Minute
+	if window <= 0 {
+		return time.Time{}, false
+	}
+	return resetAt.Add(-window), true
+}
+
 // buildAccountQuotas constructs the 9router-style quotas[] array for one
 // account, emitting one row per quota dimension (Codex primary/secondary,
 // Kiro usage, External credits, Trial). Empty/unlimited quotas are omitted.
-func buildAccountQuotas(a config.Account) []quotaRow {
+func buildAccountQuotas(a config.Account, tokensThisReset int) []quotaRow {
 	var rows []quotaRow
 
-	// Codex primary (5h window)
+	// Codex primary quota. The upstream window duration decides whether a 5h
+	// label is accurate; the current 7-day window remains simply "Primary".
 	if a.CodexPrimaryUsedPercent > 0 || a.CodexPrimaryResetAt > 0 {
 		usedPct := a.CodexPrimaryUsedPercent
 		remaining := 100 - usedPct
@@ -251,7 +284,7 @@ func buildAccountQuotas(a config.Account) []quotaRow {
 			remaining = 0
 		}
 		r := quotaRow{
-			Name:      "Primary (5h)",
+			Name:      codexPrimaryQuotaName(a.CodexPrimaryWindowMinutes),
 			Used:      float64(usedPct),
 			Total:     100,
 			Remaining: remaining,
@@ -309,26 +342,41 @@ func buildAccountQuotas(a config.Account) []quotaRow {
 		})
 	}
 
-	// Codex tokens used (cumulative, unlimited) — show for all Codex accounts
+	// Codex token counters: cumulative lifetime total plus the current primary
+	// quota-window total derived from persisted usage. Do not read the legacy
+	// runtime counter here: its lifecycle is independent from the durable usage
+	// records and it can legitimately be stale after a restart or reset.
 	isCodex := a.CodexPlanType != "" || a.CodexPrimaryUsedPercent > 0 || a.ChatGPTAccountID != "" ||
 		strings.Contains(strings.ToLower(a.Provider), "codex") || a.AuthMethod == "codex"
-	if isCodex && (a.TotalTokens > 0 || a.RequestCount > 0) {
+	if isCodex {
 		rows = append(rows, quotaRow{
-			Name:      "Tokens",
+			Name:      "Total Tokens",
 			Used:      float64(a.TotalTokens),
 			Total:     0,
 			Remaining: 100,
 			Recurring: false,
 			Unit:      "tokens",
 		})
-		rows = append(rows, quotaRow{
-			Name:      "Requests",
-			Used:      float64(a.RequestCount),
-			Total:     0,
-			Remaining: 100,
-			Recurring: false,
-			Unit:      "reqs",
-		})
+		if _, ok := codexPrimaryWindowStart(a); ok {
+			rows = append(rows, quotaRow{
+				Name:      "Tokens This Reset",
+				Used:      float64(tokensThisReset),
+				Total:     0,
+				Remaining: 100,
+				Recurring: true,
+				Unit:      "tokens",
+			})
+		}
+		if a.RequestCount > 0 {
+			rows = append(rows, quotaRow{
+				Name:      "Requests",
+				Used:      float64(a.RequestCount),
+				Total:     0,
+				Remaining: 100,
+				Recurring: false,
+				Unit:      "reqs",
+			})
+		}
 	}
 
 	// Kiro / CodeWhisperer usage
@@ -508,29 +556,45 @@ func (h *Handler) apiGetCacheStats(w http.ResponseWriter, r *http.Request) {
 	cacheCreate := stats.TotalCacheCreateTokens
 	cachedTokens := stats.TotalCachedTokens
 	totalInput := stats.TotalPromptTokens
+	cacheHits := cacheHitTokens(
+		totalInput,
+		stats.TotalCompletionTokens,
+		stats.TotalEffectiveTokens,
+		cacheRead,
+		cachedTokens,
+	)
 
-	// Cache hit ratio: cacheRead / (cacheRead + cacheCreate + uncached)
-	// Uncached ≈ totalInput - cacheRead - cacheCreate
-	uncached := totalInput - cacheRead - cacheCreate
+	// Cache-create tokens are billed input, not cache hits. Keep them separate
+	// from the saved-token calculation while making all parts add up to input.
+	uncached := totalInput - cacheHits - cacheCreate
 	if uncached < 0 {
 		uncached = 0
 	}
 
-	cacheTotal := cacheRead + cacheCreate + uncached
+	cacheTotal := cacheHits + cacheCreate + uncached
 	hitRatio := 0.0
 	if cacheTotal > 0 {
-		hitRatio = float64(cacheRead) / float64(cacheTotal) * 100
+		hitRatio = float64(cacheHits) / float64(cacheTotal) * 100
 	}
 
 	// Per-account cache breakdown
 	byAccount := make(map[string]map[string]int)
 	for id, s := range stats.ByAccount {
 		byAccount[id] = map[string]int{
-			"cacheRead":     s.CacheReadTokens,
-			"cacheCreate":   s.CacheCreateTokens,
-			"cachedTokens":  s.CachedTokens,
-			"promptTokens":  s.PromptTokens,
-			"requests":      s.Requests,
+			"cacheRead":        s.CacheReadTokens,
+			"cacheCreate":      s.CacheCreateTokens,
+			"cachedTokens":     s.CachedTokens,
+			"promptTokens":     s.PromptTokens,
+			"completionTokens": s.CompletionTokens,
+			"effectiveTokens":  s.EffectiveTokens,
+			"cacheHits": cacheHitTokens(
+				s.PromptTokens,
+				s.CompletionTokens,
+				s.EffectiveTokens,
+				s.CacheReadTokens,
+				s.CachedTokens,
+			),
+			"requests": s.Requests,
 		}
 	}
 
@@ -538,16 +602,25 @@ func (h *Handler) apiGetCacheStats(w http.ResponseWriter, r *http.Request) {
 	byModel := make(map[string]map[string]int)
 	for model, s := range stats.ByModel {
 		byModel[model] = map[string]int{
-			"cacheRead":    s.CacheReadTokens,
-			"cacheCreate":  s.CacheCreateTokens,
-			"cachedTokens": s.CachedTokens,
-			"promptTokens": s.PromptTokens,
-			"requests":     s.Requests,
+			"cacheRead":        s.CacheReadTokens,
+			"cacheCreate":      s.CacheCreateTokens,
+			"cachedTokens":     s.CachedTokens,
+			"promptTokens":     s.PromptTokens,
+			"completionTokens": s.CompletionTokens,
+			"effectiveTokens":  s.EffectiveTokens,
+			"cacheHits": cacheHitTokens(
+				s.PromptTokens,
+				s.CompletionTokens,
+				s.EffectiveTokens,
+				s.CacheReadTokens,
+				s.CachedTokens,
+			),
+			"requests": s.Requests,
 		}
 	}
 
-	// Tokens saved = cacheRead + cachedTokens (both represent tokens served from cache)
-	tokensSaved := cacheRead + cachedTokens
+	// Tokens saved are only cache hits. Cache-create tokens remain billable input.
+	tokensSaved := cacheHits
 	// Estimated cost savings (rough: cached tokens cost ~10% of normal)
 	estimatedSavingsPct := 0.0
 	if totalInput > 0 {
@@ -555,18 +628,19 @@ func (h *Handler) apiGetCacheStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"period":        period,
-		"totalInput":    totalInput,
-		"cacheRead":     cacheRead,
-		"cacheCreate":   cacheCreate,
-		"cachedTokens":  cachedTokens,
-		"uncached":      uncached,
-		"tokensSaved":   tokensSaved,
-		"hitRatio":      hitRatio,
-		"savingsPct":    estimatedSavingsPct,
-		"byAccount":     byAccount,
-		"byModel":       byModel,
-		"accountNames":  stats.AccountNames,
-		"timestamp":     time.Now().UTC().Format(time.RFC3339),
+		"period":       period,
+		"totalInput":   totalInput,
+		"cacheRead":    cacheRead,
+		"cacheCreate":  cacheCreate,
+		"cachedTokens": cachedTokens,
+		"cacheHits":    cacheHits,
+		"uncached":     uncached,
+		"tokensSaved":  tokensSaved,
+		"hitRatio":     hitRatio,
+		"savingsPct":   estimatedSavingsPct,
+		"byAccount":    byAccount,
+		"byModel":      byModel,
+		"accountNames": stats.AccountNames,
+		"timestamp":    time.Now().UTC().Format(time.RFC3339),
 	})
 }

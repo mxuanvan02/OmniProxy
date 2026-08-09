@@ -16,11 +16,11 @@ import (
 // not tracked separately in usage records, so it is folded into InputPerM
 // for cost computation (we treat all non-cached input as base input).
 type ModelPricing struct {
-	InputPerM   float64 `json:"inputPerM"`   // base input $/1M tokens
-	CachedPerM  float64 `json:"cachedPerM"`  // cached input $/1M tokens (cache read)
-	OutputPerM  float64 `json:"outputPerM"`  // output $/1M tokens
-	Source      string  `json:"source"`      // "openai" | "anthropic" | "custom"
-	Notes       string  `json:"notes,omitempty"`
+	InputPerM  float64 `json:"inputPerM"`  // base input $/1M tokens
+	CachedPerM float64 `json:"cachedPerM"` // cached input $/1M tokens (cache read)
+	OutputPerM float64 `json:"outputPerM"` // output $/1M tokens
+	Source     string  `json:"source"`     // "openai" | "anthropic" | "custom"
+	Notes      string  `json:"notes,omitempty"`
 }
 
 // pricingTable is the canonical pricing map keyed by exact model name.
@@ -28,10 +28,10 @@ type ModelPricing struct {
 var pricingTable = map[string]ModelPricing{
 	// ─── OpenAI GPT-5.6 family (https://developers.openai.com/api/docs/pricing) ───
 	"gpt-5.6-sol":   {InputPerM: 5.0, CachedPerM: 0.5, OutputPerM: 30.0, Source: "openai"},
-	"gpt-5.6-terra": {InputPerM: 2.5, CachedPerM: 0.25, OutputPerM: 15.0, Source: "openai"},
-	"gpt-5.6-luna":  {InputPerM: 1.0, CachedPerM: 0.1, OutputPerM: 6.0, Source: "openai"},
+	"gpt-5.6-terra": {InputPerM: 2.0, CachedPerM: 0.2, OutputPerM: 12.0, Source: "openai"},
+	"gpt-5.6-luna":  {InputPerM: 0.2, CachedPerM: 0.02, OutputPerM: 1.2, Source: "openai"},
 	// GPT-5.1 family
-	"gpt-5.1":       {InputPerM: 1.25, CachedPerM: 0.125, OutputPerM: 10.0, Source: "openai"},
+	"gpt-5.1": {InputPerM: 1.25, CachedPerM: 0.125, OutputPerM: 10.0, Source: "openai"},
 
 	// ─── Anthropic Claude family (https://platform.claude.com/docs/en/about-claude/pricing) ───
 	// Opus 4.x — flat $5/$0.50 cache read/$25 output since Opus 4.5
@@ -40,7 +40,7 @@ var pricingTable = map[string]ModelPricing{
 	"claude-opus-4.6": {InputPerM: 5.0, CachedPerM: 0.5, OutputPerM: 25.0, Source: "anthropic"},
 	"claude-opus-4.5": {InputPerM: 5.0, CachedPerM: 0.5, OutputPerM: 25.0, Source: "anthropic"},
 	// Sonnet 5 — promotional $2/$0.20 cache/$10 output through Aug 31, 2026
-	"claude-sonnet-5": {InputPerM: 2.0, CachedPerM: 0.2, OutputPerM: 10.0, Source: "anthropic", Notes: "Promotional rate through 2026-08-31; $3/$0.30/$15 after"},
+	"claude-sonnet-5":   {InputPerM: 2.0, CachedPerM: 0.2, OutputPerM: 10.0, Source: "anthropic", Notes: "Promotional rate through 2026-08-31; $3/$0.30/$15 after"},
 	"claude-sonnet-4.6": {InputPerM: 3.0, CachedPerM: 0.3, OutputPerM: 15.0, Source: "anthropic"},
 	"claude-sonnet-4.5": {InputPerM: 3.0, CachedPerM: 0.3, OutputPerM: 15.0, Source: "anthropic"},
 	// Haiku 4.5
@@ -129,10 +129,10 @@ func prefixFallbackPricing(model string) (ModelPricing, bool) {
 // the base input rate (for the uncached portion), OutputCost at the output
 // rate. Total = InputCost + CachedCost + OutputCost.
 type CostBreakdown struct {
-	InputCost   float64 `json:"inputCost"`   // (input - cached) * InputPerM / 1M
-	CachedCost  float64 `json:"cachedCost"`  // cached * CachedPerM / 1M
-	OutputCost  float64 `json:"outputCost"`  // output * OutputPerM / 1M
-	Total       float64 `json:"total"`       // sum of the three
+	InputCost  float64 `json:"inputCost"`  // (input - cached) * InputPerM / 1M
+	CachedCost float64 `json:"cachedCost"` // cached * CachedPerM / 1M
+	OutputCost float64 `json:"outputCost"` // output * OutputPerM / 1M
+	Total      float64 `json:"total"`      // sum of the three
 }
 
 // ComputeCostBreakdown returns the per-component USD cost of a request. If the

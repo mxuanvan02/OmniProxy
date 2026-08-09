@@ -156,7 +156,7 @@ func TestMergeCodexConfigEmpty(t *testing.T) {
 	codexDir := filepath.Join(tmpDir, ".codex")
 	os.MkdirAll(codexDir, 0755)
 
-	err := MergeCodexConfig(tmpDir, "claude-sonnet-4.5", "http://localhost:8080/v1", "oc/big-pickle")
+	err := MergeCodexConfig(tmpDir, "claude-sonnet-4.5", "http://localhost:8080/v1", "oc/big-pickle", "high")
 	if err != nil {
 		t.Fatalf("MergeCodexConfig failed: %v", err)
 	}
@@ -180,6 +180,9 @@ func TestMergeCodexConfigEmpty(t *testing.T) {
 	}
 	if !strings.Contains(content, `base_url = "http://localhost:8080/v1"`) {
 		t.Error("Missing base_url")
+	}
+	if !strings.Contains(content, `requires_openai_auth = true`) {
+		t.Error("Missing requires_openai_auth (needed so Codex CLI sends the API key from auth.json)")
 	}
 	if !strings.Contains(content, "[agents.subagent]") {
 		t.Error("Missing subagent section")
@@ -212,7 +215,7 @@ model = "gpt-4o-mini"
 	configPath := filepath.Join(codexDir, "config.toml")
 	os.WriteFile(configPath, []byte(existingConfig), 0644)
 
-	err := MergeCodexConfig(tmpDir, "claude-sonnet-4.5", "http://localhost:8080/v1", "oc/big-pickle")
+	err := MergeCodexConfig(tmpDir, "claude-sonnet-4.5", "http://localhost:8080/v1", "oc/big-pickle", "high")
 	if err != nil {
 		t.Fatalf("MergeCodexConfig failed: %v", err)
 	}
@@ -283,7 +286,7 @@ model = "oc/big-pickle"
 	configPath := filepath.Join(codexDir, "config.toml")
 	os.WriteFile(configPath, []byte(existingConfig), 0644)
 
-	err := MergeCodexConfig(tmpDir, "claude-sonnet-4.5", "http://localhost:8080/v1", "oc/big-pickle")
+	err := MergeCodexConfig(tmpDir, "claude-sonnet-4.5", "http://localhost:8080/v1", "oc/big-pickle", "high")
 	if err != nil {
 		t.Fatalf("MergeCodexConfig failed: %v", err)
 	}
@@ -299,6 +302,11 @@ model = "oc/big-pickle"
 	commentCount := strings.Count(content, "#model =")
 	if commentCount > 0 {
 		t.Error("Should not comment out identical values")
+	}
+	// The section is fully replaced, so requires_openai_auth should be
+	// injected even when the existing config predates this field.
+	if !strings.Contains(content, `requires_openai_auth = true`) {
+		t.Error("Idempotent merge should still inject requires_openai_auth into the replaced section")
 	}
 }
 
@@ -340,7 +348,7 @@ trusted_hash = "sha256:abc123"
 	configPath := filepath.Join(codexDir, "config.toml")
 	os.WriteFile(configPath, []byte(existingConfig), 0644)
 
-	err := MergeCodexConfig(tmpDir, "claude-sonnet-4.5", "http://localhost:8080/v1", "oc/big-pickle")
+	err := MergeCodexConfig(tmpDir, "claude-sonnet-4.5", "http://localhost:8080/v1", "oc/big-pickle", "high")
 	if err != nil {
 		t.Fatalf("MergeCodexConfig failed: %v", err)
 	}
@@ -393,5 +401,82 @@ trusted_hash = "sha256:abc123"
 	// OmniProxy section should exist
 	if !strings.Contains(content, "[model_providers.omniproxy]") {
 		t.Error("OmniProxy section should be added")
+	}
+}
+
+// Test MergeCodexConfig injects model_reasoning_effort into empty config
+func TestMergeCodexConfigEffortEmpty(t *testing.T) {
+	tmpDir := t.TempDir()
+	codexDir := filepath.Join(tmpDir, ".codex")
+	os.MkdirAll(codexDir, 0755)
+
+	err := MergeCodexConfig(tmpDir, "gpt-5.6-sol", "http://localhost:8080/v1", "gpt-5.6-sol", "high")
+	if err != nil {
+		t.Fatalf("MergeCodexConfig failed: %v", err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(codexDir, "config.toml"))
+	content := string(data)
+
+	if !strings.Contains(content, `model_reasoning_effort = "high"`) {
+		t.Error("Missing model_reasoning_effort = high in empty config")
+	}
+}
+
+// Test MergeCodexConfig comments out old effort and injects new one
+func TestMergeCodexConfigEffortReplace(t *testing.T) {
+	tmpDir := t.TempDir()
+	codexDir := filepath.Join(tmpDir, ".codex")
+	os.MkdirAll(codexDir, 0755)
+
+	existingConfig := `model = "gpt-5.6-sol"
+model_provider = "omniproxy"
+model_reasoning_effort = "low"
+
+[model_providers.omniproxy]
+name = "OmniProxy"
+base_url = "http://localhost:8080/v1"
+wire_api = "responses"
+
+[agents.subagent]
+model = "gpt-5.6-sol"`
+
+	configPath := filepath.Join(codexDir, "config.toml")
+	os.WriteFile(configPath, []byte(existingConfig), 0644)
+
+	err := MergeCodexConfig(tmpDir, "gpt-5.6-sol", "http://localhost:8080/v1", "gpt-5.6-sol", "high")
+	if err != nil {
+		t.Fatalf("MergeCodexConfig failed: %v", err)
+	}
+
+	data, _ := os.ReadFile(configPath)
+	content := string(data)
+
+	// Old effort should be commented out
+	if !strings.Contains(content, `#model_reasoning_effort = "low"`) {
+		t.Error("Old effort should be commented out")
+	}
+	// New effort should be present
+	if !strings.Contains(content, `model_reasoning_effort = "high"`) {
+		t.Error("New effort should be present")
+	}
+}
+
+// Test MergeCodexConfig with empty effort doesn't inject the line
+func TestMergeCodexConfigEffortEmptyString(t *testing.T) {
+	tmpDir := t.TempDir()
+	codexDir := filepath.Join(tmpDir, ".codex")
+	os.MkdirAll(codexDir, 0755)
+
+	err := MergeCodexConfig(tmpDir, "gpt-5.6-sol", "http://localhost:8080/v1", "gpt-5.6-sol", "")
+	if err != nil {
+		t.Fatalf("MergeCodexConfig failed: %v", err)
+	}
+
+	data, _ := os.ReadFile(filepath.Join(codexDir, "config.toml"))
+	content := string(data)
+
+	if strings.Contains(content, `model_reasoning_effort`) {
+		t.Error("Should not inject model_reasoning_effort when effort is empty")
 	}
 }

@@ -12,6 +12,11 @@ import (
 
 const tokenRefreshSkewSeconds int64 = 120
 
+// Prompt caches are short lived upstream. Keeping routing affinity beyond this
+// window only harms load balancing because there is no longer a cache hit to
+// recover.
+const defaultCacheStickyTTL = 4 * time.Minute
+
 // accountStats holds the cumulative runtime counters for a single account.
 // It lives in AccountPool.stats keyed by accountID, deliberately separate from
 // the accounts[] routing slice: Reload() rebuilds accounts[] from config on
@@ -19,42 +24,51 @@ const tokenRefreshSkewSeconds int64 = 120
 // silently reset by racing reloads. Keeping them here means routing rebuilds no
 // longer clobber usage totals.
 type accountStats struct {
-	RequestCount int
-	ErrorCount   int
-	TotalTokens  int
-	TotalCredits float64
-	LastUsed     int64
+	RequestCount                 int
+	ErrorCount                   int
+	TotalTokens                  int
+	CodexTokensSincePrimaryReset int
+	CodexPrimaryResetAt          int64
+	TotalCredits                 float64
+	LastUsed                     int64
 }
 
 // AccountPool manages the account pool
 type AccountPool struct {
-	mu            sync.RWMutex
-	accounts      []config.Account
-	totalAccounts int
-	currentIndex  uint64
-	cooldowns     map[string]time.Time       // account cooldown time
-	errorCounts   map[string]int             // consecutive error count
-	modelLists    map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
-	modelLocks    map[string]map[string]time.Time // accountID → modelName → cooldown until
-	stats         map[string]*accountStats   // accountID → cumulative runtime stats (survives Reload)
-	// cacheSticky maps a prompt-cache key (derived from the conversation ID)
+	mu              sync.RWMutex
+	accounts        []config.Account
+	serviceAccounts []config.Account
+	totalAccounts   int
+	currentIndex    uint64
+	serviceIndex    uint64
+	cooldowns       map[string]time.Time            // account cooldown time
+	errorCounts     map[string]int                  // consecutive error count
+	modelLists      map[string]map[string]bool      // accountID → set of modelIDs (from ListAvailableModels)
+	modelLocks      map[string]map[string]time.Time // accountID → modelName → cooldown until
+	stats           map[string]*accountStats        // accountID → cumulative runtime stats (survives Reload)
+	// cacheSticky maps a model-scoped prompt-cache key
 	// to the account ID that last handled it. Used to pin consecutive turns
 	// from the same conversation to the same upstream account so the
 	// provider's prompt cache can warm up and serve hits.
-	cacheSticky    map[string]string   // cacheKey → accountID
-	cacheStickyTS  map[string]time.Time // cacheKey → last seen time
+	cacheSticky    map[string]string    // "model\x00cacheKey" → accountID
+	cacheStickyTS  map[string]time.Time // "model\x00cacheKey" → last seen time
 	cacheStickyTTL time.Duration
-	// cacheWarmed tracks (accountID + cacheKey) pairs that have already been
+	// cacheWarmed tracks (accountID + model + cacheKey) tuples that have already been
 	// warmed via a background warmup request. Used by on-rotation warming to
 	// avoid re-warming the same account for the same cache key (which would
 	// waste tokens and rate-limit budget).
-	cacheWarmed   map[string]bool      // "accountID|cacheKey" → true
-	cacheWarmedTS map[string]time.Time // "accountID|cacheKey" → warm time
-	cacheWarmedTTL time.Duration       // expire warmed entries after 1h
-	// cacheWarming tracks (accountID + cacheKey) pairs that currently have
+	cacheWarmed    map[string]bool      // "accountID\x00model\x00cacheKey" → true
+	cacheWarmedTS  map[string]time.Time // "accountID\x00model\x00cacheKey" → warm time
+	cacheWarmedTTL time.Duration        // expire warmed entries before upstream cache does
+	// cacheWarming tracks (accountID + model + cacheKey) tuples that currently have
 	// a warmup request in flight. Prevents duplicate warmups from concurrent
 	// requests to the same account+cacheKey.
-	cacheWarming map[string]bool // "accountID|cacheKey" → true
+	cacheWarming map[string]bool // "accountID\x00model\x00cacheKey" → true
+	// Warmup failures are scoped to the actual upstream endpoint. A DNS or
+	// service outage therefore pauses background warmups across all accounts
+	// sharing that endpoint, without affecting foreground inference requests.
+	cacheWarmFailureCount map[string]int
+	cacheWarmRetryAfter   map[string]time.Time
 }
 
 var (
@@ -66,18 +80,20 @@ var (
 func GetPool() *AccountPool {
 	poolOnce.Do(func() {
 		pool = &AccountPool{
-			cooldowns:      make(map[string]time.Time),
-			errorCounts:    make(map[string]int),
-			modelLists:     make(map[string]map[string]bool),
-			modelLocks:     make(map[string]map[string]time.Time),
-			stats:          make(map[string]*accountStats),
-			cacheSticky:    make(map[string]string),
-			cacheStickyTS:  make(map[string]time.Time),
-			cacheStickyTTL: 30 * time.Minute, // expire pinning 30 min after last use
-			cacheWarmed:    make(map[string]bool),
-			cacheWarmedTS:  make(map[string]time.Time),
-			cacheWarmedTTL: 1 * time.Hour, // warmed entries expire after 1h
-			cacheWarming:   make(map[string]bool),
+			cooldowns:             make(map[string]time.Time),
+			errorCounts:           make(map[string]int),
+			modelLists:            make(map[string]map[string]bool),
+			modelLocks:            make(map[string]map[string]time.Time),
+			stats:                 make(map[string]*accountStats),
+			cacheSticky:           make(map[string]string),
+			cacheStickyTS:         make(map[string]time.Time),
+			cacheStickyTTL:        defaultCacheStickyTTL,
+			cacheWarmed:           make(map[string]bool),
+			cacheWarmedTS:         make(map[string]time.Time),
+			cacheWarmedTTL:        4 * time.Minute, // stay inside the typical 5m upstream cache window
+			cacheWarming:          make(map[string]bool),
+			cacheWarmFailureCount: make(map[string]int),
+			cacheWarmRetryAfter:   make(map[string]time.Time),
 		}
 		pool.Reload()
 	})
@@ -92,19 +108,44 @@ func GetPool() *AccountPool {
 func (p *AccountPool) Reload() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.cooldowns == nil {
+		p.cooldowns = make(map[string]time.Time)
+	}
+	if p.errorCounts == nil {
+		p.errorCounts = make(map[string]int)
+	}
+	if p.modelLists == nil {
+		p.modelLists = make(map[string]map[string]bool)
+	}
+	if p.modelLocks == nil {
+		p.modelLocks = make(map[string]map[string]time.Time)
+	}
+	if p.stats == nil {
+		p.stats = make(map[string]*accountStats)
+	}
 	enabled := config.GetEnabledAccounts()
 	allowOverUsage := config.GetAllowOverUsage()
 	var weighted []config.Account
+	var services []config.Account
 	for _, a := range enabled {
-		if isQuotaBlocked(a, allowOverUsage) {
-			continue
+		if accountSupportsServiceCapability(a) {
+			if !isQuotaBlocked(a, allowOverUsage) {
+				services = append(services, a)
+			}
 		}
-		w := effectiveWeight(a.Weight)
-		for j := 0; j < w; j++ {
-			weighted = append(weighted, a)
+		if accountSupportsCapability(a, "chat") {
+			w := effectiveWeight(a.Weight)
+			if isQuotaBlocked(a, allowOverUsage) {
+				continue
+			}
+			for j := 0; j < w; j++ {
+				weighted = append(weighted, a)
+			}
+			continue
 		}
 	}
 	p.accounts = weighted
+	p.serviceAccounts = services
 	p.totalAccounts = len(enabled)
 
 	// Seed runtime stats from the persisted config counters, but only for
@@ -113,21 +154,112 @@ func (p *AccountPool) Reload() {
 	// and is flushed to config asynchronously); overwriting it here would undo
 	// increments that raced ahead of the last flush — the original under-count
 	// bug. New accounts (or a fresh process) legitimately start from config.
-	if p.stats == nil {
-		p.stats = make(map[string]*accountStats)
-	}
 	for _, a := range enabled {
 		if _, ok := p.stats[a.ID]; ok {
 			continue
 		}
 		p.stats[a.ID] = &accountStats{
-			RequestCount: a.RequestCount,
-			ErrorCount:   a.ErrorCount,
-			TotalTokens:  a.TotalTokens,
-			TotalCredits: a.TotalCredits,
-			LastUsed:     a.LastUsed,
+			RequestCount:                 a.RequestCount,
+			ErrorCount:                   a.ErrorCount,
+			TotalTokens:                  a.TotalTokens,
+			CodexTokensSincePrimaryReset: a.CodexTokensSincePrimaryReset,
+			CodexPrimaryResetAt:          a.CodexPrimaryResetAt,
+			TotalCredits:                 a.TotalCredits,
+			LastUsed:                     a.LastUsed,
 		}
 	}
+}
+
+func accountSupportsServiceCapability(account config.Account) bool {
+	return accountSupportsCapability(account, "search") || accountSupportsCapability(account, "image")
+}
+
+func accountSupportsCapability(account config.Account, capability string) bool {
+	if capability == "" {
+		return true
+	}
+	if len(account.Capabilities) > 0 {
+		for _, value := range account.Capabilities {
+			if strings.EqualFold(strings.TrimSpace(value), capability) {
+				return true
+			}
+		}
+		return false
+	}
+	// Legacy accounts predate explicit capabilities and remain chat-routable.
+	return capability == "chat"
+}
+
+// GetNextForCapability selects a service account without exposing search or
+// image credentials to the normal model pool. provider is optional; when it is
+// empty, all accounts with the requested capability participate in failover.
+func (p *AccountPool) GetNextForCapability(capability, provider string, excluded map[string]bool) *config.Account {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.serviceAccounts) == 0 {
+		return nil
+	}
+	now := time.Now()
+	allowOverUsage := config.GetAllowOverUsage()
+	for i := 0; i < len(p.serviceAccounts); i++ {
+		idx := int(atomic.AddUint64(&p.serviceIndex, 1) % uint64(len(p.serviceAccounts)))
+		account := &p.serviceAccounts[idx]
+		if excluded != nil && excluded[account.ID] {
+			continue
+		}
+		if provider != "" && !strings.EqualFold(strings.TrimSpace(account.Provider), strings.TrimSpace(provider)) {
+			continue
+		}
+		if !accountSupportsCapability(*account, capability) || isQuotaBlocked(*account, allowOverUsage) {
+			continue
+		}
+		if cooldown, ok := p.cooldowns[account.ID]; ok && now.Before(cooldown) {
+			continue
+		}
+		if locks := p.modelLocks[account.ID]; locks != nil {
+			if until := locks[capability]; now.Before(until) {
+				continue
+			}
+		}
+		return account
+	}
+	return nil
+}
+
+// GetNextCodex selects a Codex subscription account for capability-specific
+// requests such as image generation. Codex accounts remain in the normal chat
+// pool, so they must not be selected through serviceAccounts.
+func (p *AccountPool) GetNextCodex(excluded map[string]bool) *config.Account {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.accounts) == 0 {
+		return nil
+	}
+	now := time.Now()
+	allowOverUsage := config.GetAllowOverUsage()
+	seen := make(map[string]bool)
+	for i := 0; i < len(p.accounts); i++ {
+		idx := int(atomic.AddUint64(&p.currentIndex, 1) % uint64(len(p.accounts)))
+		account := &p.accounts[idx]
+		if seen[account.ID] || (excluded != nil && excluded[account.ID]) {
+			seen[account.ID] = true
+			continue
+		}
+		seen[account.ID] = true
+		if account.AuthMethod != "codex" || isQuotaBlocked(*account, allowOverUsage) {
+			continue
+		}
+		if cooldown, ok := p.cooldowns[account.ID]; ok && now.Before(cooldown) {
+			continue
+		}
+		if locks := p.modelLocks[account.ID]; locks != nil {
+			if until := locks["image"]; now.Before(until) {
+				continue
+			}
+		}
+		return account
+	}
+	return nil
 }
 
 // GetNext returns the next available account (weighted round-robin)
@@ -177,7 +309,7 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 		return acc
 	}
 
-		// no available accounts, return the one with shortest cooldown (exclude exhausted unless overage allowed)
+	// no available accounts, return the one with shortest cooldown (exclude exhausted unless overage allowed)
 	var best *config.Account
 	var earliest time.Time
 	for i := range p.accounts {
@@ -227,20 +359,38 @@ func (p *AccountPool) GetModelList(accountID string) []string {
 	return ids
 }
 
-// accountHasModel checks if the account supports the given model.
-// If the account has no model list (cold start), assume all models supported.
+// accountHasModel checks if the account supports the requested model. A missing
+// catalog is treated optimistically during cold start, but once a catalog has
+// been loaded it is authoritative for every account type, including external
+// OpenAI-compatible providers.
 func (p *AccountPool) accountHasModel(accountID, model string) bool {
-	// External OpenAI-compatible providers route model selection to the
-	// upstream provider, which owns its own model registry. Always allow so
-	// external accounts are never skipped because of a stale/empty cache.
-	if p.isExternalAccountID(accountID) {
-		return true
-	}
 	list, ok := p.modelLists[accountID]
-	if !ok || len(list) == 0 {
-		return true // cold start: list not ready, optimistically allow
+	if !ok {
+		return true // cold start: catalog not loaded yet
 	}
-	return list[strings.ToLower(strings.TrimSpace(model))]
+	if len(list) == 0 {
+		return false
+	}
+	requested := normalizeCatalogModelID(model)
+	for catalogModel := range list {
+		candidate := normalizeCatalogModelID(catalogModel)
+		if candidate == requested || strings.HasPrefix(candidate, requested+"-") {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeCatalogModelID(model string) string {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if idx := strings.IndexByte(model, '/'); idx >= 0 {
+		model = strings.TrimSpace(model[idx+1:])
+	}
+	model = strings.TrimSuffix(model, "[1m]")
+	if strings.HasPrefix(model, "claude-") {
+		model = strings.ReplaceAll(model, ".", "-")
+	}
+	return model
 }
 
 // isExternalAccountID reports whether the account with the given ID is an
@@ -254,10 +404,19 @@ func (p *AccountPool) isExternalAccountID(accountID string) bool {
 	}
 	for i := range p.accounts {
 		if p.accounts[i].ID == accountID {
-			return p.accounts[i].AuthMethod == "external_openai"
+			return isExternalAuthMethod(p.accounts[i].AuthMethod)
 		}
 	}
 	return false
+}
+
+func isExternalAuthMethod(authMethod string) bool {
+	switch strings.ToLower(strings.TrimSpace(authMethod)) {
+	case "external_openai", "agentrouter", "external_agentrouter":
+		return true
+	default:
+		return false
+	}
 }
 
 // GetNextForModel returns the next available account supporting the given model.
@@ -336,7 +495,7 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 	if preferExternal || preferCodex {
 		isPreferred := func(acc *config.Account) bool {
 			if preferExternal {
-				return acc.AuthMethod == "external_openai"
+				return isExternalAuthMethod(acc.AuthMethod)
 			}
 			// preferCodex
 			return acc.AuthMethod == "codex"
@@ -402,60 +561,25 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 		return pickByStrategy(allCandidates, now)
 	}
 
-	// Fallback: no immediately-available account. Return the enabled account that
-	// becomes available soonest (shortest account cooldown OR model lock), so the
-	// request attempts a real upstream call instead of surfacing a misleading 503
-	// "No available accounts". A purely in-memory model lock must NOT make an
-	// otherwise-usable account vanish — that is what forced an operator restart.
-	// Only quota-blocked accounts (a persisted, intentional state) stay excluded.
-	var best *config.Account
-	var earliest time.Time
-	for i := range p.accounts {
-		acc := &p.accounts[i]
-		if excluded != nil && excluded[acc.ID] {
-			continue
-		}
-		if !p.accountHasModel(acc.ID, model) {
-			continue
-		}
-		if isQuotaBlocked(*acc, allowOverUsage) {
-			continue
-		}
-		// Soonest time this account is free of every in-memory penalty.
-		var until time.Time
-		if cd, ok := p.cooldowns[acc.ID]; ok && cd.After(until) {
-			until = cd
-		}
-		if locks, ok := p.modelLocks[acc.ID]; ok && model != "" {
-			if ml, ok := locks[model]; ok && ml.After(until) {
-				until = ml
-			}
-		}
-		if until.IsZero() {
-			// No penalty at all — usable right now.
-			return acc
-		}
-		if best == nil || until.Before(earliest) {
-			best = acc
-			earliest = until
-		}
-	}
-	return best
+	return nil
 }
 
 // GetNextForModelWithCacheKey works like GetNextForModelExcluding but first
-// tries the account that last handled the same cacheKey. This keeps
+// tries the account that last handled the same model + cacheKey. This keeps
 // consecutive turns from the same conversation on the same upstream account
 // so the provider's prompt cache can warm up and serve hits.
 //
-// cacheKey is the opaque hash derived from the conversation ID (see
+// cacheKey is the opaque prefix hash derived from the instructions (see
 // codexCacheKey). When cacheKey is empty, falls back to normal rotation.
 func (p *AccountPool) GetNextForModelWithCacheKey(model string, excluded map[string]bool, cacheKey string) *config.Account {
 	if cacheKey != "" {
+		stickyKey := cacheStickyKey(model, cacheKey)
 		p.mu.RLock()
-		stickyID, ok := p.cacheSticky[cacheKey]
+		stickyID, ok := p.cacheSticky[stickyKey]
+		stickyAt := p.cacheStickyTS[stickyKey]
+		stickyTTL := p.cacheStickyTTL
 		p.mu.RUnlock()
-		if ok && stickyID != "" {
+		if ok && stickyID != "" && (stickyTTL <= 0 || time.Since(stickyAt) < stickyTTL) {
 			// Try the sticky account first — but only if it's not excluded,
 			// not in cooldown, not quota-blocked, and supports the model.
 			if excluded == nil || !excluded[stickyID] {
@@ -498,16 +622,21 @@ func (p *AccountPool) getAccountIfAvailable(accountID, model string) *config.Acc
 	return nil
 }
 
-// RecordCacheStickiness pins cacheKey → accountID so subsequent requests
-// with the same cacheKey prefer this account. Called after a successful
+// RecordCacheStickiness pins model + cacheKey → accountID so subsequent requests
+// with the same model and prefix prefer this account. Called after a successful
 // upstream response.
-func (p *AccountPool) RecordCacheStickiness(cacheKey, accountID string) {
-	if cacheKey == "" || accountID == "" {
+func (p *AccountPool) RecordCacheStickiness(model, cacheKey, accountID string) {
+	if model == "" || cacheKey == "" || accountID == "" {
 		return
 	}
+	key := cacheStickyKey(model, cacheKey)
 	p.mu.Lock()
-	p.cacheSticky[cacheKey] = accountID
-	p.cacheStickyTS[cacheKey] = time.Now()
+	if p.cacheSticky == nil {
+		p.cacheSticky = make(map[string]string)
+		p.cacheStickyTS = make(map[string]time.Time)
+	}
+	p.cacheSticky[key] = accountID
+	p.cacheStickyTS[key] = time.Now()
 	p.mu.Unlock()
 }
 
@@ -528,73 +657,107 @@ func (p *AccountPool) PruneCacheSticky() {
 	}
 }
 
-// cacheWarmedKey builds the composite key for the warmed registry.
-func cacheWarmedKey(accountID, cacheKey string) string {
-	return accountID + "|" + cacheKey
+func cacheStickyKey(model, cacheKey string) string {
+	return strings.ToLower(strings.TrimSpace(model)) + "\x00" + cacheKey
 }
 
-// IsCacheWarmed reports whether accountID has already been warmed for the
-// given cacheKey (i.e. a warmup request with the same instructions prefix
-// has been sent to this account). Used by on-rotation warming to skip the
-// warmup step when the account already has a hot cache entry.
-func (p *AccountPool) IsCacheWarmed(accountID, cacheKey string) bool {
-	if accountID == "" || cacheKey == "" {
+func cacheWarmedKey(accountID, model, cacheKey string) string {
+	return accountID + "\x00" + strings.ToLower(strings.TrimSpace(model)) + "\x00" + cacheKey
+}
+
+func cacheWarmScopeKey(upstreamScope string) string {
+	return strings.ToLower(strings.TrimSpace(upstreamScope))
+}
+
+// TryStartCacheWarm atomically reserves a model-specific prefix warmup. It
+// prevents duplicate in-flight work, honours the upstream cache lifetime, and
+// pauses background work while that upstream endpoint is backing off.
+func (p *AccountPool) TryStartCacheWarm(accountID, model, cacheKey, upstreamScope string) bool {
+	if accountID == "" || model == "" || cacheKey == "" {
 		return false
 	}
-	p.mu.RLock()
-	_, ok := p.cacheWarmed[cacheWarmedKey(accountID, cacheKey)]
-	p.mu.RUnlock()
-	return ok
-}
+	key := cacheWarmedKey(accountID, model, cacheKey)
+	scope := cacheWarmScopeKey(upstreamScope)
+	now := time.Now()
 
-// MarkCacheWarmed records that accountID has been warmed for cacheKey.
-// Called after a successful warmup request, or after a real request that
-// wrote to cache (cache_write_tokens > 0 or cached_tokens > 0 on a hit).
-func (p *AccountPool) MarkCacheWarmed(accountID, cacheKey string) {
-	if accountID == "" || cacheKey == "" {
-		return
-	}
 	p.mu.Lock()
-	p.cacheWarmed[cacheWarmedKey(accountID, cacheKey)] = true
-	p.cacheWarmedTS[cacheWarmedKey(accountID, cacheKey)] = time.Now()
-	p.mu.Unlock()
-}
-
-// IsCacheWarming reports whether a warmup request is currently in flight
-// for the given accountID + cacheKey. Used to prevent duplicate warmups
-// from concurrent requests.
-func (p *AccountPool) IsCacheWarming(accountID, cacheKey string) bool {
-	if accountID == "" || cacheKey == "" {
+	defer p.mu.Unlock()
+	if p.cacheWarmed == nil {
+		p.cacheWarmed = make(map[string]bool)
+		p.cacheWarmedTS = make(map[string]time.Time)
+		p.cacheWarming = make(map[string]bool)
+		p.cacheWarmFailureCount = make(map[string]int)
+		p.cacheWarmRetryAfter = make(map[string]time.Time)
+	}
+	if warmedAt, ok := p.cacheWarmedTS[key]; ok {
+		if p.cacheWarmedTTL <= 0 || now.Sub(warmedAt) < p.cacheWarmedTTL {
+			return false
+		}
+		delete(p.cacheWarmed, key)
+		delete(p.cacheWarmedTS, key)
+	}
+	if p.cacheWarming[key] {
 		return false
 	}
-	p.mu.RLock()
-	_, ok := p.cacheWarming[cacheWarmedKey(accountID, cacheKey)]
-	p.mu.RUnlock()
-	return ok
+	if retryAfter, ok := p.cacheWarmRetryAfter[scope]; ok && now.Before(retryAfter) {
+		return false
+	}
+	p.cacheWarming[key] = true
+	return true
 }
 
-// MarkCacheWarming records that a warmup request is in flight for the
-// given accountID + cacheKey. Called BEFORE starting the async warmup
-// goroutine to prevent concurrent requests from starting duplicates.
-func (p *AccountPool) MarkCacheWarming(accountID, cacheKey string) {
-	if accountID == "" || cacheKey == "" {
+// CompleteCacheWarm marks the model-specific prefix as warm and clears any
+// background-warmup circuit breaker for the upstream endpoint.
+func (p *AccountPool) CompleteCacheWarm(accountID, model, cacheKey, upstreamScope string) {
+	if accountID == "" || model == "" || cacheKey == "" {
 		return
 	}
+	key := cacheWarmedKey(accountID, model, cacheKey)
+	scope := cacheWarmScopeKey(upstreamScope)
 	p.mu.Lock()
-	p.cacheWarming[cacheWarmedKey(accountID, cacheKey)] = true
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+	if p.cacheWarmed == nil {
+		p.cacheWarmed = make(map[string]bool)
+		p.cacheWarmedTS = make(map[string]time.Time)
+		p.cacheWarming = make(map[string]bool)
+		p.cacheWarmFailureCount = make(map[string]int)
+		p.cacheWarmRetryAfter = make(map[string]time.Time)
+	}
+	p.cacheWarmed[key] = true
+	p.cacheWarmedTS[key] = time.Now()
+	delete(p.cacheWarming, key)
+	delete(p.cacheWarmFailureCount, scope)
+	delete(p.cacheWarmRetryAfter, scope)
 }
 
-// ClearCacheWarming removes the warming flag after the warmup completes
-// (success or failure). On success, MarkCacheWarmed should be called
-// first so the warmed flag is set before clearing the warming flag.
-func (p *AccountPool) ClearCacheWarming(accountID, cacheKey string) {
-	if accountID == "" || cacheKey == "" {
+// FailCacheWarm releases the in-flight reservation and applies an exponential
+// backoff to all background warmups sharing the failed upstream endpoint.
+func (p *AccountPool) FailCacheWarm(accountID, model, cacheKey, upstreamScope string) {
+	if accountID == "" || model == "" || cacheKey == "" {
 		return
 	}
+	key := cacheWarmedKey(accountID, model, cacheKey)
+	scope := cacheWarmScopeKey(upstreamScope)
 	p.mu.Lock()
-	delete(p.cacheWarming, cacheWarmedKey(accountID, cacheKey))
-	p.mu.Unlock()
+	defer p.mu.Unlock()
+	delete(p.cacheWarming, key)
+	if scope == "" {
+		return
+	}
+	if p.cacheWarmFailureCount == nil {
+		p.cacheWarmFailureCount = make(map[string]int)
+		p.cacheWarmRetryAfter = make(map[string]time.Time)
+	}
+	count := p.cacheWarmFailureCount[scope] + 1
+	p.cacheWarmFailureCount[scope] = count
+	delay := 30 * time.Second
+	for i := 1; i < count && delay < 5*time.Minute; i++ {
+		delay *= 2
+	}
+	if delay > 5*time.Minute {
+		delay = 5 * time.Minute
+	}
+	p.cacheWarmRetryAfter[scope] = time.Now().Add(delay)
 }
 
 // PruneCacheWarmed removes warmed entries older than the TTL. Called
@@ -611,6 +774,12 @@ func (p *AccountPool) PruneCacheWarmed() {
 		if ts.Before(cutoff) {
 			delete(p.cacheWarmed, key)
 			delete(p.cacheWarmedTS, key)
+		}
+	}
+	now := time.Now()
+	for scope, retryAfter := range p.cacheWarmRetryAfter {
+		if !now.Before(retryAfter) {
+			delete(p.cacheWarmRetryAfter, scope)
 		}
 	}
 }
@@ -707,6 +876,12 @@ func IsAuthFailure(err error) bool {
 	}
 	msg := err.Error()
 	lower := strings.ToLower(msg)
+	// Some OpenAI-compatible gateways report throttling as HTTP 403. The
+	// structured rate-limit marker is authoritative: refreshing credentials
+	// cannot fix it and only delays account rotation.
+	if IsRateLimitError(err) {
+		return false
+	}
 
 	// Match HTTP status codes only when they appear as standalone tokens to avoid
 	// false positives from arbitrary digits in the error body (e.g. request IDs).
@@ -724,6 +899,21 @@ func IsAuthFailure(err error) bool {
 		return true
 	}
 	return false
+}
+
+// IsRateLimitError reports provider throttling regardless of the HTTP status
+// chosen by the gateway. In particular, some gateways use HTTP 403 with an
+// OpenAI-style rate_limit_error body instead of HTTP 429.
+func IsRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	lower := strings.ToLower(msg)
+	return hasStatusToken(msg, "429") ||
+		strings.Contains(lower, "rate_limit") ||
+		strings.Contains(lower, "rate limit") ||
+		strings.Contains(lower, "too many requests")
 }
 
 // hasStatusToken returns true when status appears in s with non-digit boundaries
@@ -825,8 +1015,16 @@ func IsTransientError(err error) bool {
 	msg := err.Error()
 	lower := strings.ToLower(msg)
 
+	// A stream that never starts is already bounded by the transport/read
+	// deadline. Repeating it on the same account only multiplies latency; rotate
+	// immediately so the request can use its limited account failover budget.
+	if strings.Contains(lower, "stream idle timeout") ||
+		strings.Contains(lower, "timeout awaiting response headers") {
+		return false
+	}
+
 	// Hard quota/credit exhaustion is NOT transient — don't retry same account.
-	if IsQuotaExhaustionError(err) {
+	if IsQuotaExhaustionError(err) || IsRateLimitError(err) {
 		return false
 	}
 
@@ -912,6 +1110,15 @@ func (p *AccountPool) UpdateToken(id, accessToken, refreshToken string, expiresA
 			p.accounts[i].ExpiresAt = expiresAt
 		}
 	}
+	for i := range p.serviceAccounts {
+		if p.serviceAccounts[i].ID == id {
+			p.serviceAccounts[i].AccessToken = accessToken
+			if refreshToken != "" {
+				p.serviceAccounts[i].RefreshToken = refreshToken
+			}
+			p.serviceAccounts[i].ExpiresAt = expiresAt
+		}
+	}
 }
 
 // Count returns total number of accounts
@@ -951,23 +1158,96 @@ func (p *AccountPool) AvailableCount() int {
 
 // UpdateStats updates account statistics. Counters live in p.stats keyed by
 // accountID (not on the accounts[] routing slice), so Reload() rebuilding
-// accounts[] no longer clobbers them. The updated totals are flushed to config
-// asynchronously; the in-memory map remains the source of truth while running.
+// accounts[] no longer clobbers them. The updated totals are persisted before
+// this method returns so a request cannot leave a fire-and-forget config write
+// behind after its lifecycle ends.
 func (p *AccountPool) UpdateStats(id string, tokens int, credits float64) {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 
 	s, ok := p.stats[id]
 	if !ok {
+		// An account can receive traffic before Reload has seeded p.stats
+		// (for example, after a runtime account mutation). Start from the
+		// persisted snapshot so the write carries its current reset ID.
 		s = &accountStats{}
+		for _, account := range config.GetAccounts() {
+			if account.ID != id {
+				continue
+			}
+			s = &accountStats{
+				RequestCount:                 account.RequestCount,
+				ErrorCount:                   account.ErrorCount,
+				TotalTokens:                  account.TotalTokens,
+				CodexTokensSincePrimaryReset: account.CodexTokensSincePrimaryReset,
+				CodexPrimaryResetAt:          account.CodexPrimaryResetAt,
+				TotalCredits:                 account.TotalCredits,
+				LastUsed:                     account.LastUsed,
+			}
+			break
+		}
 		p.stats[id] = s
 	}
 	s.RequestCount++
 	s.TotalTokens += tokens
+	if p.isCodexAccountLocked(id) {
+		s.CodexTokensSincePrimaryReset += tokens
+	}
 	s.TotalCredits += credits
 	s.LastUsed = time.Now().Unix()
 
-	go config.UpdateAccountStats(id, s.RequestCount, s.ErrorCount, s.TotalTokens, s.TotalCredits, s.LastUsed)
+	requestCount := s.RequestCount
+	errorCount := s.ErrorCount
+	totalTokens := s.TotalTokens
+	codexTokensSincePrimaryReset := s.CodexTokensSincePrimaryReset
+	codexPrimaryResetAt := s.CodexPrimaryResetAt
+	totalCredits := s.TotalCredits
+	lastUsed := s.LastUsed
+	p.mu.Unlock()
+
+	// Persist outside p.mu. UpdateAccountStats takes config's lock and may
+	// perform an atomic file write; holding the pool lock across that operation
+	// would unnecessarily block routing and risk lock-order inversions.
+	_ = config.UpdateAccountStats(id, requestCount, errorCount, totalTokens, codexTokensSincePrimaryReset, codexPrimaryResetAt, totalCredits, lastUsed)
+}
+
+func (p *AccountPool) isCodexAccountLocked(id string) bool {
+	for _, account := range p.accounts {
+		if account.ID == id {
+			return account.AuthMethod == "codex"
+		}
+	}
+	for _, account := range config.GetAccounts() {
+		if account.ID == id {
+			return account.AuthMethod == "codex"
+		}
+	}
+	return false
+}
+
+// ResetCodexPrimaryWindowTokens clears the live per-window token counter
+// after the upstream reports a new Codex primary reset timestamp.
+func (p *AccountPool) ResetCodexPrimaryWindowTokens(id string, resetAt int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if stats, ok := p.stats[id]; ok {
+		stats.CodexTokensSincePrimaryReset = 0
+		stats.CodexPrimaryResetAt = resetAt
+	}
+}
+
+// SyncCodexPrimaryWindow aligns live stats with the canonical deadline stored
+// after the first usage header of a window. When an account was added during
+// that window before this counter existed, bootstrap its window total from the
+// cumulative runtime total.
+func (p *AccountPool) SyncCodexPrimaryWindow(id string, resetAt int64, bootstrapTokens bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if stats, ok := p.stats[id]; ok {
+		stats.CodexPrimaryResetAt = resetAt
+		if bootstrapTokens && stats.TotalTokens > stats.CodexTokensSincePrimaryReset {
+			stats.CodexTokensSincePrimaryReset = stats.TotalTokens
+		}
+	}
 }
 
 // ResetStats zeroes the in-memory per-account counters. Callers that also want
@@ -994,6 +1274,8 @@ func (p *AccountPool) GetAllAccounts() []config.Account {
 			result[i].RequestCount = s.RequestCount
 			result[i].ErrorCount = s.ErrorCount
 			result[i].TotalTokens = s.TotalTokens
+			result[i].CodexTokensSincePrimaryReset = s.CodexTokensSincePrimaryReset
+			result[i].CodexPrimaryResetAt = s.CodexPrimaryResetAt
 			result[i].TotalCredits = s.TotalCredits
 			result[i].LastUsed = s.LastUsed
 		}
@@ -1022,6 +1304,8 @@ func (p *AccountPool) GetAllAccountsFull() []config.Account {
 			all[i].RequestCount = s.RequestCount
 			all[i].ErrorCount = s.ErrorCount
 			all[i].TotalTokens = s.TotalTokens
+			all[i].CodexTokensSincePrimaryReset = s.CodexTokensSincePrimaryReset
+			all[i].CodexPrimaryResetAt = s.CodexPrimaryResetAt
 			all[i].TotalCredits = s.TotalCredits
 			all[i].LastUsed = s.LastUsed
 		}

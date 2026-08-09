@@ -8,54 +8,21 @@ import (
 	"time"
 )
 
-// refreshQueue serializes Kiro token refreshes to concurrency=1 across all
-// accounts. kiro.dev's social refresh endpoint can invalidate sibling 
-// accounts when two refreshes happen concurrently, so all kiro refreshes
-// must run sequentially.
-//
-// Non-Kiro providers (if any are added later) pass through immediately.
+// refreshQueue serializes refresh-token exchanges to concurrency=1. This is
+// required for rotating providers: submitting the same refresh token twice can
+// invalidate the account's only usable credential.
 
-var (
-	kiroRefreshTail  sync.Mutex
-	kiroRefreshInflight *kiroRefreshEntry
-)
+var kiroRefreshMu sync.Mutex
 
-type kiroRefreshEntry struct {
-	done  chan struct{}
-	next  *kiroRefreshEntry
-}
-
-// SerialRefreshKiro runs fn serialized against every other kiro refresh.
-// Different providers (if added) run concurrently; kiro refreshes are serialized.
+// SerialRefreshKiro runs fn serialized against every other OAuth refresh.
+// The historical name is retained for compatibility with existing call sites.
 func SerialRefreshKiro(fn func() (string, string, int64, string, string, string, error)) (string, string, int64, string, string, string, error) {
-	kiroRefreshTail.Lock()
-
-	// Chain behind any in-flight refresh.
-	var prev *kiroRefreshEntry
-	if kiroRefreshInflight != nil {
-		prev = kiroRefreshInflight
-	}
-
-	myEntry := &kiroRefreshEntry{done: make(chan struct{})}
-	kiroRefreshInflight = myEntry
-	kiroRefreshTail.Unlock()
-
-	// Wait for predecessor to complete.
-	if prev != nil {
-		<-prev.done
-		// Small settle gap after predecessor completes 
-		// DEFAULT_REFRESH_SPACING_MS = 2000ms. Gives kiro.dev time to settle
-		// a rotation before the next account refreshes.
-		time.Sleep(2 * time.Second)
-	}
-
-	defer func() {
-		close(myEntry.done)
-		kiroRefreshTail.Lock()
-		kiroRefreshInflight = nil
-		kiroRefreshTail.Unlock()
-	}()
-
+	// Keep the lock for the whole upstream exchange. The old linked-list
+	// queue cleared its tail when the first caller finished, even while later
+	// callers were still queued; a new caller could then refresh in parallel
+	// and consume a rotating refresh token twice.
+	kiroRefreshMu.Lock()
+	defer kiroRefreshMu.Unlock()
 	return fn()
 }
 
@@ -70,13 +37,13 @@ func SerialRefreshKiro(fn func() (string, string, int64, string, string, string,
 //
 // Key: sha256(oldRefreshToken) → Value: rotationResult + expiry
 type rotationResult struct {
-	AccessToken  string
-	RefreshToken string
-	ExpiresAt    int64
-	ProfileArn   string
-	newClientID  string
+	AccessToken     string
+	RefreshToken    string
+	ExpiresAt       int64
+	ProfileArn      string
+	newClientID     string
 	newClientSecret string
-	storedAt     time.Time
+	storedAt        time.Time
 }
 
 const rotationMapTTL = 60 * time.Second
@@ -139,7 +106,38 @@ func RefreshAccountToken(account *config.Account) (string, string, int64, string
 	if account != nil && account.AuthMethod == "api_key" {
 		return account.AccessToken, "", account.ExpiresAt, account.ProfileArn, account.ClientID, account.ClientSecret, nil
 	}
+	if account != nil {
+		if rot := CheckRotation(account.RefreshToken); rot != nil {
+			return rot.AccessToken, rot.RefreshToken, rot.ExpiresAt, rot.ProfileArn, rot.newClientID, rot.newClientSecret, nil
+		}
+	}
 	return SerialRefreshKiro(func() (string, string, int64, string, string, string, error) {
-		return RefreshToken(account)
+		// A caller can have joined the queue before the predecessor completed.
+		// Re-check after waiting so a rotated refresh token is never submitted
+		// to the upstream endpoint a second time.
+		if account != nil {
+			if rot := CheckRotation(account.RefreshToken); rot != nil {
+				return rot.AccessToken, rot.RefreshToken, rot.ExpiresAt, rot.ProfileArn, rot.newClientID, rot.newClientSecret, nil
+			}
+		}
+
+		oldRefreshToken := ""
+		if account != nil {
+			oldRefreshToken = account.RefreshToken
+		}
+		accessToken, refreshToken, expiresAt, profileArn, clientID, clientSecret, err := RefreshToken(account)
+		if err != nil {
+			return "", "", 0, "", "", "", err
+		}
+		// Some OAuth providers issue a new access token without rotating the
+		// refresh token. Every caller can then persist the effective token safely.
+		if refreshToken == "" {
+			refreshToken = oldRefreshToken
+		}
+		// Publish the rotation before releasing the mutex. Otherwise a caller
+		// arriving in the tiny gap after the upstream response could submit the
+		// already-consumed token before it sees the rotation cache.
+		RecordRotation(oldRefreshToken, accessToken, refreshToken, profileArn, expiresAt)
+		return accessToken, refreshToken, expiresAt, profileArn, clientID, clientSecret, nil
 	})
 }

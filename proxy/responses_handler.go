@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"omniproxy/config"
 	"net/http"
+	"omniproxy/config"
 	"strings"
 	"time"
 )
@@ -121,6 +121,17 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
 	kiroPayload.OriginalModel = originalModel
 
+	// Forward reasoning.effort from the Responses API request (sent by
+	// Codex CLI when model_reasoning_effort is set in config.toml). This
+	// takes precedence over the Thinking-budget heuristic in OpenAIToKiro
+	// because it is the explicit, user-configured value.
+	if req.Reasoning != nil && req.Reasoning.Effort != "" {
+		if kiroPayload.InferenceConfig == nil {
+			kiroPayload.InferenceConfig = &InferenceConfig{}
+		}
+		kiroPayload.InferenceConfig.ReasoningEffort = req.Reasoning.Effort
+	}
+
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	respID := generateResponseID()
 
@@ -162,16 +173,37 @@ func (h *Handler) handleResponsesNonStream(
 		var credits float64
 		var realInputTokens int
 		realCacheRead := 0
+		realCacheCreate := 0
+		attemptProduced := false
+		resetAttempt := func() {
+			content = ""
+			reasoningContent = ""
+			toolUses = nil
+			inputTokens = 0
+			outputTokens = 0
+			credits = 0
+			realInputTokens = 0
+			realCacheRead = 0
+			realCacheCreate = 0
+			attemptProduced = false
+		}
 
 		callback := &KiroStreamCallback{
+			OnOutput:  func() { attemptProduced = true },
+			HasOutput: func() bool { return attemptProduced },
+			OnReset:   resetAttempt,
 			OnText: func(text string, isThinking bool) {
+				attemptProduced = true
 				if isThinking {
 					reasoningContent += text
 				} else {
 					content += text
 				}
 			},
-			OnToolUse:  func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
+			OnToolUse: func(tu KiroToolUse) {
+				attemptProduced = true
+				toolUses = append(toolUses, tu)
+			},
 			OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
 			OnCredits:  func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
@@ -182,12 +214,14 @@ func (h *Handler) handleResponsesNonStream(
 					realCacheRead = cachedTokens
 				}
 			},
+			OnCacheCreate: func(cacheCreateTokens int) {
+				if cacheCreateTokens > realCacheCreate {
+					realCacheCreate = cacheCreateTokens
+				}
+			},
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointOpenAIResponses, model)
-		if isCodexAccount(account) {
-			h.warmAccountCache(account, payload, cacheKey)
-		}
 		err := dispatchChat(account, payload, callback)
 		if err != nil {
 			lastErr = err
@@ -195,9 +229,9 @@ func (h *Handler) handleResponsesNonStream(
 			// in-place with backoff before rotating to a different account.
 			if h.tryTransientRetry(account, payload, callback, err) {
 				h.pool.RecordSuccess(account.ID, model)
-		if cacheKey != "" {
-			h.pool.RecordCacheStickiness(cacheKey, account.ID)
-		}
+				if cacheKey != "" {
+					h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
+				}
 				goto responsesNonStreamSuccess
 			}
 			h.usageTracker.RemoveActive(account.ID)
@@ -226,10 +260,13 @@ func (h *Handler) handleResponsesNonStream(
 			outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 		}
 
-		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits, 0, 0, realCacheRead)
+		h.recordUsageWithCache(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits, cacheUsageTelemetry{
+			CreateTokens: realCacheCreate,
+			CachedTokens: realCacheRead,
+		})
 		h.pool.RecordSuccess(account.ID, model)
 		if cacheKey != "" {
-			h.pool.RecordCacheStickiness(cacheKey, account.ID)
+			h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
 		}
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
@@ -363,6 +400,7 @@ func (h *Handler) handleResponsesStream(
 	var lastErr error
 	responseStarted := false
 	realCacheRead := 0
+	realCacheCreate := 0
 	cacheKey := payloadCacheKey(payload)
 
 	for attempt := 0; ; attempt++ {
@@ -377,6 +415,8 @@ func (h *Handler) handleResponsesStream(
 			h.handleAccountFailure(account, err, model)
 			continue
 		}
+		realCacheRead = 0
+		realCacheCreate = 0
 
 		send("response.in_progress", map[string]interface{}{
 			"type":     "response.in_progress",
@@ -522,9 +562,14 @@ func (h *Handler) handleResponsesStream(
 					realCacheRead = cachedTokens
 				}
 			},
+			OnCacheCreate: func(cacheCreateTokens int) {
+				if cacheCreateTokens > realCacheCreate {
+					realCacheCreate = cacheCreateTokens
+				}
+			},
 		}
 
-	h.usageTracker.TrackActive(account.ID, endpointOpenAIResponses, model)
+		h.usageTracker.TrackActive(account.ID, endpointOpenAIResponses, model)
 		// Codex accounts: wrap callback with downstream coalescing to cut
 		// per-token json.Marshal + Flush syscalls ~50-100x. Only safe
 		// pre-stream-start (coalescer flushes on terminal events so the
@@ -532,7 +577,6 @@ func (h *Handler) handleResponsesStream(
 		effectiveCallback := callback
 		if isCodexAccount(account) {
 			effectiveCallback = newCodexCoalescer(callback)
-			h.warmAccountCache(account, payload, cacheKey)
 		}
 		err := dispatchChat(account, payload, effectiveCallback)
 		var finalContent string
@@ -544,9 +588,9 @@ func (h *Handler) handleResponsesStream(
 			// the response.created event).
 			if !responseStarted && h.tryTransientRetry(account, payload, effectiveCallback, err) {
 				h.pool.RecordSuccess(account.ID, model)
-		if cacheKey != "" {
-			h.pool.RecordCacheStickiness(cacheKey, account.ID)
-		}
+				if cacheKey != "" {
+					h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
+				}
 				goto responsesStreamSuccess
 			}
 			if !responseStarted {
@@ -555,6 +599,9 @@ func (h *Handler) handleResponsesStream(
 				excluded[account.ID] = true
 				h.handleAccountFailure(account, err, model)
 				continue
+			}
+			if effectiveCallback.OnError != nil {
+				effectiveCallback.OnError(err)
 			}
 			send("response.failed", map[string]interface{}{
 				"type": "response.failed",
@@ -620,10 +667,13 @@ func (h *Handler) handleResponsesStream(
 			outputTokens = estimateOpenAIOutputTokens(finalContent, reasoning, toolUses)
 		}
 
-		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits, 0, 0, realCacheRead)
+		h.recordUsageWithCache(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits, cacheUsageTelemetry{
+			CreateTokens: realCacheCreate,
+			CachedTokens: realCacheRead,
+		})
 		h.pool.RecordSuccess(account.ID, model)
 		if cacheKey != "" {
-			h.pool.RecordCacheStickiness(cacheKey, account.ID)
+			h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
 		}
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 

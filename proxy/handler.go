@@ -1,20 +1,23 @@
 package proxy
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
 	"omniproxy/auth"
 	"omniproxy/config"
 	"omniproxy/logger"
 	"omniproxy/pool"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -42,6 +45,270 @@ type CliToolSettings struct {
 	Env           map[string]string `json:"env,omitempty"`
 	AgentModels   map[string]string `json:"agentModels,omitempty"`
 	Config        string            `json:"config,omitempty"`
+}
+
+const (
+	defaultAgentModel = "gpt-5.6-luna"
+	deepResearchModel = "gpt-5.6-sol"
+	imageAgentModel   = "gpt-5.6-luna"
+)
+
+// policyModelLimits contains fallback limits for configured models whose
+// upstream catalog entries may be absent or incomplete. A catalog entry is
+// authoritative when it has token metadata; these values fill only gaps.
+func policyModelLimits(model string) (int, int, bool) {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if idx := strings.IndexByte(model, '/'); idx >= 0 {
+		model = strings.TrimSpace(model[idx+1:])
+	}
+	model, _ = ParseModelAndThinking(model, "-thinking")
+	switch model {
+	case defaultAgentModel:
+		return 272000, 128000, true
+	case deepResearchModel:
+		return 272000, 128000, true
+	case "claude-opus-5", "claude-sonnet-5", "claude-fable-5":
+		return 1_000_000, 128_000, true
+	default:
+		return 0, 0, false
+	}
+}
+
+func (h *Handler) omniProxyModelCatalog(extra ...string) []ModelInfo {
+	h.modelsCacheMu.RLock()
+	cached := append([]ModelInfo(nil), h.cachedModels...)
+	h.modelsCacheMu.RUnlock()
+	// Codex's static catalog is the authority for its model metadata. Keep it
+	// first so an old discovery-cache record cannot publish stale limits.
+	models := mergeUniqueModels(codexSubscriptionModels(), cached)
+	for _, model := range extra {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		models = mergeUniqueModels(models, []ModelInfo{{ModelId: openClawModelID(model), ModelName: openClawModelID(model)}})
+	}
+	return models
+}
+
+// openClawModelRef returns the model reference OpenClaw expects in agents and
+// defaults. Bare model IDs belong to the OmniProxy provider; explicit provider
+// references are preserved so selecting a model from another configured
+// provider does not silently route it through the wrong namespace.
+func openClawModelRef(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" || strings.Contains(model, "/") {
+		return model
+	}
+	return "omniproxy/" + model
+}
+
+func openClawModelID(model string) string {
+	model = strings.TrimSpace(model)
+	if idx := strings.IndexByte(model, '/'); idx >= 0 {
+		prefix := strings.ToLower(strings.TrimSpace(model[:idx]))
+		switch prefix {
+		case "omniproxy", "kiro", "kiro-proxy", "superkiro", "codex", "openai-codex":
+			return strings.TrimSpace(model[idx+1:])
+		}
+	}
+	return model
+}
+
+func mergeOpenClawProviderModel(provider map[string]interface{}, model string, contextWindow, maxTokens int) {
+	model = openClawModelID(model)
+	if model == "" {
+		return
+	}
+
+	models, _ := provider["models"].([]interface{})
+	for _, raw := range models {
+		if entry, ok := raw.(map[string]interface{}); ok {
+			if id, _ := entry["id"].(string); id == model {
+				if contextWindow > 0 {
+					entry["contextWindow"] = contextWindow
+				}
+				if maxTokens > 0 {
+					entry["maxTokens"] = maxTokens
+				}
+				return
+			}
+		}
+	}
+	entry := map[string]interface{}{"id": model, "name": model}
+	if contextWindow > 0 {
+		entry["contextWindow"] = contextWindow
+	}
+	if maxTokens > 0 {
+		entry["maxTokens"] = maxTokens
+	}
+	models = append(models, entry)
+	provider["models"] = models
+}
+
+func mergeOpenClawProviderInfo(provider map[string]interface{}, info ModelInfo) {
+	id := openClawModelID(info.ModelId)
+	if id == "" {
+		return
+	}
+	contextWindow, maxTokens, _ := modelInfoTokenLimits(info)
+	mergeOpenClawProviderModel(provider, id, contextWindow, maxTokens)
+	models, _ := provider["models"].([]interface{})
+	for _, raw := range models {
+		entry, ok := raw.(map[string]interface{})
+		if !ok || entry["id"] != id {
+			continue
+		}
+		if info.ModelName != "" {
+			entry["name"] = info.ModelName
+		}
+		// OpenClaw's provider-model schema does not permit descriptions. Remove
+		// stale entries written by older OmniProxy versions as well, otherwise a
+		// config refresh can prevent the gateway from starting.
+		delete(entry, "description")
+		if len(info.InputTypes) > 0 {
+			entry["input"] = info.InputTypes
+		}
+		return
+	}
+}
+
+func mergeOpenClawProviderCatalog(provider map[string]interface{}, catalog []ModelInfo) {
+	// OpenClaw validates every provider-model entry against a strict schema.
+	// Remove descriptions from the whole existing catalog, including entries
+	// that are no longer returned by OmniProxy, before merging fresh metadata.
+	if models, ok := provider["models"].([]interface{}); ok {
+		for _, raw := range models {
+			if entry, ok := raw.(map[string]interface{}); ok {
+				delete(entry, "description")
+			}
+		}
+	}
+	for _, info := range catalog {
+		mergeOpenClawProviderInfo(provider, info)
+	}
+}
+
+func mergeOpenClawAgents(current map[string]interface{}, primaryModel string, agentModels map[string]string) {
+	defaults, _ := current["defaults"].(map[string]interface{})
+	if defaults == nil {
+		defaults = map[string]interface{}{}
+		current["defaults"] = defaults
+	}
+	setOpenClawPrimary(defaults, "model", openClawModelRef(primaryModel))
+	setOpenClawPrimary(defaults, "imageGenerationModel", openClawModelRef(imageAgentModel))
+	setOpenClawPrimary(defaults, "imageModel", openClawModelRef(imageAgentModel))
+
+	allowed, _ := defaults["models"].(map[string]interface{})
+	if allowed == nil {
+		allowed = map[string]interface{}{}
+		defaults["models"] = allowed
+	}
+	addOpenClawAllowedModel(allowed, openClawModelRef(primaryModel), primaryModel)
+	addOpenClawAllowedModel(allowed, openClawModelRef(imageAgentModel), imageAgentModel)
+
+	list, _ := current["list"].([]interface{})
+	byID := make(map[string]map[string]interface{}, len(list))
+	for _, raw := range list {
+		if agent, ok := raw.(map[string]interface{}); ok {
+			if id, _ := agent["id"].(string); id != "" {
+				byID[id] = agent
+			}
+		}
+	}
+	for id, model := range agentModels {
+		id = strings.TrimSpace(id)
+		model = strings.TrimSpace(model)
+		if id == "" || model == "" {
+			continue
+		}
+		if isResearchAgentID(id) {
+			model = deepResearchModel
+		}
+		ref := openClawModelRef(model)
+		if agent, ok := byID[id]; ok {
+			agent["model"] = ref
+		} else {
+			agent := map[string]interface{}{"id": id, "model": ref}
+			list = append(list, agent)
+			byID[id] = agent
+		}
+		addOpenClawAllowedModel(allowed, ref, model)
+	}
+	for _, raw := range list {
+		agent, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		id, _ := agent["id"].(string)
+		if !isResearchAgentID(id) {
+			continue
+		}
+		agent["model"] = openClawModelRef(deepResearchModel)
+		addOpenClawAllowedModel(allowed, openClawModelRef(deepResearchModel), deepResearchModel)
+	}
+	current["list"] = list
+}
+
+func setOpenClawPrimary(defaults map[string]interface{}, key, ref string) {
+	if ref == "" {
+		return
+	}
+	model, _ := defaults[key].(map[string]interface{})
+	if model == nil {
+		model = map[string]interface{}{}
+		defaults[key] = model
+	}
+	model["primary"] = ref
+}
+
+func addOpenClawAllowedModel(allowed map[string]interface{}, ref, model string) {
+	input, output, ok := policyModelLimits(model)
+	if !ok {
+		return
+	}
+	addOpenClawAllowedModelLimits(allowed, ref, input, output)
+}
+
+func addOpenClawAllowedModelLimits(allowed map[string]interface{}, ref string, input, output int) {
+	if ref == "" {
+		return
+	}
+	entry, _ := allowed[ref].(map[string]interface{})
+	if entry == nil {
+		entry = map[string]interface{}{}
+		allowed[ref] = entry
+	}
+	params, _ := entry["params"].(map[string]interface{})
+	if params == nil {
+		params = map[string]interface{}{}
+		entry["params"] = params
+	}
+	if output > 0 {
+		params["maxTokens"] = output
+	}
+	_ = input // OpenClaw stores the input window in the provider catalog.
+}
+
+func mergeOpenClawAllowedCatalog(allowed map[string]interface{}, catalog []ModelInfo) {
+	for _, info := range catalog {
+		id := openClawModelID(info.ModelId)
+		if id == "" {
+			continue
+		}
+		input, output, ok := modelInfoTokenLimits(info)
+		// Keep every catalog model selectable. Token metadata is optional, so
+		// an entry without limits must still be present in the picker.
+		if !ok {
+			input, output = 0, 0
+		}
+		addOpenClawAllowedModelLimits(allowed, openClawModelRef(id), input, output)
+	}
+}
+
+func isResearchAgentID(id string) bool {
+	id = strings.ToLower(strings.TrimSpace(id))
+	return strings.Contains(id, "research") || strings.Contains(id, "scientific")
 }
 
 var (
@@ -162,6 +429,146 @@ func upsertYAMLProviderBlock(raw, providerName, providerBlock string) string {
 	out = append(out, insert...)
 	out = append(out, lines[providersIdx+1:]...)
 	return strings.TrimRight(strings.Join(out, "\n"), "\n") + "\n"
+}
+
+// upsertYAMLModelSection updates the top-level `model:` section in a Hermes
+// config.yaml so that the default model, provider, base_url, api_key, and
+// api_mode always point to OmniProxy. If the section doesn't exist, it is
+// inserted at the top of the file. Existing sub-keys (context_length,
+// max_tokens, etc.) are preserved unless overridden.
+func upsertYAMLModelSection(raw, model, provider, baseURL, apiKey string, limits ...int) string {
+	lines := strings.Split(raw, "\n")
+
+	// Locate the top-level `model:` section.
+	modelIdx := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "model:" && len(line)-len(strings.TrimLeft(line, " ")) == 0 {
+			modelIdx = i
+			break
+		}
+	}
+
+	// Desired key-values (order matters for readability).
+	desired := map[string]string{
+		"default":  model,
+		"provider": provider,
+		"base_url": baseURL,
+		"api_key":  apiKey,
+		"api_mode": "openai",
+	}
+	desiredOrder := []string{"default", "provider", "base_url", "api_key", "api_mode"}
+	if len(limits) > 0 && limits[0] > 0 {
+		desired["context_length"] = strconv.Itoa(limits[0])
+		desiredOrder = append(desiredOrder, "context_length")
+	}
+	if len(limits) > 1 && limits[1] > 0 {
+		desired["max_tokens"] = strconv.Itoa(limits[1])
+		desiredOrder = append(desiredOrder, "max_tokens")
+	}
+
+	if modelIdx == -1 {
+		// No model: section — insert one at the very top.
+		section := []string{"model:"}
+		for _, k := range desiredOrder {
+			v := desired[k]
+			if v == "" {
+				continue
+			}
+			section = append(section, fmt.Sprintf("  %s: %s", k, yamlQuoteIfNeeded(v)))
+		}
+		out := append([]string{}, section...)
+		out = append(out, lines...)
+		return strings.TrimRight(strings.Join(out, "\n"), "\n") + "\n"
+	}
+
+	// Find the extent of the model: section (indent > 0 until next top-level key).
+	end := len(lines)
+	for i := modelIdx + 1; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if trimmed != "" && indent == 0 {
+			end = i
+			break
+		}
+	}
+
+	// Parse existing sub-keys to preserve unknown ones (context_length, max_tokens, etc.).
+	existing := map[string]string{}
+	existingOrder := []string{}
+	for i := modelIdx + 1; i < end; i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// key: value
+		colon := strings.Index(trimmed, ":")
+		if colon < 0 {
+			continue
+		}
+		k := strings.TrimSpace(trimmed[:colon])
+		v := strings.TrimSpace(trimmed[colon+1:])
+		existing[k] = v
+		existingOrder = append(existingOrder, k)
+	}
+
+	// Merge: desired overrides existing; unknown existing keys are kept.
+	merged := map[string]string{}
+	for _, k := range existingOrder {
+		merged[k] = existing[k]
+	}
+	for _, k := range desiredOrder {
+		v := desired[k]
+		if v != "" {
+			merged[k] = v
+		}
+	}
+
+	// Build the new section preserving original key order, with desired keys
+	// inserted in order if not already present.
+	seen := map[string]bool{}
+	newSection := []string{"model:"}
+	for _, k := range existingOrder {
+		v := merged[k]
+		newSection = append(newSection, fmt.Sprintf("  %s: %s", k, yamlQuoteIfNeeded(v)))
+		seen[k] = true
+	}
+	for _, k := range desiredOrder {
+		if seen[k] {
+			continue
+		}
+		v := merged[k]
+		if v == "" {
+			continue
+		}
+		newSection = append(newSection, fmt.Sprintf("  %s: %s", k, yamlQuoteIfNeeded(v)))
+	}
+
+	// Reassemble.
+	out := append([]string{}, lines[:modelIdx]...)
+	out = append(out, newSection...)
+	out = append(out, lines[end:]...)
+	return strings.TrimRight(strings.Join(out, "\n"), "\n") + "\n"
+}
+
+// yamlQuoteIfNeeded wraps a value in double quotes if it contains characters
+// that would be ambiguous in YAML (colons, hashes, etc.) or looks like a URL.
+func yamlQuoteIfNeeded(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return `""`
+	}
+	// Already quoted?
+	if (strings.HasPrefix(v, `"`) && strings.HasSuffix(v, `"`)) ||
+		(strings.HasPrefix(v, `'`) && strings.HasSuffix(v, `'`)) {
+		return v
+	}
+	// Quote if it contains special chars or looks like a URL/path.
+	if strings.ContainsAny(v, ":#@/?&=") || strings.Contains(v, " ") {
+		return `"` + v + `"`
+	}
+	return v
 }
 
 func backupToolConfig(toolID string) string {
@@ -462,7 +869,7 @@ func checkToolHasOmniProxy(toolID string) bool {
 			return false
 		}
 		for _, e := range entries {
-			if title, _ := e["title"].(string); (strings.EqualFold(title, "OmniProxy") || strings.EqualFold(title, "SuperKiro")) {
+			if title, _ := e["title"].(string); strings.EqualFold(title, "OmniProxy") || strings.EqualFold(title, "SuperKiro") {
 				return true
 			}
 		}
@@ -743,6 +1150,63 @@ func NewHandler() *Handler {
 	return h
 }
 
+// syncNineRouterAccounts imports every credentialed connection from the local
+// 9router database. It is best-effort: a missing 9router installation must not
+// prevent OmniProxy from starting. The existing import methods provide the
+// stable SourceID deduplication and capability metadata used by the UI/router.
+func (h *Handler) syncNineRouterAccounts() {
+	result, err := auth.ReadNineRouterDB()
+	if err != nil {
+		if !os.IsNotExist(err) {
+			logger.Warnf("[9router] startup sync skipped: %v", err)
+		}
+		return
+	}
+
+	imported, failed := 0, 0
+	for _, account := range result.Generic {
+		if _, err := h.importOne9RouterGeneric(account); err != nil {
+			failed++
+			logger.Warnf("[9router] provider %s sync failed: %v", account.Provider, err)
+		} else {
+			imported++
+		}
+	}
+	for _, account := range result.Codex {
+		if _, err := h.importOne9RouterCodex(account); err != nil {
+			failed++
+			logger.Warnf("[9router] Codex sync failed: %v", err)
+		} else {
+			imported++
+		}
+	}
+	for _, account := range result.Kiro {
+		// Do not refresh OAuth tokens during startup. The account is still
+		// synchronized and can be validated from the account detail UI.
+		if _, err := h.importOne9RouterKiro(account, false); err != nil {
+			failed++
+			logger.Warnf("[9router] Kiro sync failed: %v", err)
+		} else {
+			imported++
+		}
+	}
+
+	if imported > 0 || failed > 0 {
+		h.pool.Reload()
+	}
+	logger.Infof("[9router] startup sync complete: %d imported/updated, %d failed, search/image providers=%d", imported, failed, countServiceProviders(result.Generic))
+}
+
+func countServiceProviders(accounts []auth.NineRouterImportedAccount) int {
+	count := 0
+	for _, account := range accounts {
+		if len(account.Capabilities) > 0 {
+			count++
+		}
+	}
+	return count
+}
+
 // backgroundRefresh periodically refreshes account info
 func (h *Handler) backgroundRefresh() {
 	ticker := time.NewTicker(10 * time.Minute) // refresh every 10 minutes (was 30)
@@ -778,50 +1242,66 @@ func (h *Handler) refreshAllAccounts() {
 		}
 		// External OpenAI-compatible providers have no Kiro token to refresh
 		// and no CodeWhisperer usage API to poll — skip them entirely.
-		if isExternalAccount(account) {
+		if isExternalAccount(account) || isServiceAccount(account) {
 			continue
 		}
 
-		// check if token needs refresh
-		if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-tokenRefreshSkewSeconds {
-			newAccessToken, newRefreshToken, newExpiresAt, profileArn, newClientID, newClientSecret, err := auth.RefreshAccountToken(account)
-			if err != nil {
-				logger.Warnf("[BackgroundRefresh] Token refresh failed for %s: %v", account.Email, err)
-				h.handleAccountFailure(account, err, "")
-				continue
-			}
-			account.AccessToken = newAccessToken
-			if newRefreshToken != "" {
-				account.RefreshToken = newRefreshToken
-			}
-			account.ExpiresAt = newExpiresAt
-			config.UpdateAccountToken(account.ID, newAccessToken, newRefreshToken, newExpiresAt)
-			h.pool.UpdateToken(account.ID, newAccessToken, newRefreshToken, newExpiresAt)
-			if profileArn != "" {
-				account.ProfileArn = profileArn
-				config.UpdateAccountProfileArn(account.ID, profileArn)
-			}
-			// Codex accounts: re-extract chatgpt_account_id from the new
-			// access-token JWT (it may rotate when OpenAI re-issues the
-			// user's account) and persist it.
+		// Check if the token needs refresh. Codex accounts can carry a stale
+		// ExpiresAt from import, so also inspect the JWT exp claim.
+		needsRefresh := account.ExpiresAt > 0 && time.Now().Unix() >= account.ExpiresAt-tokenRefreshSkewSeconds
+		if account.AuthMethod == codexAuthMethod {
+			needsRefresh = codexTokenNeedsRefresh(account, time.Now().Unix())
+		}
+		if needsRefresh {
 			if account.AuthMethod == codexAuthMethod {
+				if err := refreshCodexAccountToken(account); err != nil {
+					markCodexReauthRequired(account, err)
+					logger.Warnf("[BackgroundRefresh] Codex token refresh failed for %s: %v", account.Email, err)
+					// Never probe usage with an access token that is known to be
+					// expired when the refresh-token flow failed.
+					continue
+				}
+				h.pool.UpdateToken(account.ID, account.AccessToken, account.RefreshToken, account.ExpiresAt)
+			} else {
+				newAccessToken, newRefreshToken, newExpiresAt, profileArn, newClientID, newClientSecret, err := auth.RefreshAccountToken(account)
+				if err != nil {
+					logger.Warnf("[BackgroundRefresh] Token refresh failed for %s: %v", account.Email, err)
+					h.handleAccountFailure(account, err, "")
+					continue
+				}
 				account.AccessToken = newAccessToken
-				refreshCodexAccountID(account)
-			}
-			// Persist re-registered OIDC client credentials so next refresh cycle uses them.
-			if newClientID != "" && newClientSecret != "" {
-				account.ClientID = newClientID
-				account.ClientSecret = newClientSecret
-				config.UpdateAccount(account.ID, *account)
-			}
-			// Re-enable banned/disabled account if refresh succeeded.
-			if account.BanStatus != "" && account.BanStatus != "ACTIVE" {
-				account.BanStatus = "ACTIVE"
-				account.BanReason = ""
-				account.BanTime = 0
-				account.Enabled = true
-				config.UpdateAccount(account.ID, *account)
-				logger.Infof("[BackgroundRefresh] Re-enabled %s after successful refresh", account.Email)
+				if newRefreshToken != "" {
+					account.RefreshToken = newRefreshToken
+				}
+				account.ExpiresAt = newExpiresAt
+				config.UpdateAccountToken(account.ID, newAccessToken, newRefreshToken, newExpiresAt)
+				h.pool.UpdateToken(account.ID, newAccessToken, newRefreshToken, newExpiresAt)
+				if profileArn != "" {
+					account.ProfileArn = profileArn
+					config.UpdateAccountProfileArn(account.ID, profileArn)
+				}
+				// Codex accounts: re-extract chatgpt_account_id from the new
+				// access-token JWT (it may rotate when OpenAI re-issues the
+				// user's account) and persist it.
+				if account.AuthMethod == codexAuthMethod {
+					account.AccessToken = newAccessToken
+					refreshCodexAccountID(account)
+				}
+				// Persist re-registered OIDC client credentials so next refresh cycle uses them.
+				if newClientID != "" && newClientSecret != "" {
+					account.ClientID = newClientID
+					account.ClientSecret = newClientSecret
+					config.UpdateAccount(account.ID, *account)
+				}
+				// Re-enable banned/disabled account if refresh succeeded.
+				if account.BanStatus != "" && account.BanStatus != "ACTIVE" {
+					account.BanStatus = "ACTIVE"
+					account.BanReason = ""
+					account.BanTime = 0
+					account.Enabled = true
+					config.UpdateAccount(account.ID, *account)
+					logger.Infof("[BackgroundRefresh] Re-enabled %s after successful refresh", account.Email)
+				}
 			}
 		}
 
@@ -858,21 +1338,12 @@ func (h *Handler) refreshAllAccounts() {
 		}
 
 		// Codex accounts: fetch live usage (rate-limit %, credits) via a minimal
-		// request so the admin UI shows real-time token usage. Also detects
-		// banned accounts (403/401) and marks them BANNED.
+		// request so the admin UI shows real-time token usage. Authentication
+		// failures are token/account-health signals, not proof of a ban.
 		if account.AuthMethod == codexAuthMethod && account.AccessToken != "" {
 			if err := fetchCodexUsage(account); err != nil {
-				errMsg := strings.ToLower(err.Error())
-				if isAuthErrorMessage(errMsg) || isSuspensionErrorMessage(errMsg) {
-					account.BanStatus = "BANNED"
-					account.BanReason = "Codex usage fetch: " + truncateErrBody([]byte(err.Error()))
-					account.BanTime = time.Now().Unix()
-					account.Enabled = false
-					config.UpdateAccount(account.ID, *account)
-					logger.Warnf("[BackgroundRefresh] Marked Codex %s as BANNED: %s", account.Email, err.Error())
-				} else {
-					logger.Warnf("[BackgroundRefresh] Codex usage fetch failed for %s: %v", account.Email, err)
-				}
+				markCodexReauthRequired(account, err)
+				logger.Warnf("[BackgroundRefresh] Codex usage fetch failed for %s: %v", account.Email, err)
 			}
 		}
 	}
@@ -959,6 +1430,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.handleOpenAIResponses(w, ar)
+	case path == "/v1/search" || path == "/search":
+		ar := h.authenticateForOpenAI(w, r)
+		if ar == nil {
+			return
+		}
+		h.handleSearch(w, ar)
+	case path == "/v1/images/generations" || path == "/images/generations":
+		ar := h.authenticateForOpenAI(w, r)
+		if ar == nil {
+			return
+		}
+		h.handleImageGeneration(w, ar)
 	case path == "/v1/models" || path == "/models":
 		h.handleModels(w, r)
 	case strings.HasPrefix(path, "/v1/models/") || strings.HasPrefix(path, "/models/"):
@@ -1073,9 +1556,9 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 			return codexSecondaryPctSum / codexEnabled
 		}(),
 		"codexCreditsBalance": codexCreditsBalance,
-		"availableModels":    len(modelIds) + codexModelCount,
-		"modelIds":           modelIds,
-		"uptime":             time.Now().Unix() - h.startTime,
+		"availableModels":     len(modelIds) + codexModelCount,
+		"modelIds":            modelIds,
+		"uptime":              time.Now().Unix() - h.startTime,
 	})
 }
 
@@ -1125,14 +1608,13 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Append Codex subscription models when at least one Codex account
-	// is enabled. These are served by the /v1/responses backend and are
-	// only reachable through a ChatGPT subscription login.
-	if hasEnabledCodexAccount() {
-		for _, m := range codexSubscriptionModelsList() {
-			models = append(models, m)
-		}
-	}
+	// Always advertise Codex subscription models so they appear in the
+	// model picker (e.g. when configuring the Codex CLI tool) even before
+	// a Codex account has been added. Runtime routing will fail with a
+	// clear "no codex account" error if none is enabled when a request
+	// actually arrives — but the model catalog should be complete for
+	// configuration/discovery purposes.
+	models = mergeCanonicalModelResponseEntries(models, codexSubscriptionModelsList())
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1186,6 +1668,10 @@ func (h *Handler) handleModelByID(w http.ResponseWriter, r *http.Request, modelI
 		}
 	}
 
+	// Include codex subscription models so /v1/models/{id} can resolve
+	// codex model IDs (e.g. "gpt-5.6-sol") just like /v1/models does.
+	models = mergeCanonicalModelResponseEntries(models, codexSubscriptionModelsList())
+
 	for _, m := range models {
 		if m["id"] == modelID {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -1206,9 +1692,16 @@ func buildAnthropicModelsResponse(cached []ModelInfo, thinkingSuffix string) []m
 	if len(cached) > 0 {
 		for _, m := range cached {
 			supportsImage := modelSupportsImage(m.InputTypes)
-			models = append(models, buildModelInfo(m.ModelId, "anthropic", supportsImage))
+			ownedBy := m.Provider
+			if ownedBy == "" {
+				// Older cache entries predate provider metadata and are native
+				// Kiro models, so preserve the previous Anthropic-compatible
+				// discovery behavior for those entries.
+				ownedBy = "anthropic"
+			}
+			models = append(models, buildModelInfoWithTokenLimits(m.ModelId, ownedBy, supportsImage, &m))
 			// auto-generate thinking variants
-			models = append(models, buildModelInfo(m.ModelId+thinkingSuffix, "anthropic", supportsImage))
+			models = append(models, buildModelInfoWithTokenLimits(m.ModelId+thinkingSuffix, ownedBy, supportsImage, &m))
 		}
 	}
 	return models
@@ -1244,6 +1737,14 @@ func modelSupportsImage(inputTypes []string) bool {
 }
 
 func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface{} {
+	return buildModelInfoWithTokenLimits(id, ownedBy, supportsImage, nil)
+}
+
+// buildModelInfoWithTokenLimits keeps model discovery consistent with runtime
+// accounting. Claude Code uses the advertised limits when deciding whether
+// to compact or continue a conversation, so omitting them can make a valid
+// 1M-context model look like an unknown or smaller-window model.
+func buildModelInfoWithTokenLimits(id, ownedBy string, supportsImage bool, source *ModelInfo) map[string]interface{} {
 	modalities := []string{"text"}
 	if supportsImage {
 		modalities = append(modalities, "image")
@@ -1253,7 +1754,7 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 		"output": []string{"text"},
 	}
 
-	return map[string]interface{}{
+	entry := map[string]interface{}{
 		"id":               id,
 		"object":           "model",
 		"owned_by":         ownedBy,
@@ -1278,6 +1779,22 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 			},
 		},
 	}
+
+	var info ModelInfo
+	if source != nil {
+		info = *source
+		info.ModelId = id
+	} else {
+		info.ModelId = id
+	}
+	input, output, ok := modelInfoTokenLimits(info)
+	if ok && (input > 0 || output > 0) {
+		entry["token_limits"] = map[string]interface{}{
+			"maxInputTokens":  input,
+			"maxOutputTokens": output,
+		}
+	}
+	return entry
 }
 
 // hasEnabledCodexAccount returns true if at least one enabled Codex
@@ -1314,6 +1831,43 @@ func codexSubscriptionModelsList() []map[string]interface{} {
 	return out
 }
 
+// mergeCanonicalModelResponseEntries replaces discovery entries whose IDs are
+// also published by a canonical catalog. This prevents an upstream cache entry
+// from shadowing Codex token metadata in /v1/models and /v1/models/{id}.
+func mergeCanonicalModelResponseEntries(models, canonical []map[string]interface{}) []map[string]interface{} {
+	indexByID := make(map[string]int, len(models)+len(canonical))
+	merged := make([]map[string]interface{}, 0, len(models)+len(canonical))
+	for _, model := range models {
+		id, _ := model["id"].(string)
+		key := strings.ToLower(strings.TrimSpace(id))
+		if key == "" {
+			merged = append(merged, model)
+			continue
+		}
+		if idx, ok := indexByID[key]; ok {
+			merged[idx] = model
+			continue
+		}
+		indexByID[key] = len(merged)
+		merged = append(merged, model)
+	}
+	for _, model := range canonical {
+		id, _ := model["id"].(string)
+		key := strings.ToLower(strings.TrimSpace(id))
+		if key == "" {
+			merged = append(merged, model)
+			continue
+		}
+		if idx, ok := indexByID[key]; ok {
+			merged[idx] = model
+			continue
+		}
+		indexByID[key] = len(merged)
+		merged = append(merged, model)
+	}
+	return merged
+}
+
 // refreshModelsCache fetches model list from Kiro API and caches it
 func (h *Handler) refreshModelsCache() {
 	accounts := config.GetEnabledAccounts()
@@ -1347,7 +1901,7 @@ func (h *Handler) refreshModelsCache() {
 		// not CodeWhisperer's ListAvailableModels. Calling ListAvailableModels with
 		// their access token fails (DNS/auth) and triggers handleAccountFailure,
 		// which can wrongly mark the account BANNED.
-		if isExternalAccount(account) {
+		if isExternalAccount(account) || isServiceAccount(account) {
 			if err := h.fetchAndCacheAccountModels(account); err == nil {
 				h.modelsCacheMu.RLock()
 				aggregated = mergeUniqueModels(aggregated, h.cachedModels)
@@ -1366,6 +1920,11 @@ func (h *Handler) refreshModelsCache() {
 			logger.Warnf("[ModelsCache] Failed to refresh for %s: %v", account.Email, err)
 			h.handleAccountFailure(account, err, "")
 			continue
+		}
+		for i := range models {
+			if models[i].Provider == "" {
+				models[i].Provider = "kiro-proxy"
+			}
 		}
 		// Cache available models per account, used for filtering during routing
 		modelIDs := make([]string, 0, len(models))
@@ -1388,6 +1947,9 @@ func (h *Handler) refreshModelsCache() {
 // fetchAndCacheAccountModels fetches and writes model cache for a single account.
 // Also updates the pool routing cache and global aggregated model list.
 func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
+	if isServiceAccount(account) {
+		return fmt.Errorf("service account %s does not expose chat models", account.Provider)
+	}
 	// Codex accounts expose a fixed set of subscription-tier models
 	// (gpt-5.6-sol, gpt-5.1, o4, etc.) — no /v1/models endpoint to poll.
 	// Seed the cache with the canonical Codex model list so routing picks
@@ -1407,8 +1969,22 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 		return nil
 	}
 	// External OpenAI-compatible providers expose /v1/models, not Kiro's
-	// ListAvailableModels. Use the dedicated fetcher so their model list is
-	// real (and routing picks them correctly for requested model IDs).
+	if isAgentRouterAccount(account) {
+		models, err := fetchAgentRouterModels(account)
+		if err == nil && len(models) > 0 {
+			modelIDs := make([]string, 0, len(models))
+			for _, m := range models {
+				modelIDs = append(modelIDs, m.ModelId)
+			}
+			h.pool.SetModelList(account.ID, modelIDs)
+			h.modelsCacheMu.Lock()
+			h.cachedModels = mergeUniqueModels(h.cachedModels, models)
+			h.modelsCacheTime = time.Now().Unix()
+			h.modelsCacheMu.Unlock()
+			logger.Infof("[ModelsCache] Refreshed %d models for AgentRouter provider %s", len(models), account.Email)
+			return nil
+		}
+	}
 	if isExternalAccount(account) {
 		models, err := fetchExternalProviderModels(account)
 		if err != nil {
@@ -1432,6 +2008,11 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 	models, err := ListAvailableModels(account)
 	if err != nil {
 		return err
+	}
+	for i := range models {
+		if models[i].Provider == "" {
+			models[i].Provider = "kiro-proxy"
+		}
 	}
 	modelIDs := make([]string, 0, len(models))
 	for _, m := range models {
@@ -1537,12 +2118,14 @@ func (h *Handler) apiRefreshAllAccountsModels(w http.ResponseWriter, r *http.Req
 func (h *Handler) apiRefreshAllAccounts(w http.ResponseWriter, r *http.Request) {
 	h.refreshAllAccounts()
 	accounts := config.GetAccounts()
-	refreshed, banned, failed := 0, 0, 0
+	refreshed, banned, reauthRequired, failed := 0, 0, 0, 0
 	for _, a := range accounts {
 		if a.AccessToken == "" {
 			continue
 		}
-		if a.BanStatus == "BANNED" || a.BanStatus == "SUSPENDED" || a.BanStatus == "DISABLED" {
+		if a.BanStatus == codexReauthRequiredStatus {
+			reauthRequired++
+		} else if a.BanStatus == "BANNED" || a.BanStatus == "SUSPENDED" || a.BanStatus == "DISABLED" {
 			banned++
 		} else if a.Enabled {
 			refreshed++
@@ -1551,11 +2134,12 @@ func (h *Handler) apiRefreshAllAccounts(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":   true,
-		"refreshed": refreshed,
-		"banned":    banned,
-		"failed":    failed,
-		"message":   fmt.Sprintf("Refreshed %d, banned %d, failed %d", refreshed, banned, failed),
+		"success":        true,
+		"refreshed":      refreshed,
+		"banned":         banned,
+		"reauthRequired": reauthRequired,
+		"failed":         failed,
+		"message":        fmt.Sprintf("Refreshed %d, banned %d, re-login required %d, failed %d", refreshed, banned, reauthRequired, failed),
 	})
 }
 
@@ -1590,6 +2174,8 @@ func (h *Handler) apiResetAccountQuota(w http.ResponseWriter, r *http.Request, i
 
 	account.CodexPrimaryUsedPercent = 0
 	account.CodexPrimaryResetAt = 0
+	account.CodexTokensSincePrimaryReset = 0
+	account.CodexPrimaryWindowTokensInitialized = true
 	account.CodexPrimaryWindowMinutes = 0
 	account.CodexSecondaryUsedPercent = 0
 	account.CodexSecondaryResetAt = 0
@@ -1600,11 +2186,12 @@ func (h *Handler) apiResetAccountQuota(w http.ResponseWriter, r *http.Request, i
 	if !account.Enabled && account.BanStatus == "ACTIVE" {
 		account.Enabled = true
 	}
-	if err := config.UpdateAccount(account.ID, *account); err != nil {
+	if err := config.UpdateAccountPreservingCredentials(account.ID, *account); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Failed to persist quota reset: " + err.Error()})
 		return
 	}
+	h.pool.ResetCodexPrimaryWindowTokens(account.ID, 0)
 	// Reload the pool so the weighted slice reflects the now-available account.
 	h.pool.Reload()
 	logger.Infof("[apiResetAccountQuota] Reset Codex quota for %s — account is now fully available", account.Email)
@@ -1695,8 +2282,8 @@ func (h *Handler) apiResetAccountCredits(w http.ResponseWriter, r *http.Request,
 	if available <= 0 {
 		w.WriteHeader(409)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":  false,
-			"error":    "No bank-reset credits available for this account",
+			"success":   false,
+			"error":     "No bank-reset credits available for this account",
 			"available": 0,
 		})
 		return
@@ -1713,8 +2300,8 @@ func (h *Handler) apiResetAccountCredits(w http.ResponseWriter, r *http.Request,
 		// between our check and consume).
 		w.WriteHeader(409)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":  false,
-			"error":    "No bank-reset credits available (consumed by another client)",
+			"success":   false,
+			"error":     "No bank-reset credits available (consumed by another client)",
 			"available": 0,
 		})
 		return
@@ -1724,6 +2311,8 @@ func (h *Handler) apiResetAccountCredits(w http.ResponseWriter, r *http.Request,
 	// quota-exhaustion path.
 	account.CodexPrimaryUsedPercent = 0
 	account.CodexPrimaryResetAt = 0
+	account.CodexTokensSincePrimaryReset = 0
+	account.CodexPrimaryWindowTokensInitialized = true
 	account.CodexPrimaryWindowMinutes = 0
 	account.CodexSecondaryUsedPercent = 0
 	account.CodexSecondaryResetAt = 0
@@ -1736,17 +2325,18 @@ func (h *Handler) apiResetAccountCredits(w http.ResponseWriter, r *http.Request,
 	if !account.Enabled && (account.BanStatus == "" || account.BanStatus == "ACTIVE") {
 		account.Enabled = true
 	}
-	if err := config.UpdateAccount(account.ID, *account); err != nil {
+	if err := config.UpdateAccountPreservingCredentials(account.ID, *account); err != nil {
 		logger.Errorf("[apiResetAccountCredits] Failed to persist cleared counters for %s: %v", account.Email, err)
 	}
+	h.pool.ResetCodexPrimaryWindowTokens(account.ID, 0)
 	h.pool.Reload()
 	logger.Infof("[apiResetAccountCredits] Consumed 1 bank-reset credit for %s — %d windows reset upstream",
 		account.Email, windowsReset)
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":       true,
-		"windowsReset":  windowsReset,
-		"available":     available - 1,
-		"message":       fmt.Sprintf("Bank reset credit consumed for %s — %d rate-limit windows reset", account.Email, windowsReset),
+		"success":      true,
+		"windowsReset": windowsReset,
+		"available":    available - 1,
+		"message":      fmt.Sprintf("Bank reset credit consumed for %s — %d rate-limit windows reset", account.Email, windowsReset),
 	})
 }
 
@@ -1771,22 +2361,15 @@ func (h *Handler) apiReauthAllBanned(w http.ResponseWriter, r *http.Request) {
 			skipped++
 			continue
 		}
-		// Try to refresh the OAuth token — if the refresh token is also dead,
-		// the account needs a full re-login via /auth/codex/login.
+		// Try to refresh the OAuth token. The helper commits only after a
+		// complete successful response, so a failed refresh leaves both token
+		// values and the account status untouched.
 		if a.RefreshToken != "" {
-			newAT, newRT, newExp, _, _, _, err := auth.RefreshAccountToken(a)
-			if err != nil {
+			if err := refreshCodexAccountToken(a); err != nil {
 				failed++
-				logger.Warnf("[apiReauthAllBanned] %s token refresh failed: %v — needs manual re-login", a.Email, err)
+				logger.Warnf("[apiReauthAllBanned] %s token refresh failed; account preserved: %v", a.Email, err)
 				continue
 			}
-			a.AccessToken = newAT
-			if newRT != "" {
-				a.RefreshToken = newRT
-			}
-			a.ExpiresAt = newExp
-			_ = config.UpdateAccountToken(a.ID, newAT, newRT, newExp)
-			h.pool.UpdateToken(a.ID, newAT, newRT, newExp)
 		}
 		// Refresh profile + usage so the UI shows fresh data. Do NOT
 		// clear ban — operator must press "Test" to verify recovery.
@@ -1795,7 +2378,7 @@ func (h *Handler) apiReauthAllBanned(w http.ResponseWriter, r *http.Request) {
 		if usageErr := fetchCodexUsage(a); usageErr != nil {
 			logger.Warnf("[apiReauthAllBanned] %s usage fetch failed: %v", a.Email, usageErr)
 		}
-		_ = config.UpdateAccount(a.ID, *a)
+		_ = config.UpdateAccountPreservingCredentials(a.ID, *a)
 		refreshed++
 	}
 	h.pool.Reload()
@@ -1829,6 +2412,11 @@ func (h *Handler) apiRefreshAccountToken(w http.ResponseWriter, r *http.Request,
 		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
 		return
 	}
+	if isServiceAccount(account) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "service accounts use API keys and cannot refresh OAuth tokens"})
+		return
+	}
 	if account.RefreshToken == "" {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Account has no refresh token"})
@@ -1847,12 +2435,16 @@ func (h *Handler) apiRefreshAccountToken(w http.ResponseWriter, r *http.Request,
 		json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
 		return
 	}
+	if err := config.UpdateAccountToken(id, newAccess, newRefresh, newExpires); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Could not persist refreshed token: " + err.Error()})
+		return
+	}
 	account.AccessToken = newAccess
 	if newRefresh != "" {
 		account.RefreshToken = newRefresh
 	}
 	account.ExpiresAt = newExpires
-	config.UpdateAccountToken(id, newAccess, newRefresh, newExpires)
 	h.pool.UpdateToken(id, newAccess, newRefresh, newExpires)
 	if profileArn != "" {
 		account.ProfileArn = profileArn
@@ -1864,9 +2456,104 @@ func (h *Handler) apiRefreshAccountToken(w http.ResponseWriter, r *http.Request,
 		refreshCodexAccountID(account)
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":           true,
-		"expiresAt":         newExpires,
-		"tokenRefreshedAt":  time.Now().Unix(),
+		"success":          true,
+		"expiresAt":        newExpires,
+		"tokenRefreshedAt": time.Now().Unix(),
+	})
+}
+
+// apiRestoreCodexRefreshToken POST /admin/api/accounts/{id}/restore-refresh-token
+// restores an existing Codex account from an operator-provided backup refresh
+// token. The supplied token is never persisted until OpenAI returns a valid
+// access token for the same ChatGPT account.
+func (h *Handler) apiRestoreCodexRefreshToken(w http.ResponseWriter, r *http.Request, id string) {
+	var req struct {
+		RefreshToken string `json:"refreshToken"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	req.RefreshToken = strings.TrimSpace(req.RefreshToken)
+	if req.RefreshToken == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Backup refresh token is required"})
+		return
+	}
+
+	accounts := config.GetAccounts()
+	var account *config.Account
+	for i := range accounts {
+		if accounts[i].ID == id {
+			account = &accounts[i]
+			break
+		}
+	}
+	if account == nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+	if !isCodexAccount(account) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Only Codex accounts support backup refresh-token recovery"})
+		return
+	}
+	if strings.TrimSpace(account.ChatGPTAccountID) == "" {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account has no ChatGPT account ID; backup token recovery cannot be verified safely"})
+		return
+	}
+
+	// Refresh using a copy so a failed upstream request cannot alter the
+	// existing account in memory or on disk.
+	candidate := *account
+	candidate.RefreshToken = req.RefreshToken
+	newAccessToken, newRefreshToken, newExpiresAt, _, _, _, err := auth.RefreshAccountToken(&candidate)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Backup token recovery failed: " + err.Error()})
+		return
+	}
+	if strings.TrimSpace(newAccessToken) == "" || newExpiresAt <= time.Now().Unix() {
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Backup token recovery returned an invalid access token"})
+		return
+	}
+	if newRefreshToken == "" {
+		newRefreshToken = req.RefreshToken
+	}
+
+	newAccountID := auth.ExtractCodexAccountIDPublic(newAccessToken)
+	if newAccountID == "" {
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Backup token recovery returned no ChatGPT account ID"})
+		return
+	}
+	if account.ChatGPTAccountID != newAccountID {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Backup token belongs to a different ChatGPT account; no changes were saved"})
+		return
+	}
+
+	// Persist the complete rotation before updating the pool. No token values
+	// are included in logs or the response.
+	if err := config.UpdateAccountToken(account.ID, newAccessToken, newRefreshToken, newExpiresAt); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Could not persist recovered token: " + err.Error()})
+		return
+	}
+	account.AccessToken = newAccessToken
+	account.RefreshToken = newRefreshToken
+	account.ExpiresAt = newExpiresAt
+	h.pool.UpdateToken(account.ID, newAccessToken, newRefreshToken, newExpiresAt)
+	refreshCodexAccountID(account)
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":          true,
+		"expiresAt":        newExpiresAt,
+		"tokenRefreshedAt": time.Now().Unix(),
 	})
 }
 
@@ -1899,6 +2586,9 @@ func mergeUniqueModels(existing []ModelInfo, incoming []ModelInfo) []ModelInfo {
 }
 
 func mergeModelInfo(base ModelInfo, extra ModelInfo) ModelInfo {
+	if base.Provider == "" {
+		base.Provider = extra.Provider
+	}
 	if base.ModelName == "" {
 		base.ModelName = extra.ModelName
 	}
@@ -1915,6 +2605,44 @@ func mergeModelInfo(base ModelInfo, extra ModelInfo) ModelInfo {
 	return base
 }
 
+// modelInfoTokenLimits resolves token limits for model discovery and CLI config.
+// Claude 5/Fable 5 limits are canonical because stale cache entries for these
+// models were the source of the incorrect context-window configuration. Other
+// models retain catalog metadata as the authority, with policy values filling
+// only missing fields.
+func modelInfoTokenLimits(info ModelInfo) (int, int, bool) {
+	policyInput, policyOutput, hasPolicy := policyModelLimits(info.ModelId)
+	input, output := policyInput, policyOutput
+	if info.TokenLimits != nil {
+		if info.TokenLimits.MaxInputTokens > 0 {
+			if !isCanonicalClaude5Model(info.ModelId) {
+				input = info.TokenLimits.MaxInputTokens
+			}
+		}
+		if info.TokenLimits.MaxOutputTokens > 0 {
+			if !isCanonicalClaude5Model(info.ModelId) {
+				output = info.TokenLimits.MaxOutputTokens
+			}
+		}
+	}
+	return input, output, input > 0 || output > 0 || hasPolicy
+}
+
+func isCanonicalClaude5Model(model string) bool {
+	model, _ = ParseModelAndThinking(model, "-thinking")
+	model = strings.ToLower(strings.TrimSpace(model))
+	return model == "claude-opus-5" || model == "claude-sonnet-5" || model == "claude-fable-5"
+}
+
+func modelTokenLimitsFromCatalog(catalog []ModelInfo, model string) (int, int, bool) {
+	for _, info := range catalog {
+		if strings.EqualFold(strings.TrimSpace(info.ModelId), model) {
+			return modelInfoTokenLimits(info)
+		}
+	}
+	return 0, 0, false
+}
+
 // contextWindowForModel returns the real per-model input-token window reported
 // by ListAvailableModels (maxInputTokens), used to convert the upstream
 // contextUsagePercentage into an absolute input-token count. Falls back to the
@@ -1924,20 +2652,158 @@ func mergeModelInfo(base ModelInfo, extra ModelInfo) ModelInfo {
 func (h *Handler) contextWindowForModel(model string) int {
 	base, _ := ParseModelAndThinking(model, "-thinking")
 	baseLower := strings.ToLower(strings.TrimSpace(base))
+	if input, _, ok := modelTokenLimitsFromCatalog(codexSubscriptionModels(), baseLower); ok && input > 0 {
+		return input
+	}
 
 	h.modelsCacheMu.RLock()
 	cached := h.cachedModels
 	h.modelsCacheMu.RUnlock()
 
-	for _, m := range cached {
-		if m.TokenLimits == nil || m.TokenLimits.MaxInputTokens <= 0 {
-			continue
-		}
-		if strings.ToLower(strings.TrimSpace(m.ModelId)) == baseLower {
-			return m.TokenLimits.MaxInputTokens
-		}
+	if input, _, ok := modelTokenLimitsFromCatalog(cached, baseLower); ok && input > 0 {
+		return input
 	}
 	return getContextWindowSize(model)
+}
+
+// modelTokenLimits resolves the limits already provided by the model catalog.
+// Agent configuration uses the same metadata as runtime context accounting so
+// selecting a model cannot leave stale limits from the previously selected one.
+func (h *Handler) modelTokenLimits(model string) (int, int, bool) {
+	model = strings.TrimSpace(model)
+	if idx := strings.IndexByte(model, '/'); idx >= 0 {
+		model = strings.TrimSpace(model[idx+1:])
+	}
+	base, _ := ParseModelAndThinking(model, "-thinking")
+	baseLower := strings.ToLower(strings.TrimSpace(base))
+	if baseLower == "" {
+		return 0, 0, false
+	}
+	// Subscription model metadata is canonical. In particular, do not allow a
+	// stale discovery-cache entry to downgrade Luna from 200K to 200 tokens.
+	if input, output, ok := modelTokenLimitsFromCatalog(codexSubscriptionModels(), baseLower); ok {
+		return input, output, true
+	}
+	h.modelsCacheMu.RLock()
+	cached := h.cachedModels
+	h.modelsCacheMu.RUnlock()
+	if input, output, ok := modelTokenLimitsFromCatalog(cached, baseLower); ok {
+		return input, output, true
+	}
+	if input, output, ok := policyModelLimits(baseLower); ok {
+		return input, output, true
+	}
+	return 0, 0, false
+}
+
+// upsertYAMLAuxiliaryModels routes every model-backed Hermes auxiliary task
+// through the same OmniProxy endpoint while retaining task-specific options
+// such as timeout, extra_body, and download_timeout.
+func upsertYAMLAuxiliaryModels(raw, baseURL, apiKey string) string {
+	slots := []string{"vision", "web_extract", "compression", "skills_hub", "approval", "mcp", "title_generation", "triage_specifier", "kanban_decomposer", "profile_describer", "curator"}
+	if strings.TrimSpace(raw) == "" {
+		return "auxiliary:\n" + auxiliaryModelBlocks(baseURL, apiKey, slots)
+	}
+
+	lines := strings.Split(raw, "\n")
+	auxIdx := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "auxiliary:" && len(line)-len(strings.TrimLeft(line, " ")) == 0 {
+			auxIdx = i
+			break
+		}
+	}
+	if auxIdx < 0 {
+		return strings.TrimRight(raw, "\n") + "\nauxiliary:\n" + auxiliaryModelBlocks(baseURL, apiKey, slots)
+	}
+
+	// These are the model-backed auxiliary tasks in Hermes' DEFAULT_CONFIG.
+	// web.search_backend and web.extract_backend remain adapters; only the
+	// optional LLM call made by auxiliary.web_extract is routed here.
+	for _, slot := range slots {
+		start := -1
+		for i := auxIdx + 1; i < len(lines); i++ {
+			indent := len(lines[i]) - len(strings.TrimLeft(lines[i], " "))
+			trimmed := strings.TrimSpace(lines[i])
+			if trimmed != "" && indent == 0 {
+				break
+			}
+			if indent == 2 && trimmed == slot+":" {
+				start = i
+				break
+			}
+		}
+		if start < 0 {
+			insertAt := len(lines)
+			for i := auxIdx + 1; i < len(lines); i++ {
+				indent := len(lines[i]) - len(strings.TrimLeft(lines[i], " "))
+				if strings.TrimSpace(lines[i]) != "" && indent == 0 {
+					insertAt = i
+					break
+				}
+			}
+			block := strings.Split(strings.TrimRight(auxiliaryModelBlockForSlot(baseURL, apiKey, slot), "\n"), "\n")
+			lines = append(lines[:insertAt], append(block, lines[insertAt:]...)...)
+			continue
+		}
+		end := len(lines)
+		for i := start + 1; i < len(lines); i++ {
+			indent := len(lines[i]) - len(strings.TrimLeft(lines[i], " "))
+			if strings.TrimSpace(lines[i]) != "" && indent <= 2 {
+				end = i
+				break
+			}
+		}
+		block := strings.Split(strings.TrimRight(auxiliaryModelBlockForSlot(baseURL, apiKey, slot), "\n"), "\n")
+		// Preserve every existing option except the four routing keys. Keep
+		// nested extra_body/provider values by filtering only direct slot keys.
+		for _, line := range lines[start+1 : end] {
+			indent := len(line) - len(strings.TrimLeft(line, " "))
+			trimmed := strings.TrimSpace(line)
+			if indent == 4 && (strings.HasPrefix(trimmed, "provider:") || strings.HasPrefix(trimmed, "model:") || strings.HasPrefix(trimmed, "base_url:") || strings.HasPrefix(trimmed, "api_key:")) {
+				continue
+			}
+			block = append(block, line)
+		}
+		lines = append(lines[:start], append(block, lines[end:]...)...)
+	}
+	return strings.TrimRight(strings.Join(lines, "\n"), "\n") + "\n"
+}
+
+func auxiliaryModelBlockForSlot(baseURL, apiKey, slot string) string {
+	return fmt.Sprintf("  %s:\n    provider: omniproxy\n    model: %s\n    base_url: %s\n    api_key: %s\n", slot, defaultAgentModel, yamlQuoteIfNeeded(baseURL), yamlQuoteIfNeeded(apiKey))
+}
+
+func auxiliaryModelBlocks(baseURL, apiKey string, slots []string) string {
+	var out strings.Builder
+	for _, slot := range slots {
+		out.WriteString(auxiliaryModelBlockForSlot(baseURL, apiKey, slot))
+	}
+	return out.String()
+}
+
+func hermesModelID(model string) string {
+	return openClawModelID(model)
+}
+
+func hermesProviderBlock(baseURL, apiKey string, catalog []ModelInfo) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "  omniproxy:\n    base_url: %s\n    api_key: %s\n    api_mode: openai\n    discover_models: false\n    models:\n", yamlQuoteIfNeeded(baseURL), yamlQuoteIfNeeded(apiKey))
+	for _, info := range catalog {
+		id := hermesModelID(info.ModelId)
+		if id == "" {
+			continue
+		}
+		input, output, ok := modelInfoTokenLimits(info)
+		fmt.Fprintf(&b, "      %s:\n", yamlQuoteIfNeeded(id))
+		if ok && input > 0 {
+			fmt.Fprintf(&b, "        context_length: %d\n", input)
+		}
+		if ok && output > 0 {
+			fmt.Fprintf(&b, "        max_tokens: %d\n", output)
+		}
+	}
+	return b.String()
 }
 
 func mergeStringLists(base []string, extra []string) []string {
@@ -2070,57 +2936,6 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	}
 }
 
-// shouldFallbackToSol returns true if the given model is a Claude model
-// (not already gpt-5.6-sol) and the Claude→Sol fallback is enabled in config.
-// Used to decide whether to retry a failed Claude request with gpt-5.6-sol.
-func shouldFallbackToSol(model string) bool {
-	if !config.GetClaudeSolFallback() {
-		return false
-	}
-	m := strings.ToLower(strings.TrimSpace(model))
-	if m == "" {
-		return false
-	}
-	// Already a Sol/GPT model — don't fallback to self
-	if strings.Contains(m, "gpt-5.6") || strings.Contains(m, "gpt-5-6") {
-		return false
-	}
-	// Any Claude model (opus/sonnet/haiku) qualifies for fallback
-	return strings.Contains(m, "claude") ||
-		strings.Contains(m, "opus") ||
-		strings.Contains(m, "sonnet") ||
-		strings.Contains(m, "haiku")
-}
-
-// clonePayloadForSolFallback deep-copies a KiroPayload and rewrites all model
-// IDs to gpt-5.6-sol, so the fallback request routes to Codex/external OpenAI
-// accounts. The context window is implicitly adjusted: gpt-5.6-sol has 300K
-// input / 128K output (vs Claude 4.8's 1M / 128K), and getContextWindowSize
-// already returns the correct value for non-Claude models.
-func clonePayloadForSolFallback(payload *KiroPayload) *KiroPayload {
-	if payload == nil {
-		return nil
-	}
-	data, err := json.Marshal(payload)
-	if err != nil {
-		logger.Warnf("[ClaudeSolFallback] failed to marshal payload for clone: %v", err)
-		return payload
-	}
-	var clone KiroPayload
-	if err := json.Unmarshal(data, &clone); err != nil {
-		logger.Warnf("[ClaudeSolFallback] failed to unmarshal payload clone: %v", err)
-		return payload
-	}
-	clone.OriginalModel = "gpt-5.6-sol"
-	clone.ConversationState.CurrentMessage.UserInputMessage.ModelID = "gpt-5.6-sol"
-	for i := range clone.ConversationState.History {
-		if clone.ConversationState.History[i].UserInputMessage != nil {
-			clone.ConversationState.History[i].UserInputMessage.ModelID = "gpt-5.6-sol"
-		}
-	}
-	return &clone
-}
-
 // handleClaudeStream handles Claude streaming response
 func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
@@ -2141,12 +2956,10 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	excluded := make(map[string]bool)
 	var lastErr error
 	messageStarted := false
-	var messageStartUsage promptCacheUsage
-	// realCacheRead holds the upstream-reported prompt-cache hit count
-	// (Kiro cacheReadInputTokens or OpenAI cached_tokens). When > 0, it
-	// overrides the locally-simulated promptCacheTracker numbers in the
-	// final usage so the client sees the real cache behaviour.
+	// Upstream cache values are populated only after the provider emits usage.
+	// The message_start event therefore must not expose the local estimate.
 	realCacheRead := 0
+	realCacheCreate := 0
 
 	ensureMessageStart := func() {
 		if messageStarted {
@@ -2162,7 +2975,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				"model":         model,
 				"stop_reason":   nil,
 				"stop_sequence": nil,
-				"usage":         buildClaudeUsageMap(startInputTokens, 0, messageStartUsage, cacheProfile != nil),
+				"usage":         buildClaudeUsageMap(startInputTokens, 0, promptCacheUsage{}, false),
 			},
 		})
 		messageStarted = true
@@ -2193,18 +3006,22 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		if !isExternalAccount(account) {
 			cacheUsage = h.promptCache.Compute(account.ID, cacheProfile)
 		}
-		messageStartUsage = cacheUsage
-
 		var inputTokens, outputTokens int
 		var credits float64
 		var realInputTokens int
 		var toolUses []KiroToolUse
+		stopReason := "end_turn"
+		// This tracks output from the upstream callback before any downstream
+		// coalescing. Once output has escaped the upstream, retrying would replay
+		// the prefix and make claude-cli request a manual continue.
+		upstreamProduced := false
 		var nextContentIndex int
 		var rawContentBuilder strings.Builder
 		var rawThinkingBuilder strings.Builder
 		activeBlockIndex := -1
 		activeBlockType := ""
 		realCacheRead = 0 // reset per-attempt; only the successful attempt's count is used
+		realCacheCreate = 0
 
 		closeActiveBlock := func() {
 			if activeBlockIndex < 0 {
@@ -2398,12 +3215,22 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 
 			for {
 				if !inThinkingBlock {
+					// Detect both <thinking> (long) and <think> (short) open tags.
 					thinkingStart := strings.Index(textBuffer, "<thinking>")
-					if thinkingStart != -1 {
-						if thinkingStart > 0 {
-							sendText(textBuffer[:thinkingStart], 0)
+					thinkStart := strings.Index(textBuffer, "<think>")
+					var openPos, openTagLen int
+					if thinkingStart != -1 && (thinkStart == -1 || thinkingStart < thinkStart) {
+						openPos, openTagLen = thinkingStart, 10
+					} else if thinkStart != -1 {
+						openPos, openTagLen = thinkStart, 6
+					} else {
+						openPos, openTagLen = -1, 0
+					}
+					if openPos != -1 {
+						if openPos > 0 {
+							sendText(textBuffer[:openPos], 0)
 						}
-						textBuffer = textBuffer[thinkingStart+10:]
+						textBuffer = textBuffer[openPos+openTagLen:]
 						inThinkingBlock = true
 						dropTagThinking = !allowTagSource(&thinkingSource)
 						thinkingStarted = false
@@ -2422,9 +3249,19 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 						break
 					}
 				} else {
+					// Detect both </thinking> (long) and </think> (short) close tags.
 					thinkingEnd := strings.Index(textBuffer, "</thinking>")
-					if thinkingEnd != -1 {
-						content := textBuffer[:thinkingEnd]
+					thinkEnd := strings.Index(textBuffer, "</think>")
+					var closePos, closeTagLen int
+					if thinkingEnd != -1 && (thinkEnd == -1 || thinkingEnd < thinkEnd) {
+						closePos, closeTagLen = thinkingEnd, 11
+					} else if thinkEnd != -1 {
+						closePos, closeTagLen = thinkEnd, 7
+					} else {
+						closePos, closeTagLen = -1, 0
+					}
+					if closePos != -1 {
+						content := textBuffer[:closePos]
 						if !dropTagThinking {
 							if !thinkingStarted {
 								sendText(content, 1)
@@ -2433,7 +3270,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 								sendText(content, 3)
 							}
 						}
-						textBuffer = textBuffer[thinkingEnd+11:]
+						textBuffer = textBuffer[closePos+closeTagLen:]
 						inThinkingBlock = false
 						dropTagThinking = false
 						thinkingStarted = false
@@ -2476,10 +3313,14 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		}
 
 		callback := &KiroStreamCallback{
+			OnOutput: func() {
+				upstreamProduced = true
+			},
 			OnText: func(text string, isThinking bool) {
 				if text == "" {
 					return
 				}
+				upstreamProduced = true
 				if isThinking {
 					rawThinkingBuilder.WriteString(text)
 				} else {
@@ -2488,6 +3329,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				processClaudeText(text, isThinking, false)
 			},
 			OnToolUse: func(tu KiroToolUse) {
+				upstreamProduced = true
 				processClaudeText("", false, true)
 				rawContentBuilder.WriteString(tu.Name)
 				if b, err := json.Marshal(tu.Input); err == nil {
@@ -2531,6 +3373,11 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				inputTokens = inTok
 				outputTokens = outTok
 			},
+			OnStopReason: func(reason string) {
+				if reason != "" {
+					stopReason = reason
+				}
+			},
 			OnCredits: func(c float64) {
 				credits = c
 			},
@@ -2542,6 +3389,11 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 					realCacheRead = cachedTokens
 				}
 			},
+			OnCacheCreate: func(cacheCreateTokens int) {
+				if cacheCreateTokens > realCacheCreate {
+					realCacheCreate = cacheCreateTokens
+				}
+			},
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointClaude, model)
@@ -2551,26 +3403,47 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		effectiveCallback := callback
 		if isCodexAccount(account) {
 			effectiveCallback = newCodexCoalescer(callback)
-			h.warmAccountCache(account, payload, cacheKey)
 		}
 		err := dispatchChat(account, payload, effectiveCallback)
 		if err != nil {
 			lastErr = err
+			if upstreamProduced {
+				// The response is already visible to the client. Retrying would
+				// replay the prefix, so terminate this SSE turn in place. The
+				// coalescer may still hold the last tokens and must be flushed
+				// before the error event is sent.
+				if effectiveCallback.OnError != nil {
+					effectiveCallback.OnError(err)
+				}
+				h.usageTracker.RemoveActive(account.ID)
+				processClaudeText("", false, true)
+				if eventThinkingOpen {
+					sendText("", 3)
+				}
+				closeActiveBlock()
+				ensureMessageStart()
+				h.recordFailure()
+				h.sendSSE(w, flusher, "error", map[string]interface{}{
+					"type":  "error",
+					"error": map[string]string{"type": "api_error", "message": err.Error()},
+				})
+				return
+			}
 			// Transient upstream errors (5xx, overload, timeout) are retried
 			// in-place with backoff before rotating to a different account.
 			if h.tryTransientRetry(account, payload, effectiveCallback, err) {
 				h.pool.RecordSuccess(account.ID, model)
-			if cacheKey != "" {
-				h.pool.RecordCacheStickiness(cacheKey, account.ID)
-			}
+				if cacheKey != "" {
+					h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
+				}
 				goto skipAccountHandling
 			}
 			//  try refresh+retry before rotating accounts
 			if h.tryRefreshAndRetry(account, payload, effectiveCallback, err) {
 				h.pool.RecordSuccess(account.ID, model)
-			if cacheKey != "" {
-				h.pool.RecordCacheStickiness(cacheKey, account.ID)
-			}
+				if cacheKey != "" {
+					h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
+				}
 				// Retry succeeded, proceed to success path
 				goto skipAccountHandling
 			}
@@ -2618,38 +3491,26 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			outputTokens = estimateClaudeOutputTokens(outputContent, thinkingOutput, toolUses)
 		}
 
-		// When the upstream provider reports a real prompt-cache hit, prefer it
-		// over the locally-simulated promptCacheTracker numbers. The simulated
-		// tracker is a fallback for providers that don't emit cache fields.
-		effectiveCacheUsage := cacheUsage
-		if realCacheRead > 0 {
-			effectiveCacheUsage = promptCacheUsage{
-				CacheReadInputTokens: realCacheRead,
-				// Real cache_read implies the prefix was created on an earlier
-				// turn — report 0 creation on this turn so the client doesn't
-				// double-count. The 5m/1h breakdown is unknown from a bare
-				// cached_tokens count, leave zero.
-				CacheCreationInputTokens:   maxInt(cacheUsage.CacheCreationInputTokens-realCacheRead, 0),
-				CacheCreation5mInputTokens: 0,
-				CacheCreation1hInputTokens: 0,
-			}
+		upstreamCacheUsage := promptCacheUsage{
+			CacheReadInputTokens:     realCacheRead,
+			CacheCreationInputTokens: realCacheCreate,
 		}
-
-		h.recordUsage(apiKeyID, account.ID, model, endpointClaude, inputTokens, outputTokens, credits, effectiveCacheUsage.CacheReadInputTokens, effectiveCacheUsage.CacheCreationInputTokens, 0)
+		h.recordUsageWithCache(apiKeyID, account.ID, model, endpointClaude, inputTokens, outputTokens, credits, cacheUsageTelemetry{
+			ReadTokens:            realCacheRead,
+			CreateTokens:          realCacheCreate,
+			EstimatedReadTokens:   cacheUsage.CacheReadInputTokens,
+			EstimatedCreateTokens: cacheUsage.CacheCreationInputTokens,
+		})
 		h.pool.RecordSuccess(account.ID, model)
-			if cacheKey != "" {
-				h.pool.RecordCacheStickiness(cacheKey, account.ID)
-			}
-		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
-		// Only feed the simulator when we did NOT get real numbers — otherwise
-		// we'd poison the tracker with synthetic fingerprints for a turn whose
-		// cache state was already authoritative upstream.
-		if realCacheRead == 0 {
-			h.promptCache.Update(account.ID, cacheProfile)
+		if cacheKey != "" {
+			h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
 		}
+		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		// Keep the tracker as a prediction/affinity aid. Its values are never
+		// used as client-facing or billed cache usage.
+		h.promptCache.Update(account.ID, cacheProfile)
 
-		stopReason := "end_turn"
-		if len(toolUses) > 0 {
+		if len(toolUses) > 0 && stopReason == "end_turn" {
 			stopReason = "tool_use"
 		}
 
@@ -2659,26 +3520,12 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			"delta": map[string]interface{}{
 				"stop_reason": stopReason,
 			},
-			"usage": buildClaudeUsageMap(inputTokens, outputTokens, effectiveCacheUsage, cacheProfile != nil || realCacheRead > 0),
+			"usage": buildClaudeUsageMap(inputTokens, outputTokens, upstreamCacheUsage, realCacheRead > 0 || realCacheCreate > 0),
 		})
 
 		h.sendSSE(w, flusher, "message_stop", map[string]interface{}{
 			"type": "message_stop",
 		})
-		return
-	}
-
-	// Claude→Sol fallback: if no Claude account was available and nothing has
-	// been sent to the client yet, retry the entire request with gpt-5.6-sol.
-	// The context window is adjusted automatically by getContextWindowSize
-	// (300K for Sol vs 1M for Claude 4.8+), and the payload model IDs are
-	// rewritten so the request routes to Codex/external OpenAI accounts.
-	if !messageStarted && shouldFallbackToSol(model) {
-		logger.Warnf("[CLAUDE-STREAM] fallback: %s → gpt-5.6-sol (no Claude accounts available, lastErr=%v)", model, lastErr)
-		fbPayload := clonePayloadForSolFallback(payload)
-		// Disable thinking for Sol — gpt-5.6-sol handles reasoning natively
-		// and the Claude thinking format would produce invalid SSE blocks.
-		h.handleClaudeStream(w, fbPayload, "gpt-5.6-sol", false, thinkingOpts, estimatedInputTokens, cacheProfile, apiKeyID)
 		return
 	}
 
@@ -2840,103 +3687,52 @@ func payloadCodexInstructions(payload *KiroPayload) string {
 	return ""
 }
 
-// payloadModelID extracts the canonical model ID for the request, after
-// internal-prefix stripping and external-model resolution. Used by the
-// cache warmer so the warmup request targets the same model as the real
-// request (cache is per-model on the backend).
-func payloadModelID(payload *KiroPayload, account *config.Account) string {
-	if payload == nil {
-		return "gpt-5.6-sol"
-	}
-	modelID := strings.TrimSpace(payload.OriginalModel)
-	if modelID == "" {
-		modelID = strings.TrimSpace(payload.ConversationState.CurrentMessage.UserInputMessage.ModelID)
-	}
-	if modelID == "" {
-		modelID = "gpt-5.6-sol"
-	}
-	modelID = stripInternalModelPrefix(modelID)
-	if account != nil {
-		modelID = resolveExternalModelID(account, modelID)
-	}
-	return modelID
+type cacheUsageTelemetry struct {
+	ReadTokens            int
+	CreateTokens          int
+	CachedTokens          int
+	EstimatedReadTokens   int
+	EstimatedCreateTokens int
 }
 
-// warmAccountCache sends a warmup request to the given account so the
-// upstream prompt cache writes the instructions prefix. Skipped when:
-//   - the account is already warmed for this cacheKey (dedup)
-//   - there is no instructions prefix (cache won't work anyway)
-//   - the instructions are too short (< 1024 tokens — backend won't cache)
-//   - the account is not a Codex account (warming is Codex-specific)
-//   - a warmup is already in progress for this account+cacheKey (dedup)
-//
-// Warming is ASYNC (non-blocking): the real request proceeds immediately
-// and may miss cache on the first hit. Subsequent requests will hit
-// because the warmup completes in the background (~1-3s). This trades a
-// single cache miss for better latency (no 1-3s blocking).
-func (h *Handler) warmAccountCache(account *config.Account, payload *KiroPayload, cacheKey string) {
-	if account == nil || cacheKey == "" {
-		return
-	}
-	if account.AuthMethod != codexAuthMethod {
-		return // warming is Codex-specific
-	}
-	if h.pool.IsCacheWarmed(account.ID, cacheKey) {
-		return // already warmed — skip to save tokens + rate-limit budget
-	}
-	if h.pool.IsCacheWarming(account.ID, cacheKey) {
-		return // warmup in progress — don't start a duplicate
-	}
-	instructions := payloadCodexInstructions(payload)
-	if instructions == "" {
-		return // no instructions prefix → cache won't work, skip warming
-	}
-	// Token threshold: backend only caches prefixes >= 1024 tokens.
-	// Rough estimate: ~4 chars per token. Skip warming for short prompts
-	// to avoid wasting rate-limit budget on requests that won't cache.
-	if len(instructions) < 1024*4 {
-		return
-	}
-	modelID := payloadModelID(payload, account)
-
-	// Mark as warming BEFORE starting the goroutine to prevent duplicate
-	// warmups from concurrent requests to the same account+cacheKey.
-	h.pool.MarkCacheWarming(account.ID, cacheKey)
-
-	// Async warmup: fire and forget. The real request proceeds without
-	// waiting. This avoids the 1-3s latency hit of sync warming.
-	go func() {
-		if err := WarmCodexCache(account, instructions, modelID, cacheKey); err != nil {
-			logger.Warnf("[CacheWarm] failed for account=%s cacheKey=%s: %v", account.Email, cacheKey, err)
-			h.pool.ClearCacheWarming(account.ID, cacheKey) // allow retry on next request
-			return
-		}
-		h.pool.MarkCacheWarmed(account.ID, cacheKey)
-		h.pool.ClearCacheWarming(account.ID, cacheKey)
-		logger.Warnf("[CacheWarm] warmed account=%s cacheKey=%s model=%s", account.Email, cacheKey, modelID)
-	}()
-}
-
+// recordUsage keeps the legacy call shape for non-chat service endpoints.
+// Chat handlers should use recordUsageWithCache so upstream cache telemetry is
+// explicitly separated from local estimates.
 func (h *Handler) recordUsage(apiKeyID, accountID, model, endpoint string, inputTokens, outputTokens int, credits float64, cacheRead, cacheCreate, cachedTokens int) {
+	h.recordUsageWithCache(apiKeyID, accountID, model, endpoint, inputTokens, outputTokens, credits, cacheUsageTelemetry{
+		ReadTokens:   cacheRead,
+		CreateTokens: cacheCreate,
+		CachedTokens: cachedTokens,
+	})
+}
+
+func (h *Handler) recordUsageWithCache(apiKeyID, accountID, model, endpoint string, inputTokens, outputTokens int, credits float64, cache cacheUsageTelemetry) {
 	h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
 	if h.usageTracker == nil {
 		return
 	}
 	provider, accountName := resolveAccountMeta(accountID)
 	rec := RequestRecord{
-		Model:             model,
-		Provider:          provider,
-		AccountID:         accountID,
-		AccountName:       accountName,
-		InputTokens:       inputTokens,
-		OutputTokens:      outputTokens,
-		Cost:              credits,
-		Status:            statusSuccess,
-		Endpoint:          endpoint,
-		APIKeyID:          apiKeyID,
-		CacheReadTokens:   cacheRead,
-		CacheCreateTokens: cacheCreate,
-		CachedTokens:      cachedTokens,
+		Model:                      model,
+		Provider:                   provider,
+		AccountID:                  accountID,
+		AccountName:                accountName,
+		InputTokens:                inputTokens,
+		OutputTokens:               outputTokens,
+		Cost:                       credits,
+		Status:                     statusSuccess,
+		Endpoint:                   endpoint,
+		APIKeyID:                   apiKeyID,
+		CacheReadTokens:            maxInt(cache.ReadTokens, 0),
+		CacheCreateTokens:          maxInt(cache.CreateTokens, 0),
+		CachedTokens:               maxInt(cache.CachedTokens, 0),
+		EstimatedCacheReadTokens:   maxInt(cache.EstimatedReadTokens, 0),
+		EstimatedCacheCreateTokens: maxInt(cache.EstimatedCreateTokens, 0),
+	}
+	if rec.CacheReadTokens > 0 || rec.CacheCreateTokens > 0 || rec.CachedTokens > 0 {
+		rec.CacheSource = "upstream"
+	} else if rec.EstimatedCacheReadTokens > 0 || rec.EstimatedCacheCreateTokens > 0 {
+		rec.CacheSource = "estimated"
 	}
 	h.usageTracker.Append(rec)
 }
@@ -3025,13 +3821,28 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		var inputTokens, outputTokens int
 		var credits float64
 		var realInputTokens int
-		// realCacheRead captures the upstream-reported prompt-cache hit
-		// count (Kiro cacheReadInputTokens or OpenAI cached_tokens). When
-		// > 0 it overrides the simulated cacheUsage in the response.
 		realCacheRead := 0
+		realCacheCreate := 0
+		attemptProduced := false
+		resetAttempt := func() {
+			content = ""
+			thinkingContent = ""
+			toolUses = nil
+			inputTokens = 0
+			outputTokens = 0
+			credits = 0
+			realInputTokens = 0
+			realCacheRead = 0
+			realCacheCreate = 0
+			attemptProduced = false
+		}
 
 		callback := &KiroStreamCallback{
+			OnOutput:  func() { attemptProduced = true },
+			HasOutput: func() bool { return attemptProduced },
+			OnReset:   resetAttempt,
 			OnText: func(text string, isThinking bool) {
+				attemptProduced = true
 				if isThinking {
 					thinkingContent += text
 				} else {
@@ -3039,6 +3850,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 				}
 			},
 			OnToolUse: func(tu KiroToolUse) {
+				attemptProduced = true
 				toolUses = append(toolUses, tu)
 			},
 			OnComplete: func(inTok, outTok int) {
@@ -3056,12 +3868,14 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 					realCacheRead = cachedTokens
 				}
 			},
+			OnCacheCreate: func(cacheCreateTokens int) {
+				if cacheCreateTokens > realCacheCreate {
+					realCacheCreate = cacheCreateTokens
+				}
+			},
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointClaude, model)
-		if isCodexAccount(account) {
-			h.warmAccountCache(account, payload, cacheKey)
-		}
 		err := dispatchChat(account, payload, callback)
 		if err != nil {
 			lastErr = err
@@ -3069,9 +3883,9 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			// in-place with backoff before rotating to a different account.
 			if h.tryTransientRetry(account, payload, callback, err) {
 				h.pool.RecordSuccess(account.ID, model)
-			if cacheKey != "" {
-				h.pool.RecordCacheStickiness(cacheKey, account.ID)
-			}
+				if cacheKey != "" {
+					h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
+				}
 				goto skipNonStreamHandling
 			}
 			//  try refresh+retry before rotating accounts
@@ -3111,26 +3925,22 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			outputTokens = estimateClaudeOutputTokens(finalContent, rawThinkingContent, toolUses)
 		}
 
-		// Prefer upstream-reported cache hit over the simulated tracker.
-		effectiveCacheUsage := cacheUsage
-		if realCacheRead > 0 {
-			effectiveCacheUsage = promptCacheUsage{
-				CacheReadInputTokens:       realCacheRead,
-				CacheCreationInputTokens:   maxInt(cacheUsage.CacheCreationInputTokens-realCacheRead, 0),
-				CacheCreation5mInputTokens: 0,
-				CacheCreation1hInputTokens: 0,
-			}
+		upstreamCacheUsage := promptCacheUsage{
+			CacheReadInputTokens:     realCacheRead,
+			CacheCreationInputTokens: realCacheCreate,
 		}
-
-		h.recordUsage(apiKeyID, account.ID, model, endpointClaude, inputTokens, outputTokens, credits, effectiveCacheUsage.CacheReadInputTokens, effectiveCacheUsage.CacheCreationInputTokens, 0)
+		h.recordUsageWithCache(apiKeyID, account.ID, model, endpointClaude, inputTokens, outputTokens, credits, cacheUsageTelemetry{
+			ReadTokens:            realCacheRead,
+			CreateTokens:          realCacheCreate,
+			EstimatedReadTokens:   cacheUsage.CacheReadInputTokens,
+			EstimatedCreateTokens: cacheUsage.CacheCreationInputTokens,
+		})
 		h.pool.RecordSuccess(account.ID, model)
-			if cacheKey != "" {
-				h.pool.RecordCacheStickiness(cacheKey, account.ID)
-			}
-		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
-		if realCacheRead == 0 {
-			h.promptCache.Update(account.ID, cacheProfile)
+		if cacheKey != "" {
+			h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
 		}
+		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.promptCache.Update(account.ID, cacheProfile)
 
 		responseThinkingContent := rawThinkingContent
 		includeEmptyThinkingBlock := thinking && thinkingOpts.OmitDisplay && rawThinkingContent != ""
@@ -3151,26 +3961,17 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 
 		resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, model)
-		resp.Usage.InputTokens = billedClaudeInputTokens(inputTokens, effectiveCacheUsage)
-		resp.Usage.CacheCreationInputTokens = effectiveCacheUsage.CacheCreationInputTokens
-		resp.Usage.CacheReadInputTokens = effectiveCacheUsage.CacheReadInputTokens
-		if cacheProfile != nil || realCacheRead > 0 {
+		resp.Usage.InputTokens = billedClaudeInputTokens(inputTokens, upstreamCacheUsage)
+		resp.Usage.CacheCreationInputTokens = upstreamCacheUsage.CacheCreationInputTokens
+		resp.Usage.CacheReadInputTokens = upstreamCacheUsage.CacheReadInputTokens
+		if realCacheRead > 0 || realCacheCreate > 0 {
 			resp.Usage.CacheCreation = &ClaudeCacheCreationUsage{
-				Ephemeral5mInputTokens: effectiveCacheUsage.CacheCreation5mInputTokens,
-				Ephemeral1hInputTokens: effectiveCacheUsage.CacheCreation1hInputTokens,
+				Ephemeral5mInputTokens: upstreamCacheUsage.CacheCreation5mInputTokens,
+				Ephemeral1hInputTokens: upstreamCacheUsage.CacheCreation1hInputTokens,
 			}
 		}
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		json.NewEncoder(w).Encode(resp)
-		return
-	}
-
-	// Claude→Sol fallback: if no Claude account was available, retry with
-	// gpt-5.6-sol. Context window is adjusted automatically (300K for Sol).
-	if shouldFallbackToSol(model) {
-		logger.Warnf("[CLAUDE-NONSTREAM] fallback: %s → gpt-5.6-sol (no Claude accounts available, lastErr=%v)", model, lastErr)
-		fbPayload := clonePayloadForSolFallback(payload)
-		h.handleClaudeNonStream(w, fbPayload, "gpt-5.6-sol", false, thinkingOpts, estimatedInputTokens, cacheProfile, apiKeyID)
 		return
 	}
 
@@ -3303,6 +4104,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	// When > 0 it is reported to the client via prompt_tokens_details.cached_tokens
 	// in the terminal usage chunk so the client sees the real cache behaviour.
 	realCacheRead := 0
+	realCacheCreate := 0
 
 	cacheKey := payloadCacheKey(payload)
 	for attempt := 0; ; attempt++ {
@@ -3337,6 +4139,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		var eventThinkingOpen bool
 		responseStarted := false
 		realCacheRead = 0 // reset per-attempt
+		realCacheCreate = 0
 
 		sendChunk := func(content string, thinkingState int) {
 			if content == "" && thinkingState == 2 {
@@ -3543,10 +4346,12 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		}
 
 		callback := &KiroStreamCallback{
+			OnOutput: func() { responseStarted = true },
 			OnText: func(text string, isThinking bool) {
 				if text == "" {
 					return
 				}
+				responseStarted = true
 				if isThinking {
 					rawReasoningBuilder.WriteString(text)
 				} else {
@@ -3555,6 +4360,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				processText(text, isThinking, false)
 			},
 			OnToolUse: func(tu KiroToolUse) {
+				responseStarted = true
 				processText("", false, true)
 
 				args, _ := json.Marshal(tu.Input)
@@ -3607,6 +4413,11 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 					realCacheRead = cachedTokens
 				}
 			},
+			OnCacheCreate: func(cacheCreateTokens int) {
+				if cacheCreateTokens > realCacheCreate {
+					realCacheCreate = cacheCreateTokens
+				}
+			},
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointOpenAI, model)
@@ -3615,26 +4426,29 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		effectiveCallback := callback
 		if isCodexAccount(account) {
 			effectiveCallback = newCodexCoalescer(callback)
-			h.warmAccountCache(account, payload, cacheKey)
 		}
 		err := dispatchChat(account, payload, effectiveCallback)
 		if err != nil {
 			lastErr = err
 			// Transient upstream errors (5xx, overload, timeout) are retried
 			// in-place with backoff before rotating to a different account.
-			if h.tryTransientRetry(account, payload, effectiveCallback, err) {
+			// A stream cannot be retried once any output has been produced. The
+			// client may already have received the prefix (or the Codex
+			// coalescer may still hold it), so retrying would replay that prefix
+			// and leave Claude CLI waiting for a continuation.
+			if !responseStarted && h.tryTransientRetry(account, payload, effectiveCallback, err) {
 				h.pool.RecordSuccess(account.ID, model)
-			if cacheKey != "" {
-				h.pool.RecordCacheStickiness(cacheKey, account.ID)
-			}
+				if cacheKey != "" {
+					h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
+				}
 				goto skipOpenAIStreamHandling
 			}
 			//  try refresh+retry before rotating accounts
-			if h.tryRefreshAndRetry(account, payload, effectiveCallback, err) {
+			if !responseStarted && h.tryRefreshAndRetry(account, payload, effectiveCallback, err) {
 				h.pool.RecordSuccess(account.ID, model)
-			if cacheKey != "" {
-				h.pool.RecordCacheStickiness(cacheKey, account.ID)
-			}
+				if cacheKey != "" {
+					h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
+				}
 				goto skipOpenAIStreamHandling
 			}
 			h.usageTracker.RemoveActive(account.ID)
@@ -3689,11 +4503,14 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			}
 		}
 
-		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits, 0, 0, realCacheRead)
+		h.recordUsageWithCache(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits, cacheUsageTelemetry{
+			CreateTokens: realCacheCreate,
+			CachedTokens: realCacheRead,
+		})
 		h.pool.RecordSuccess(account.ID, model)
-			if cacheKey != "" {
-				h.pool.RecordCacheStickiness(cacheKey, account.ID)
-			}
+		if cacheKey != "" {
+			h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
+		}
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
 		finishReason := "stop"
@@ -3770,16 +4587,37 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		var credits float64
 		var realInputTokens int
 		realCacheRead := 0
+		realCacheCreate := 0
+		attemptProduced := false
+		resetAttempt := func() {
+			content = ""
+			reasoningContent = ""
+			toolUses = nil
+			inputTokens = 0
+			outputTokens = 0
+			credits = 0
+			realInputTokens = 0
+			realCacheRead = 0
+			realCacheCreate = 0
+			attemptProduced = false
+		}
 
 		callback := &KiroStreamCallback{
+			OnOutput:  func() { attemptProduced = true },
+			HasOutput: func() bool { return attemptProduced },
+			OnReset:   resetAttempt,
 			OnText: func(text string, isThinking bool) {
+				attemptProduced = true
 				if isThinking {
 					reasoningContent += text
 				} else {
 					content += text
 				}
 			},
-			OnToolUse:  func(tu KiroToolUse) { toolUses = append(toolUses, tu) },
+			OnToolUse: func(tu KiroToolUse) {
+				attemptProduced = true
+				toolUses = append(toolUses, tu)
+			},
 			OnComplete: func(inTok, outTok int) { inputTokens = inTok; outputTokens = outTok },
 			OnCredits:  func(c float64) { credits = c },
 			OnContextUsage: func(pct float64) {
@@ -3790,12 +4628,14 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 					realCacheRead = cachedTokens
 				}
 			},
+			OnCacheCreate: func(cacheCreateTokens int) {
+				if cacheCreateTokens > realCacheCreate {
+					realCacheCreate = cacheCreateTokens
+				}
+			},
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointOpenAI, model)
-		if isCodexAccount(account) {
-			h.warmAccountCache(account, payload, cacheKey)
-		}
 		err := dispatchChat(account, payload, callback)
 		if err != nil {
 			lastErr = err
@@ -3803,9 +4643,9 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			// in-place with backoff before rotating to a different account.
 			if h.tryTransientRetry(account, payload, callback, err) {
 				h.pool.RecordSuccess(account.ID, model)
-			if cacheKey != "" {
-				h.pool.RecordCacheStickiness(cacheKey, account.ID)
-			}
+				if cacheKey != "" {
+					h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
+				}
 				goto skipOpenAINonStreamHandling
 			}
 			// try refresh+retry before rotating accounts
@@ -3840,11 +4680,14 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 		}
 
-		h.recordUsage(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits, 0, 0, realCacheRead)
+		h.recordUsageWithCache(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits, cacheUsageTelemetry{
+			CreateTokens: realCacheCreate,
+			CachedTokens: realCacheRead,
+		})
 		h.pool.RecordSuccess(account.ID, model)
-			if cacheKey != "" {
-				h.pool.RecordCacheStickiness(cacheKey, account.ID)
-			}
+		if cacheKey != "" {
+			h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
+		}
 		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
 
 		thinkingFormat := config.GetThinkingConfig().OpenAIFormat
@@ -3891,23 +4734,50 @@ func (h *Handler) tryRefreshAndRetry(account *config.Account, payload *KiroPaylo
 		return false
 	}
 	logger.Warnf("[AuthRetry] Auth failure for %s, attempting token refresh + retry", account.Email)
+
+	// Serialize refresh + persistence for this handler. A request may hold an
+	// older account snapshot while another request has already rotated the
+	// refresh token; use the pool's latest credentials before attempting OAuth.
+	h.tokenRefreshMu.Lock()
+	if latest := h.pool.GetByID(account.ID); latest != nil {
+		account.AccessToken = latest.AccessToken
+		account.RefreshToken = latest.RefreshToken
+		account.ExpiresAt = latest.ExpiresAt
+		account.ProfileArn = latest.ProfileArn
+	}
+	oldRefreshToken := account.RefreshToken
 	newAccessToken, newRefreshToken, newExpiresAt, profileArn, _, _, refreshErr := auth.RefreshAccountToken(account)
 	if refreshErr != nil || newAccessToken == "" {
+		h.tokenRefreshMu.Unlock()
 		logger.Warnf("[AuthRetry] Token refresh failed for %s: %v", account.Email, refreshErr)
 		return false
 	}
-	account.AccessToken = newAccessToken
-	if newRefreshToken != "" {
-		account.RefreshToken = newRefreshToken
+	if newRefreshToken == "" {
+		newRefreshToken = oldRefreshToken
 	}
+	if err := config.UpdateAccountToken(account.ID, newAccessToken, newRefreshToken, newExpiresAt); err != nil {
+		h.tokenRefreshMu.Unlock()
+		logger.Warnf("[AuthRetry] Failed to persist refreshed token for %s: %v", account.Email, err)
+		return false
+	}
+	auth.RecordRotation(oldRefreshToken, newAccessToken, newRefreshToken, profileArn, newExpiresAt)
+	account.AccessToken = newAccessToken
+	account.RefreshToken = newRefreshToken
 	account.ExpiresAt = newExpiresAt
 	h.pool.UpdateToken(account.ID, newAccessToken, newRefreshToken, newExpiresAt)
 	if profileArn != "" {
 		account.ProfileArn = profileArn
 		config.UpdateAccountProfileArn(account.ID, profileArn)
 	}
+	h.tokenRefreshMu.Unlock()
+	if callback != nil && callback.OnReset != nil {
+		callback.OnReset()
+	}
 	retryErr := dispatchChat(account, payload, callback)
 	if retryErr != nil {
+		if callback != nil && callback.HasOutput != nil && callback.HasOutput() {
+			logger.Warnf("[AuthRetry] Retry after refresh produced partial output for %s; not retrying again", account.Email)
+		}
 		logger.Warnf("[AuthRetry] Retry after refresh failed for %s: %v", account.Email, retryErr)
 		return false
 	}
@@ -3948,6 +4818,9 @@ func (h *Handler) tryTransientRetry(account *config.Account, payload *KiroPayloa
 		logger.Warnf("[TransientRetry] %s: attempt %d/%d after %v (err: %s)",
 			account.Email, attempt, transientRetryMaxAttempts, delay, truncateForLog(err.Error()))
 		time.Sleep(delay)
+		if callback != nil && callback.OnReset != nil {
+			callback.OnReset()
+		}
 		retryErr := dispatchChat(account, payload, callback)
 		if retryErr == nil {
 			logger.Infof("[TransientRetry] %s: succeeded on attempt %d", account.Email, attempt)
@@ -3958,6 +4831,10 @@ func (h *Handler) tryTransientRetry(account *config.Account, payload *KiroPayloa
 			// normal failure path handle it (refresh / rotate / disable).
 			logger.Warnf("[TransientRetry] %s: error became non-transient on attempt %d: %s",
 				account.Email, attempt, truncateForLog(retryErr.Error()))
+			return false
+		}
+		if callback != nil && callback.HasOutput != nil && callback.HasOutput() {
+			logger.Warnf("[TransientRetry] %s: retry produced partial output; stopping retries", account.Email)
 			return false
 		}
 	}
@@ -3977,7 +4854,7 @@ func truncateForLog(s string) string {
 
 // ensureValidToken ensures token is valid
 func (h *Handler) ensureValidToken(account *config.Account) error {
-	if account.ExpiresAt == 0 || time.Now().Unix() < account.ExpiresAt-tokenRefreshSkewSeconds {
+	if !tokenNeedsRefresh(account, time.Now().Unix()) {
 		return nil
 	}
 
@@ -3990,7 +4867,7 @@ func (h *Handler) ensureValidToken(account *config.Account) error {
 		account.RefreshToken = latest.RefreshToken
 		account.ExpiresAt = latest.ExpiresAt
 		account.ProfileArn = latest.ProfileArn
-		if account.ExpiresAt == 0 || time.Now().Unix() < account.ExpiresAt-tokenRefreshSkewSeconds {
+		if !tokenNeedsRefresh(account, time.Now().Unix()) {
 			return nil
 		}
 	}
@@ -4023,7 +4900,7 @@ func (h *Handler) ensureValidToken(account *config.Account) error {
 			account.AccessToken = latest.AccessToken
 			account.RefreshToken = latest.RefreshToken
 			account.ExpiresAt = latest.ExpiresAt
-			if account.ExpiresAt > 0 && time.Now().Unix() < account.ExpiresAt-tokenRefreshSkewSeconds {
+			if !tokenNeedsRefresh(account, time.Now().Unix()) {
 				return nil
 			}
 		}
@@ -4031,23 +4908,25 @@ func (h *Handler) ensureValidToken(account *config.Account) error {
 		return err
 	}
 
-	// Record rotation so siblings don't hit upstream with stale tokens.
-	auth.RecordRotation(account.RefreshToken, accessToken, refreshToken, profileArn, expiresAt)
-
-	// update memory
-	h.pool.UpdateToken(account.ID, accessToken, refreshToken, expiresAt)
-	account.AccessToken = accessToken
-	if refreshToken != "" {
-		account.RefreshToken = refreshToken
+	if refreshToken == "" {
+		refreshToken = account.RefreshToken
 	}
+	// Persist the rotating credential before exposing it through the pool.
+	// A failed durable write must not make memory diverge from config.json.
+	if err := config.UpdateAccountToken(account.ID, accessToken, refreshToken, expiresAt); err != nil {
+		logger.Warnf("[TokenRefresh] Failed to persist refreshed token for %s: %v", account.Email, err)
+		return err
+	}
+	account.AccessToken = accessToken
+	account.RefreshToken = refreshToken
 	account.ExpiresAt = expiresAt
+	h.pool.UpdateToken(account.ID, accessToken, refreshToken, expiresAt)
 	if profileArn != "" {
 		account.ProfileArn = profileArn
-		config.UpdateAccountProfileArn(account.ID, profileArn)
+		if err := config.UpdateAccountProfileArn(account.ID, profileArn); err != nil {
+			logger.Warnf("[TokenRefresh] Failed to persist profile ARN for %s: %v", account.Email, err)
+		}
 	}
-
-	// persist
-	config.UpdateAccountToken(account.ID, accessToken, refreshToken, expiresAt)
 
 	// Codex accounts: re-extract chatgpt_account_id from the refreshed
 	// access-token JWT and persist it (it may rotate on re-issue).
@@ -4057,6 +4936,16 @@ func (h *Handler) ensureValidToken(account *config.Account) error {
 	}
 
 	return nil
+}
+
+// tokenNeedsRefresh uses the provider's strongest available expiry signal.
+// Codex access tokens are JWTs, so their exp claim takes precedence when an
+// imported account has a stale persisted ExpiresAt value.
+func tokenNeedsRefresh(account *config.Account, now int64) bool {
+	if isCodexAccount(account) {
+		return codexTokenNeedsRefresh(account, now)
+	}
+	return account != nil && account.ExpiresAt > 0 && now >= account.ExpiresAt-tokenRefreshSkewSeconds
 }
 
 // ==================== Admin API ====================
@@ -4118,9 +5007,18 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/models/cached") && r.Method == "GET":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/models/cached")
 		h.apiGetAccountModelsCached(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/image-models") && r.Method == "GET":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/image-models")
+		h.apiGetAccountImageModels(w, r, id)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/credits") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/credits")
 		h.apiRefreshAccountCredits(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/restore-refresh-token") && r.Method == "POST":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/restore-refresh-token")
+		h.apiRestoreCodexRefreshToken(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/codex-security") && r.Method == "POST":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/codex-security")
+		h.apiOpenCodexSecurity(w, r, id)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/refresh-token") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/refresh-token")
 		h.apiRefreshAccountToken(w, r, id)
@@ -4174,6 +5072,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiImportExternalProvider(w, r)
 	case path == "/auth/codex/login" && r.Method == "POST":
 		h.apiCodexLoginStart(w, r)
+	case path == "/auth/codex/open-browser" && r.Method == "POST":
+		h.apiCodexLoginOpenBrowser(w, r)
 	case path == "/auth/codex/poll" && r.Method == "POST":
 		h.apiCodexLoginPoll(w, r)
 	case path == "/auth/codex/cancel" && r.Method == "POST":
@@ -4330,14 +5230,15 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 // CLI tools
 func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request, toolID string) {
 	var req struct {
-		BaseURL       string            `json:"baseUrl"`
-		APIKey        string            `json:"apiKey"`
-		Model         string            `json:"model"`
-		Models        []string          `json:"models"`
-		ActiveModel   string            `json:"activeModel"`
-		SubagentModel string            `json:"subagentModel"`
-		Env           map[string]string `json:"env"`
-		AgentModels   map[string]string `json:"agentModels"`
+		BaseURL         string            `json:"baseUrl"`
+		APIKey          string            `json:"apiKey"`
+		Model           string            `json:"model"`
+		Models          []string          `json:"models"`
+		ActiveModel     string            `json:"activeModel"`
+		SubagentModel   string            `json:"subagentModel"`
+		ReasoningEffort string            `json:"reasoningEffort"`
+		Env             map[string]string `json:"env"`
+		AgentModels     map[string]string `json:"agentModels"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, `{"error":"invalid request"}`, 400)
@@ -4380,7 +5281,19 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 			}
 		}
 		if req.Env != nil {
+			// Claude Code 2.1.220 rejects settings that define both auth
+			// variables. Accept the legacy value from older callers, but persist
+			// only the API-key form required by current Claude Code releases.
+			if apiKey := strings.TrimSpace(req.Env["ANTHROPIC_API_KEY"]); apiKey != "" {
+				env["ANTHROPIC_API_KEY"] = apiKey
+			} else if legacyToken := strings.TrimSpace(req.Env["ANTHROPIC_AUTH_TOKEN"]); legacyToken != "" {
+				env["ANTHROPIC_API_KEY"] = legacyToken
+			}
 			for k, v := range req.Env {
+				if k == "ANTHROPIC_AUTH_TOKEN" || k == "ANTHROPIC_API_KEY" ||
+					(strings.HasPrefix(k, "ANTHROPIC_DEFAULT_") && strings.HasSuffix(k, "_MODEL")) {
+					continue
+				}
 				if v != "" {
 					if k == "ANTHROPIC_BASE_URL" {
 						v = stripV1(v)
@@ -4389,11 +5302,36 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 				}
 			}
 		}
-		if token := env["ANTHROPIC_AUTH_TOKEN"]; token != "" {
-			env["ANTHROPIC_API_KEY"] = token
+		if env["ANTHROPIC_API_KEY"] == "" {
+			env["ANTHROPIC_API_KEY"] = env["ANTHROPIC_AUTH_TOKEN"]
 		}
+		delete(env, "ANTHROPIC_AUTH_TOKEN")
 		current["hasCompletedOnboarding"] = true
 		current["env"] = env
+		// Apply is an endpoint/credential operation. Model selection belongs to
+		// Claude Code settings and must survive UI refreshes or older callers.
+		// Keep the existing allowlist, adding only models explicitly supported
+		// by this installation so advisor selection is not rejected by it.
+		available := make([]interface{}, 0)
+		if existing, ok := current["availableModels"].([]interface{}); ok {
+			available = append(available, existing...)
+		}
+		seenModels := make(map[string]bool, len(available))
+		for _, raw := range available {
+			if model, ok := raw.(string); ok {
+				seenModels[model] = true
+			}
+		}
+		for _, model := range []string{"claude-fable-5", "gpt-5.6-sol", "claude-opus-5"} {
+			if !seenModels[model] {
+				available = append(available, model)
+				seenModels[model] = true
+			}
+		}
+		current["availableModels"] = available
+		// `fallbackModels` was an older, non-standard key that caused the
+		// advisor fallback to be confused with the primary model fallback.
+		delete(current, "fallbackModels")
 		data, _ := json.MarshalIndent(current, "", "  ")
 		if err := os.WriteFile(settingsPath, data, 0644); err != nil {
 			http.Error(w, `{"error":"failed to write config file"}`, 500)
@@ -4514,7 +5452,11 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 			subagent = model
 		}
 		bpURL := ensureV1(req.BaseURL)
-		if err := MergeCodexConfig(homeDir, model, bpURL, subagent); err != nil {
+		effort := strings.TrimSpace(req.ReasoningEffort)
+		if effort != "low" && effort != "medium" && effort != "high" {
+			effort = "medium"
+		}
+		if err := MergeCodexConfig(homeDir, model, bpURL, subagent, effort); err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"failed to merge config: %v"}`, err), 500)
 			return
 		}
@@ -4625,21 +5567,16 @@ requires_api_key = true
 		hermesBPURL := ensureV1(req.BaseURL)
 		hermesModel := req.Model
 		if hermesModel == "" {
-			hermesModel = "provider/model-id"
+			hermesModel = defaultAgentModel
 		}
+		hermesModel = hermesModelID(hermesModel)
 		yamlContent := ""
 		configPath := filepath.Join(hermesDir, "config.yaml")
 		if data, err := os.ReadFile(configPath); err == nil {
 			yamlContent = string(data)
 		}
-		providerBlock := fmt.Sprintf(`  omniproxy:
-    base_url: %s
-    api_key: %s
-    api_mode: openai
-    discover_models: false
-    models:
-    - %s
-`, hermesBPURL, req.APIKey, hermesModel)
+		catalog := h.omniProxyModelCatalog(hermesModel, imageAgentModel, deepResearchModel)
+		providerBlock := hermesProviderBlock(hermesBPURL, req.APIKey, catalog)
 		if strings.TrimSpace(yamlContent) == "" {
 			yamlContent = fmt.Sprintf(`model:
   default: "%s"
@@ -4647,7 +5584,17 @@ requires_api_key = true
   base_url: "%s"
 `, hermesModel, hermesBPURL)
 		}
+		// Always update the top-level model: section so default, provider,
+		// base_url, api_key, and api_mode point to OmniProxy — even when the
+		// config already exists with a different provider (e.g. omniroute).
+		contextWindow, maxTokens, hasLimits := h.modelTokenLimits(hermesModel)
+		if hasLimits {
+			yamlContent = upsertYAMLModelSection(yamlContent, hermesModel, "omniproxy", hermesBPURL, req.APIKey, contextWindow, maxTokens)
+		} else {
+			yamlContent = upsertYAMLModelSection(yamlContent, hermesModel, "omniproxy", hermesBPURL, req.APIKey)
+		}
 		yamlContent = upsertYAMLProviderBlock(yamlContent, "omniproxy", providerBlock)
+		yamlContent = upsertYAMLAuxiliaryModels(yamlContent, hermesBPURL, req.APIKey)
 		if err := os.WriteFile(filepath.Join(hermesDir, "config.yaml"), []byte(yamlContent), 0644); err != nil {
 			http.Error(w, `{"error":"failed to write config.yaml"}`, 500)
 			return
@@ -4733,7 +5680,7 @@ requires_api_key = true
 		ocBPURL := ensureV1(req.BaseURL)
 		ocModel := req.Model
 		if ocModel == "" {
-			ocModel = "provider/model-id"
+			ocModel = defaultAgentModel
 		}
 		currentOC := map[string]interface{}{}
 		if data, err := os.ReadFile(filepath.Join(ocDir, "openclaw.json")); err == nil {
@@ -4747,39 +5694,55 @@ requires_api_key = true
 		if !ok {
 			providers = map[string]interface{}{}
 		}
-		providers["omniproxy"] = map[string]interface{}{
+		omniProvider := map[string]interface{}{
 			"baseUrl": ocBPURL,
 			"apiKey":  req.APIKey,
 			"api":     "openai-completions",
-			"models": []map[string]string{
-				{"id": ocModel, "name": ocModel},
-			},
 		}
+		if existing, ok := providers["omniproxy"].(map[string]interface{}); ok {
+			for key, value := range existing {
+				omniProvider[key] = value
+			}
+			omniProvider["baseUrl"] = ocBPURL
+			omniProvider["apiKey"] = req.APIKey
+			omniProvider["api"] = "openai-completions"
+		}
+		catalogExtras := []string{ocModel, imageAgentModel, deepResearchModel}
+		for _, agentModel := range req.AgentModels {
+			catalogExtras = append(catalogExtras, agentModel)
+		}
+		catalog := h.omniProxyModelCatalog(catalogExtras...)
+		mergeOpenClawProviderCatalog(omniProvider, catalog)
+		providers["omniproxy"] = omniProvider
 		modelsSec["providers"] = providers
 		currentOC["models"] = modelsSec
 		agentModels := map[string]string{}
 		if req.AgentModels != nil {
 			agentModels = req.AgentModels
 		}
-		if _, ok := currentOC["agents"].(map[string]interface{}); !ok {
-			agentsList := []map[string]interface{}{
-				{"id": "default", "model": "omniproxy/" + ocModel, "primary": true},
-			}
-			for agID, agModel := range agentModels {
-				agentsList = append(agentsList, map[string]interface{}{
-					"id":    agID,
-					"model": "omniproxy/" + agModel,
-				})
-			}
-			currentOC["agents"] = map[string]interface{}{
-				"defaults": map[string]interface{}{
-					"model": map[string]string{"primary": "omniproxy/" + ocModel},
-					"models": map[string]interface{}{
-						"omniproxy/" + ocModel: map[string]interface{}{},
-					},
-				},
-				"list": agentsList,
-			}
+		agentConfig, nested := currentOC["agents"].(map[string]interface{})
+		if !nested {
+			agentConfig = currentOC
+		}
+		if _, hasList := agentConfig["list"]; !hasList {
+			agentConfig["list"] = []interface{}{map[string]interface{}{
+				"id": "default", "model": openClawModelRef(ocModel), "primary": true,
+			}}
+		}
+		mergeOpenClawAgents(agentConfig, ocModel, agentModels)
+		defaults, _ := agentConfig["defaults"].(map[string]interface{})
+		if defaults == nil {
+			defaults = map[string]interface{}{}
+			agentConfig["defaults"] = defaults
+		}
+		allowed, _ := defaults["models"].(map[string]interface{})
+		if allowed == nil {
+			allowed = map[string]interface{}{}
+			defaults["models"] = allowed
+		}
+		mergeOpenClawAllowedCatalog(allowed, catalog)
+		if nested {
+			currentOC["agents"] = agentConfig
 		}
 		ocData, _ := json.MarshalIndent(currentOC, "", "  ")
 		if err := os.WriteFile(filepath.Join(ocDir, "openclaw.json"), ocData, 0644); err != nil {
@@ -4983,23 +5946,23 @@ func readCliToolSettingsFromFile(toolID string) *CliToolSettings {
 		var models []string
 		var subagentModel string
 		if providers != nil {
-		// Check both new "omniproxy" and legacy "superkiro" provider keys.
-		p, _ := providers["omniproxy"].(map[string]interface{})
-		if p == nil {
-			p, _ = providers["superkiro"].(map[string]interface{})
-		}
-		if p != nil {
-			if opts, _ := p["options"].(map[string]interface{}); opts != nil {
-				baseUrl, _ = opts["baseURL"].(string)
-				apiKey, _ = opts["apiKey"].(string)
+			// Check both new "omniproxy" and legacy "superkiro" provider keys.
+			p, _ := providers["omniproxy"].(map[string]interface{})
+			if p == nil {
+				p, _ = providers["superkiro"].(map[string]interface{})
 			}
-			if modelsMap, _ := p["models"].(map[string]interface{}); modelsMap != nil {
-				for name := range modelsMap {
-					models = append(models, name)
+			if p != nil {
+				if opts, _ := p["options"].(map[string]interface{}); opts != nil {
+					baseUrl, _ = opts["baseURL"].(string)
+					apiKey, _ = opts["apiKey"].(string)
+				}
+				if modelsMap, _ := p["models"].(map[string]interface{}); modelsMap != nil {
+					for name := range modelsMap {
+						models = append(models, name)
+					}
 				}
 			}
 		}
-	}
 		if agent, _ := cfg["agent"].(map[string]interface{}); agent != nil {
 			if explorer, _ := agent["explorer"].(map[string]interface{}); explorer != nil {
 				if m, _ := explorer["model"].(string); m != "" {
@@ -5032,7 +5995,11 @@ func readCliToolSettingsFromFile(toolID string) *CliToolSettings {
 			return nil
 		}
 		baseUrl, _ := env["ANTHROPIC_BASE_URL"].(string)
-		apiKey, _ := env["ANTHROPIC_AUTH_TOKEN"].(string)
+		apiKey, _ := env["ANTHROPIC_API_KEY"].(string)
+		if apiKey == "" {
+			// Read existing configurations written by older OmniProxy versions.
+			apiKey, _ = env["ANTHROPIC_AUTH_TOKEN"].(string)
+		}
 		envMap := make(map[string]string)
 		for k, v := range env {
 			if s, ok := v.(string); ok {
@@ -5778,56 +6745,69 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 	result := make([]map[string]interface{}, len(accounts))
 	for i, a := range accounts {
 		result[i] = map[string]interface{}{
-			"id":                a.ID,
-			"email":             a.Email,
-			"userId":            a.UserId,
-			"nickname":          a.Nickname,
-			"authMethod":        a.AuthMethod,
-			"provider":          a.Provider,
-			"region":            a.Region,
-			"enabled":           a.Enabled,
-			"banStatus":         a.BanStatus,
-			"banReason":         a.BanReason,
-			"banTime":           a.BanTime,
-			"expiresAt":         a.ExpiresAt,
-			"hasToken":          a.AccessToken != "",
-			"machineId":         a.MachineId,
-			"weight":            a.Weight,
-			"overageStatus":     a.OverageStatus,
-			"overageCapability": a.OverageCapability,
-			"overageCap":        a.OverageCap,
-			"overageRate":       a.OverageRate,
-			"currentOverages":   a.CurrentOverages,
-			"overageCheckedAt":  a.OverageCheckedAt,
-			"proxyURL":          a.ProxyURL,
-			"subscriptionType":  a.SubscriptionType,
-			"subscriptionTitle": a.SubscriptionTitle,
-			"daysRemaining":     a.DaysRemaining,
-			"usageCurrent":      a.UsageCurrent,
-			"usageLimit":        a.UsageLimit,
-			"usagePercent":      a.UsagePercent,
-			"nextResetDate":     a.NextResetDate,
-			"lastRefresh":       a.LastRefresh,
-			"trialUsageCurrent": a.TrialUsageCurrent,
-			"trialUsageLimit":   a.TrialUsageLimit,
-			"trialUsagePercent": a.TrialUsagePercent,
-			"trialStatus":       a.TrialStatus,
-			"trialExpiresAt":    a.TrialExpiresAt,
-			"requestCount":      a.RequestCount,
-			"errorCount":        a.ErrorCount,
-			"totalTokens":       a.TotalTokens,
-			"totalCredits":      a.TotalCredits,
-			"lastUsed":          a.LastUsed,
-			"baseUrl":           a.BaseURL,
-			"extCreditLimit":      a.ExtCreditLimit,
-			"extCreditsRemaining": a.ExtCreditsRemaining,
-			"extCreditsUsed":      a.ExtCreditsUsed,
-			"extRequestsCount":    a.ExtRequestsCount,
-			"extTokensUsed":       a.ExtTokensUsed,
-			"extStatus":           a.ExtStatus,
-			"extKeyMasked":        a.ExtKeyMasked,
-			"extLastUsedAt":       a.ExtLastUsedAt,
-			"extCreditsCheckedAt": a.ExtCreditsCheckedAt,
+			"id":                        a.ID,
+			"email":                     a.Email,
+			"userId":                    a.UserId,
+			"nickname":                  a.Nickname,
+			"authMethod":                a.AuthMethod,
+			"provider":                  a.Provider,
+			"sourceId":                  a.SourceID,
+			"providerKind":              a.ProviderKind,
+			"capabilities":              a.Capabilities,
+			"region":                    a.Region,
+			"enabled":                   a.Enabled,
+			"banStatus":                 a.BanStatus,
+			"banReason":                 a.BanReason,
+			"banTime":                   a.BanTime,
+			"expiresAt":                 a.ExpiresAt,
+			"hasToken":                  a.AccessToken != "",
+			"machineId":                 a.MachineId,
+			"weight":                    a.Weight,
+			"overageStatus":             a.OverageStatus,
+			"overageCapability":         a.OverageCapability,
+			"overageCap":                a.OverageCap,
+			"overageRate":               a.OverageRate,
+			"currentOverages":           a.CurrentOverages,
+			"overageCheckedAt":          a.OverageCheckedAt,
+			"proxyURL":                  a.ProxyURL,
+			"subscriptionType":          a.SubscriptionType,
+			"subscriptionTitle":         a.SubscriptionTitle,
+			"daysRemaining":             a.DaysRemaining,
+			"usageCurrent":              a.UsageCurrent,
+			"usageLimit":                a.UsageLimit,
+			"usagePercent":              a.UsagePercent,
+			"nextResetDate":             a.NextResetDate,
+			"lastRefresh":               a.LastRefresh,
+			"trialUsageCurrent":         a.TrialUsageCurrent,
+			"trialUsageLimit":           a.TrialUsageLimit,
+			"trialUsagePercent":         a.TrialUsagePercent,
+			"trialStatus":               a.TrialStatus,
+			"trialExpiresAt":            a.TrialExpiresAt,
+			"requestCount":              a.RequestCount,
+			"errorCount":                a.ErrorCount,
+			"totalTokens":               a.TotalTokens,
+			"totalCredits":              a.TotalCredits,
+			"lastUsed":                  a.LastUsed,
+			"serviceRequestCount":       a.ServiceRequestCount,
+			"serviceErrorCount":         a.ServiceErrorCount,
+			"serviceQuotaErrorCount":    a.ServiceQuotaErrorCount,
+			"serviceLastUsed":           a.ServiceLastUsed,
+			"serviceLastStatus":         a.ServiceLastStatus,
+			"serviceRateLimit":          a.ServiceRateLimit,
+			"serviceRateLimitRemaining": a.ServiceRateLimitRemaining,
+			"serviceRateLimitReset":     a.ServiceRateLimitReset,
+			"serviceRetryAfter":         a.ServiceRetryAfter,
+			"serviceUsageCheckedAt":     a.ServiceUsageCheckedAt,
+			"baseUrl":                   a.BaseURL,
+			"extCreditLimit":            a.ExtCreditLimit,
+			"extCreditsRemaining":       a.ExtCreditsRemaining,
+			"extCreditsUsed":            a.ExtCreditsUsed,
+			"extRequestsCount":          a.ExtRequestsCount,
+			"extTokensUsed":             a.ExtTokensUsed,
+			"extStatus":                 a.ExtStatus,
+			"extKeyMasked":              a.ExtKeyMasked,
+			"extLastUsedAt":             a.ExtLastUsedAt,
+			"extCreditsCheckedAt":       a.ExtCreditsCheckedAt,
 			"chatgptAccountId":          a.ChatGPTAccountID,
 			"codexPlanType":             a.CodexPlanType,
 			"codexActiveLimit":          a.CodexActiveLimit,
@@ -5842,6 +6822,8 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"codexCreditsUnlimited":     a.CodexCreditsUnlimited,
 			"codexCreditsKnown":         a.CodexCreditsKnown,
 			"codexUsageCheckedAt":       a.CodexUsageCheckedAt,
+			"imageModel":                a.ImageModel,
+			"codexImageModel":           a.CodexImageModel,
 			"tokenRefreshedAt":          a.TokenRefreshedAt,
 		}
 	}
@@ -5923,7 +6905,7 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 		existing.Enabled = v
 		// When re-enabling an account, clear any prior ban/suspend marker so
 		// the UI reflects the operator's intent and the pool routes to it again.
-		if v && (existing.BanStatus == "BANNED" || existing.BanStatus == "DISABLED" || existing.BanStatus == "SUSPENDED") {
+		if v && (existing.BanStatus == "BANNED" || existing.BanStatus == "DISABLED" || existing.BanStatus == "SUSPENDED" || existing.BanStatus == codexReauthRequiredStatus) {
 			existing.BanStatus = "ACTIVE"
 			existing.BanReason = ""
 			existing.BanTime = 0
@@ -5948,10 +6930,23 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	if v, ok := updates["accessToken"].(string); ok {
 		existing.AccessToken = strings.TrimSpace(v)
 	}
+	if v, ok := updates["codexImageModel"].(string); ok && isCodexAccount(existing) {
+		existing.CodexImageModel = strings.TrimSpace(v)
+	}
+	if v, ok := updates["imageModel"].(string); ok {
+		existing.ImageModel = strings.TrimSpace(v)
+	}
 
-	if err := config.UpdateAccount(id, *existing); err != nil {
+	_, changesCredentials := updates["accessToken"]
+	var persistErr error
+	if changesCredentials {
+		persistErr = config.UpdateAccount(id, *existing)
+	} else {
+		persistErr = config.UpdateAccountPreservingCredentials(id, *existing)
+	}
+	if persistErr != nil {
 		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		json.NewEncoder(w).Encode(map[string]string{"error": persistErr.Error()})
 		return
 	}
 
@@ -6115,7 +7110,9 @@ func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 					a.BanReason = ""
 					a.BanTime = 0
 				}
-				config.UpdateAccount(a.ID, a)
+				if err := config.UpdateAccountPreservingCredentials(a.ID, a); err != nil {
+					logger.Errorf("[apiBatchAccounts] Failed to persist %s for %s: %v", req.Action, a.Email, err)
+				}
 			}
 		}
 		h.pool.Reload()
@@ -6157,6 +7154,10 @@ func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 			if isExternalAccount(account) {
 				h.fetchAndCacheAccountModels(account)
 				h.refreshExternalCredits(account)
+				successCount++
+				continue
+			}
+			if isServiceAccount(account) {
 				successCount++
 				continue
 			}
@@ -6887,9 +7888,9 @@ func (h *Handler) apiSocialLoginPoll(w http.ResponseWriter, r *http.Request) {
 
 // ==================== Codex (ChatGPT subscription) OAuth ====================
 
-// apiCodexLoginStart begins a Codex PKCE login flow. Returns the authorize
-// URL the user must open in their browser. The proxy has started a local
-// HTTP server on port 1455 to receive the OAuth callback.
+// apiCodexLoginStart begins a Codex PKCE login flow and opens its authorize
+// URL in a separate Chrome profile. The proxy starts a local HTTP server on
+// port 1455 to receive the OAuth callback.
 func (h *Handler) apiCodexLoginStart(w http.ResponseWriter, r *http.Request) {
 	session, err := auth.StartCodexLogin()
 	if err != nil {
@@ -6897,17 +7898,204 @@ func (h *Handler) apiCodexLoginStart(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	browserErr := auth.OpenCodexLoginInCleanBrowser()
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"authUrl":   session.AuthURL,
-		"expiresIn": int(time.Until(session.ExpiresAt).Seconds()),
-		"provider":  "codex",
+		"authUrl":         session.AuthURL,
+		"expiresIn":       int(time.Until(session.ExpiresAt).Seconds()),
+		"provider":        "codex",
+		"browserLaunched": browserErr == nil,
+		"browserError":    errorMessage(browserErr),
 	})
 }
 
-// apiCodexLoginPoll polls the active Codex login session. On success,
-// creates a Codex account in the pool with the access/refresh tokens and
+// codexBrowserProfileDir derives the only persistent browser profile path for
+// a local Codex account. Hashing keeps an account ID from becoming a path
+// component and prevents a caller from selecting arbitrary directories.
+func codexBrowserProfileDir(accountID string) string {
+	sum := sha256.Sum256([]byte(accountID))
+	return filepath.Join(config.GetConfigDir(), "codex-browser-profiles", fmt.Sprintf("%x", sum[:]))
+}
+
+// quarantineCodexBrowserProfile preserves an unverified browser profile
+// outside the active profile path. It avoids silently deleting an OpenAI
+// session if setup was interrupted before the successful OAuth callback could
+// record the account binding.
+func quarantineCodexBrowserProfile(profileDir string) (string, error) {
+	info, err := os.Stat(profileDir)
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("Codex browser profile path is not a directory")
+	}
+
+	quarantineDir := filepath.Join(filepath.Dir(profileDir), "unverified")
+	if err := os.MkdirAll(quarantineDir, 0700); err != nil {
+		return "", err
+	}
+	archived := filepath.Join(quarantineDir, filepath.Base(profileDir)+"-"+strconv.FormatInt(time.Now().UnixNano(), 10))
+	if err := os.Rename(profileDir, archived); err != nil {
+		return "", err
+	}
+	return archived, nil
+}
+
+// apiOpenCodexSecurity opens the Security page with the account-scoped Chrome
+// profile. A profile becomes usable only after an OAuth callback proves it is
+// authenticated as this exact ChatGPT account.
+func (h *Handler) apiOpenCodexSecurity(w http.ResponseWriter, r *http.Request, id string) {
+	accounts := config.GetAccounts()
+	var account *config.Account
+	for i := range accounts {
+		if accounts[i].ID == id {
+			account = &accounts[i]
+			break
+		}
+	}
+	if account == nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+	if !isCodexAccount(account) || strings.TrimSpace(account.ChatGPTAccountID) == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account is not a linked Codex account"})
+		return
+	}
+
+	profileDir := codexBrowserProfileDir(account.ID)
+	if account.CodexBrowserProfileVerified &&
+		account.CodexBrowserProfileAccountID == account.ChatGPTAccountID {
+		info, err := os.Stat(profileDir)
+		if err == nil && info.IsDir() {
+			if err := auth.OpenCodexSecurityProfile(profileDir); err != nil {
+				w.WriteHeader(http.StatusBadGateway)
+				json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success":        true,
+				"securityOpened": true,
+				"message":        "Opened ChatGPT Security in this account's browser profile",
+			})
+			return
+		}
+		if err != nil && !os.IsNotExist(err) {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Could not inspect Codex browser profile: " + err.Error()})
+			return
+		}
+	}
+
+	// Preserve a stale profile from an interrupted setup rather than deleting
+	// its browser session. The fresh OAuth callback below is the binding proof
+	// for the newly created active profile.
+	if _, err := quarantineCodexBrowserProfile(profileDir); err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Could not preserve previous Codex browser profile: " + err.Error()})
+		return
+	}
+	session, err := auth.StartCodexLoginForAccount(profileDir, account.ID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	browserErr := auth.OpenCodexLoginInCleanBrowser()
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":         true,
+		"setupRequired":   true,
+		"authUrl":         session.AuthURL,
+		"expiresIn":       int(time.Until(session.ExpiresAt).Seconds()),
+		"browserLaunched": browserErr == nil,
+		"browserError":    errorMessage(browserErr),
+		"message":         "Sign in to the Codex account shown on this card to link its browser profile",
+	})
+}
+
+// apiCodexLoginOpenBrowser reopens the current authorize URL in another
+// isolated Chrome profile. This is a recovery path when the first window was
+// closed before the OAuth callback completed.
+func (h *Handler) apiCodexLoginOpenBrowser(w http.ResponseWriter, r *http.Request) {
+	if err := auth.OpenCodexLoginInCleanBrowser(); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "browserLaunched": true})
+}
+
+func errorMessage(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+// upsertCodexOAuthAccount applies a successful interactive login or explicit
+// token import. A ChatGPT account must have exactly one OmniProxy account: two
+// copies would hold the same rotating refresh token and can invalidate each
+// other when they refresh concurrently.
+func upsertCodexOAuthAccount(candidate config.Account, nicknameExplicit bool) (config.Account, bool, error) {
+	for _, existing := range config.GetAccounts() {
+		if existing.AuthMethod != codexAuthMethod || existing.ChatGPTAccountID != candidate.ChatGPTAccountID {
+			continue
+		}
+
+		// Keep the stable local identity and account-specific settings. OAuth is
+		// an intentional credential replacement, so these fields are updated as
+		// one durable config write before the caller reloads the pool.
+		existing.AccessToken = candidate.AccessToken
+		existing.RefreshToken = candidate.RefreshToken
+		existing.ExpiresAt = candidate.ExpiresAt
+		existing.TokenRefreshedAt = time.Now().Unix()
+		existing.Email = candidate.Email
+		existing.AuthMethod = codexAuthMethod
+		existing.Provider = candidate.Provider
+		existing.ChatGPTAccountID = candidate.ChatGPTAccountID
+		existing.Region = candidate.Region
+		existing.Enabled = true
+		existing.BanStatus = "ACTIVE"
+		existing.BanReason = ""
+		existing.BanTime = 0
+		if nicknameExplicit || existing.Nickname == "" {
+			existing.Nickname = candidate.Nickname
+		}
+		if candidate.CodexEmail != "" {
+			existing.CodexEmail = candidate.CodexEmail
+		}
+		if candidate.CodexName != "" {
+			existing.CodexName = candidate.CodexName
+		}
+		if candidate.CodexPlanType != "" {
+			existing.CodexPlanType = candidate.CodexPlanType
+		}
+		if err := config.UpdateAccount(existing.ID, existing); err != nil {
+			return config.Account{}, false, err
+		}
+		return existing, false, nil
+	}
+
+	if err := config.AddAccount(candidate); err != nil {
+		return config.Account{}, false, err
+	}
+	return candidate, true, nil
+}
+
+// apiCodexLoginPoll polls the active Codex login session. On success, it
+// creates or updates a Codex account with the access/refresh tokens and
 // chatgpt_account_id extracted from the JWT.
 func (h *Handler) apiCodexLoginPoll(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Nickname string `json:"nickname"`
+	}
+	if r.Body != nil {
+		_ = json.NewDecoder(r.Body).Decode(&req)
+	}
+	targetAccountID := auth.CurrentCodexLoginTargetAccountID()
 	tokens, err := auth.PollCodexLogin()
 	if err != nil {
 		errMsg := err.Error()
@@ -6922,6 +8110,38 @@ func (h *Handler) apiCodexLoginPoll(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": errMsg})
 		return
 	}
+	acceptedLogin := false
+	defer func() {
+		if acceptedLogin {
+			auth.CompleteCodexLogin()
+			return
+		}
+		// An invalid callback result must terminate the persistent browser
+		// process before its account-scoped profile is discarded below.
+		auth.CancelCodexLogin()
+	}()
+
+	if targetAccountID != "" {
+		accounts := config.GetAccounts()
+		var target *config.Account
+		for i := range accounts {
+			if accounts[i].ID == targetAccountID {
+				target = &accounts[i]
+				break
+			}
+		}
+		if target == nil || !isCodexAccount(target) || target.ChatGPTAccountID != tokens.AccountID {
+			// The browser must exit before moving its profile, otherwise Chrome can
+			// recreate files while the profile is being quarantined.
+			auth.CancelCodexLogin()
+			if _, err := quarantineCodexBrowserProfile(codexBrowserProfileDir(targetAccountID)); err != nil {
+				logger.Warnf("[Codex] Failed to preserve mismatched browser profile: %v", err)
+			}
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "The signed-in ChatGPT account does not match the selected Codex account; its browser profile was preserved outside the active profile path"})
+			return
+		}
+	}
 
 	// Extract profile info (email, name, plan_type) from the JWT.
 	jwtInfo := auth.ExtractCodexJWTInfoPublic(tokens.AccessToken)
@@ -6935,6 +8155,9 @@ func (h *Handler) apiCodexLoginPoll(w http.ResponseWriter, r *http.Request) {
 	}
 	if jwtInfo.Name != "" {
 		nickname = jwtInfo.Name
+	}
+	if requestedName := strings.TrimSpace(req.Nickname); requestedName != "" {
+		nickname = requestedName
 	}
 
 	account := config.Account{
@@ -6955,21 +8178,34 @@ func (h *Handler) apiCodexLoginPoll(w http.ResponseWriter, r *http.Request) {
 		CodexPlanType:    jwtInfo.PlanType,
 	}
 
-	if err := config.AddAccount(account); err != nil {
+	account, _, err = upsertCodexOAuthAccount(account, strings.TrimSpace(req.Nickname) != "")
+	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	if targetAccountID != "" {
+		account.CodexBrowserProfileVerified = true
+		account.CodexBrowserProfileAccountID = tokens.AccountID
+		if err := config.UpdateAccount(account.ID, account); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			json.NewEncoder(w).Encode(map[string]string{"error": "Could not persist Codex browser profile: " + err.Error()})
+			return
+		}
+	}
 	h.pool.Reload()
+	acceptedLogin = true
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
+		"success":        true,
+		"profileLinked":  targetAccountID != "",
+		"securityOpened": targetAccountID != "",
 		"account": map[string]interface{}{
-			"id":                account.ID,
-			"email":             account.Email,
-			"chatgptAccountId":  account.ChatGPTAccountID,
-			"planType":          jwtInfo.PlanType,
-			"name":              jwtInfo.Name,
-			"expiresAt":         account.ExpiresAt,
+			"id":               account.ID,
+			"email":            account.Email,
+			"chatgptAccountId": account.ChatGPTAccountID,
+			"planType":         jwtInfo.PlanType,
+			"name":             jwtInfo.Name,
+			"expiresAt":        account.ExpiresAt,
 		},
 	})
 }
@@ -7047,7 +8283,8 @@ func (h *Handler) apiImportCodexTokens(w http.ResponseWriter, r *http.Request) {
 		account.ExpiresAt = time.Now().Unix() + 3600
 	}
 
-	if err := config.AddAccount(account); err != nil {
+	account, _, err := upsertCodexOAuthAccount(account, strings.TrimSpace(req.Nickname) != "")
+	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
@@ -7056,13 +8293,13 @@ func (h *Handler) apiImportCodexTokens(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"account": map[string]interface{}{
-			"id":                account.ID,
-			"email":             account.Email,
-			"nickname":          account.Nickname,
-			"chatgptAccountId":  account.ChatGPTAccountID,
-			"planType":          jwtInfo.PlanType,
-			"name":              jwtInfo.Name,
-			"expiresAt":         account.ExpiresAt,
+			"id":               account.ID,
+			"email":            account.Email,
+			"nickname":         account.Nickname,
+			"chatgptAccountId": account.ChatGPTAccountID,
+			"planType":         jwtInfo.PlanType,
+			"name":             jwtInfo.Name,
+			"expiresAt":        account.ExpiresAt,
 		},
 	})
 }
@@ -7080,11 +8317,12 @@ func (h *Handler) apiPreview9Router(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"path":    result.Path,
-		"codex":   nineRouterAccountsToJSON(result.Codex),
-		"kiro":    nineRouterAccountsToJSON(result.Kiro),
-		"skipped": result.Skipped,
+		"success":   true,
+		"path":      result.Path,
+		"codex":     nineRouterAccountsToJSON(result.Codex),
+		"kiro":      nineRouterAccountsToJSON(result.Kiro),
+		"providers": nineRouterAccountsToJSON(result.Generic),
+		"skipped":   result.Skipped,
 	})
 }
 
@@ -7097,24 +8335,43 @@ func (h *Handler) apiPreview9Router(w http.ResponseWriter, r *http.Request) {
 // Request body (all optional):
 //   - importCodex: bool (default true)
 //   - importKiro:  bool (default true)
+//   - importProviders: bool (default true)
+//   - codexSourceIds/kiroSourceIds/providerSourceIds: selected 9router IDs
+//   - codexIndexes/kiroIndexes/providerIndexes: selected indexes for records
+//     without a source ID
 //   - refreshKiro: bool (default true — refresh kiro tokens to validate)
 func (h *Handler) apiImportFrom9Router(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ImportCodex *bool `json:"importCodex"`
-		ImportKiro  *bool `json:"importKiro"`
-		RefreshKiro *bool `json:"refreshKiro"`
+		ImportCodex       *bool    `json:"importCodex"`
+		ImportKiro        *bool    `json:"importKiro"`
+		ImportProviders   *bool    `json:"importProviders"`
+		ImportGeneric     *bool    `json:"importGeneric"`
+		RefreshKiro       *bool    `json:"refreshKiro"`
+		CodexSourceIDs    []string `json:"codexSourceIds"`
+		KiroSourceIDs     []string `json:"kiroSourceIds"`
+		ProviderSourceIDs []string `json:"providerSourceIds"`
+		CodexIndexes      []int    `json:"codexIndexes"`
+		KiroIndexes       []int    `json:"kiroIndexes"`
+		ProviderIndexes   []int    `json:"providerIndexes"`
 	}
 	// Body is optional; ignore decode errors.
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	importCodex := true
 	importKiro := true
+	importProviders := true
 	refreshKiro := true
 	if req.ImportCodex != nil {
 		importCodex = *req.ImportCodex
 	}
 	if req.ImportKiro != nil {
 		importKiro = *req.ImportKiro
+	}
+	if req.ImportProviders != nil {
+		importProviders = *req.ImportProviders
+	}
+	if req.ImportGeneric != nil {
+		importProviders = *req.ImportGeneric
 	}
 	if req.RefreshKiro != nil {
 		refreshKiro = *req.RefreshKiro
@@ -7128,20 +8385,39 @@ func (h *Handler) apiImportFrom9Router(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type importedAcc struct {
-		Source    string `json:"source"`
-		Name      string `json:"name"`
-		AccountID string `json:"accountId,omitempty"`
-		Email     string `json:"email,omitempty"`
-		PlanType  string `json:"planType,omitempty"`
-		Status    string `json:"status"` // "imported" | "skipped" | "error"
-		Error     string `json:"error,omitempty"`
+		Source       string   `json:"source"`
+		Name         string   `json:"name"`
+		AccountID    string   `json:"accountId,omitempty"`
+		Email        string   `json:"email,omitempty"`
+		PlanType     string   `json:"planType,omitempty"`
+		ProviderKind string   `json:"providerKind,omitempty"`
+		Capabilities []string `json:"capabilities,omitempty"`
+		Status       string   `json:"status"` // "imported" | "skipped" | "error"
+		Error        string   `json:"error,omitempty"`
 	}
 	var imported []importedAcc
 	skippedCount := 0
 
+	if importProviders {
+		for i, generic := range result.Generic {
+			if !nineRouterSelectionIncludes(generic, i, req.ProviderSourceIDs, req.ProviderIndexes) {
+				continue
+			}
+			acc, err := h.importOne9RouterGeneric(generic)
+			if err != nil {
+				imported = append(imported, importedAcc{Source: generic.Provider, Name: generic.Name, ProviderKind: generic.ProviderKind, Capabilities: generic.Capabilities, Status: "error", Error: err.Error()})
+				continue
+			}
+			imported = append(imported, importedAcc{Source: generic.Provider, Name: generic.Name, AccountID: acc.ID, ProviderKind: acc.ProviderKind, Capabilities: acc.Capabilities, Status: "imported"})
+		}
+	}
+
 	// ── Codex accounts ──
 	if importCodex {
-		for _, c := range result.Codex {
+		for i, c := range result.Codex {
+			if !nineRouterSelectionIncludes(c, i, req.CodexSourceIDs, req.CodexIndexes) {
+				continue
+			}
 			acc, err := h.importOne9RouterCodex(c)
 			if err != nil {
 				imported = append(imported, importedAcc{
@@ -7169,7 +8445,10 @@ func (h *Handler) apiImportFrom9Router(w http.ResponseWriter, r *http.Request) {
 
 	// ── Kiro accounts ──
 	if importKiro {
-		for _, k := range result.Kiro {
+		for i, k := range result.Kiro {
+			if !nineRouterSelectionIncludes(k, i, req.KiroSourceIDs, req.KiroIndexes) {
+				continue
+			}
 			acc, err := h.importOne9RouterKiro(k, refreshKiro)
 			if err != nil {
 				imported = append(imported, importedAcc{
@@ -7195,11 +8474,11 @@ func (h *Handler) apiImportFrom9Router(w http.ResponseWriter, r *http.Request) {
 
 	h.pool.Reload()
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":       true,
-		"path":          result.Path,
-		"imported":      imported,
-		"importedCount": len(imported) - skippedCount,
-		"skippedCount":  skippedCount,
+		"success":          true,
+		"path":             result.Path,
+		"imported":         imported,
+		"importedCount":    len(imported) - skippedCount,
+		"skippedCount":     skippedCount,
 		"skippedProviders": result.Skipped,
 	})
 }
@@ -7223,6 +8502,36 @@ func (h *Handler) importOne9RouterCodex(c auth.NineRouterImportedAccount) (*conf
 
 	// Extract profile info (email, name, plan_type) from JWT.
 	jwtInfo := auth.ExtractCodexJWTInfoPublic(c.AccessToken)
+
+	// Prefer the stable 9router connection ID. This also handles a rotated
+	// token whose claims are temporarily incomplete or changed.
+	for _, existing := range config.GetAccounts() {
+		if c.SourceID != "" && existing.SourceID == c.SourceID {
+			existing.AccessToken = c.AccessToken
+			existing.RefreshToken = c.RefreshToken
+			existing.ExpiresAt = c.ExpiresAt
+			if existing.ExpiresAt == 0 {
+				existing.ExpiresAt = time.Now().Unix() + 3600
+			}
+			existing.ChatGPTAccountID = accountID
+			if c.Name != "" {
+				existing.Nickname = c.Name
+			}
+			if jwtInfo.Email != "" {
+				existing.CodexEmail = jwtInfo.Email
+			}
+			if jwtInfo.Name != "" {
+				existing.CodexName = jwtInfo.Name
+			}
+			if jwtInfo.PlanType != "" {
+				existing.CodexPlanType = jwtInfo.PlanType
+			}
+			if err := config.UpdateAccount(existing.ID, existing); err != nil {
+				return nil, err
+			}
+			return &existing, nil
+		}
+	}
 
 	// Dedup by chatgpt_account_id.
 	for _, existing := range config.GetAccounts() {
@@ -7282,6 +8591,7 @@ func (h *Handler) importOne9RouterCodex(c auth.NineRouterImportedAccount) (*conf
 		RefreshToken:     c.RefreshToken,
 		ExpiresAt:        c.ExpiresAt,
 		ChatGPTAccountID: accountID,
+		SourceID:         c.SourceID,
 		Region:           "external",
 		Enabled:          true,
 		MachineId:        config.GenerateMachineId(),
@@ -7296,6 +8606,67 @@ func (h *Handler) importOne9RouterCodex(c auth.NineRouterImportedAccount) (*conf
 		return nil, err
 	}
 	return &acc, nil
+}
+
+// importOne9RouterGeneric preserves valid 9router credentials and capability
+// metadata. Providers without a native adapter remain disabled so they cannot
+// accidentally enter the chat dispatcher.
+func (h *Handler) importOne9RouterGeneric(c auth.NineRouterImportedAccount) (*config.Account, error) {
+	credential := strings.TrimSpace(c.APIKey)
+	if credential == "" {
+		credential = strings.TrimSpace(c.AccessToken)
+	}
+	if credential == "" {
+		return nil, fmt.Errorf("provider %s has no credential", c.Provider)
+	}
+
+	for _, existing := range config.GetAccounts() {
+		if c.SourceID != "" && existing.SourceID == c.SourceID {
+			existing.AccessToken = credential
+			existing.RefreshToken = c.RefreshToken
+			existing.ExpiresAt = c.ExpiresAt
+			existing.Provider = c.Provider
+			if c.Name != "" {
+				existing.Nickname = c.Name
+			}
+			existing.AuthMethod = genericAuthMethod(c)
+			existing.ProviderKind = c.ProviderKind
+			existing.Capabilities = append([]string(nil), c.Capabilities...)
+			existing.BaseURL = c.BaseURL
+			existing.ProxyURL = c.ProxyURL
+			existing.Enabled = len(c.Capabilities) > 0
+			if err := config.UpdateAccount(existing.ID, existing); err != nil {
+				return nil, err
+			}
+			return &existing, nil
+		}
+	}
+
+	acc := config.Account{
+		ID: auth.GenerateAccountID(), Email: c.Provider + "-9router", Nickname: c.Name,
+		AuthMethod: genericAuthMethod(c), Provider: c.Provider, SourceID: c.SourceID,
+		ProviderKind: c.ProviderKind, Capabilities: append([]string(nil), c.Capabilities...),
+		AccessToken: credential, RefreshToken: c.RefreshToken, ExpiresAt: c.ExpiresAt,
+		BaseURL: c.BaseURL, ProxyURL: c.ProxyURL, Enabled: len(c.Capabilities) > 0,
+		MachineId: config.GenerateMachineId(), Region: "external",
+	}
+	if acc.Nickname == "" {
+		acc.Nickname = c.Provider
+	}
+	if err := config.AddAccount(acc); err != nil {
+		return nil, err
+	}
+	return &acc, nil
+}
+
+// genericAuthMethod keeps OpenAI-compatible 9router connections on the
+// external OpenAI dispatcher. Service adapters such as search and image use
+// their own capability handlers and must not be routed as chat accounts.
+func genericAuthMethod(c auth.NineRouterImportedAccount) string {
+	if strings.EqualFold(strings.TrimSpace(c.ProviderKind), "chat") {
+		return externalAuthMethod
+	}
+	return "service_api_key"
 }
 
 // importOne9RouterKiro imports a single Kiro account from 9router.
@@ -7340,11 +8711,40 @@ func (h *Handler) importOne9RouterKiro(k auth.NineRouterImportedAccount, refresh
 	}
 
 	email := ""
-	if accessToken != "" {
+	if refresh && accessToken != "" {
 		email, _, _ = auth.GetUserInfo(accessToken)
 	}
+
+	// SourceID is the primary identity for a 9router connection. This path is
+	// also what makes startup sync network-free and idempotent.
+	for _, existing := range config.GetAccounts() {
+		if k.SourceID == "" || existing.SourceID != k.SourceID {
+			continue
+		}
+		if email == "" {
+			email = existing.Email
+		}
+		existing.AccessToken = accessToken
+		existing.RefreshToken = refreshToken
+		existing.ExpiresAt = expiresAt
+		existing.ProfileArn = profileArn
+		if email != "" {
+			existing.Email = email
+		}
+		if k.Name != "" {
+			existing.Nickname = k.Name
+		}
+		if err := config.UpdateAccount(existing.ID, existing); err != nil {
+			return nil, err
+		}
+		return &existing, nil
+	}
 	if email == "" {
-		email = "kiro-9router-" + k.SourceID[:min(8, len(k.SourceID))]
+		label := k.SourceID
+		if label == "" {
+			label = "account"
+		}
+		email = "kiro-9router-" + label[:min(8, len(label))]
 	}
 
 	// Dedup by profileArn.
@@ -7382,6 +8782,7 @@ func (h *Handler) importOne9RouterKiro(k auth.NineRouterImportedAccount, refresh
 		Enabled:      true,
 		MachineId:    config.GenerateMachineId(),
 		ProfileArn:   profileArn,
+		SourceID:     k.SourceID,
 	}
 	if acc.ExpiresAt == 0 {
 		acc.ExpiresAt = time.Now().Unix() + 3600
@@ -7396,11 +8797,15 @@ func (h *Handler) importOne9RouterKiro(k auth.NineRouterImportedAccount, refresh
 // shape returned by the preview endpoint (no tokens — just metadata).
 func nineRouterAccountsToJSON(accounts []auth.NineRouterImportedAccount) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(accounts))
-	for _, a := range accounts {
+	for i, a := range accounts {
 		entry := map[string]interface{}{
-			"name":     a.Name,
-			"provider": a.Provider,
-			"hasToken": a.AccessToken != "" || a.RefreshToken != "",
+			"index":        i,
+			"sourceId":     a.SourceID,
+			"name":         a.Name,
+			"provider":     a.Provider,
+			"hasToken":     a.AccessToken != "" || a.RefreshToken != "",
+			"providerKind": a.ProviderKind,
+			"capabilities": a.Capabilities,
 		}
 		if a.ChatGPTAccountID != "" {
 			entry["chatgptAccountId"] = a.ChatGPTAccountID
@@ -7417,6 +8822,31 @@ func nineRouterAccountsToJSON(accounts []auth.NineRouterImportedAccount) []map[s
 		out = append(out, entry)
 	}
 	return out
+}
+
+// nineRouterSelectionIncludes applies the new per-account selection contract.
+// A nil source ID/index pair means the caller used the legacy boolean-only
+// contract, so all records in the enabled group remain eligible. When an
+// explicit selection is present, stable source IDs are preferred; indexes are
+// a fallback only for records that do not have a source ID.
+func nineRouterSelectionIncludes(account auth.NineRouterImportedAccount, index int, sourceIDs []string, indexes []int) bool {
+	if sourceIDs == nil && indexes == nil {
+		return true
+	}
+	if account.SourceID != "" {
+		for _, sourceID := range sourceIDs {
+			if strings.TrimSpace(sourceID) == account.SourceID {
+				return true
+			}
+		}
+		return false
+	}
+	for _, selectedIndex := range indexes {
+		if selectedIndex == index {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) apiImportKiroCli(w http.ResponseWriter, r *http.Request) {
@@ -7914,19 +9344,19 @@ func (h *Handler) apiImportKiroApiKey(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// apiImportExternalProvider adds an external OpenAI-compatible provider as a
+// apiImportExternalProvider adds an external OpenAI-compatible or AgentRouter provider as a
 // pool account. The provider is optionally validated with a tiny ping request
-// before being persisted; a validation failure is surfaced but not fatal — the
-// account is still saved (disabled) so the operator can fix the URL/key later.
+// before being persisted.
 func (h *Handler) apiImportExternalProvider(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		BaseURL  string `json:"baseUrl"`
-		ApiKey   string `json:"apiKey"`
-		Name     string `json:"name"`
-		Nickname string `json:"nickname"`
-		Weight   int    `json:"weight"`
-		ProxyURL string `json:"proxyURL"`
-		Test     bool   `json:"test"`
+		BaseURL    string `json:"baseUrl"`
+		ApiKey     string `json:"apiKey"`
+		Name       string `json:"name"`
+		Nickname   string `json:"nickname"`
+		AuthMethod string `json:"authMethod"`
+		Weight     int    `json:"weight"`
+		ProxyURL   string `json:"proxyURL"`
+		Test       bool   `json:"test"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		w.WriteHeader(400)
@@ -7958,12 +9388,19 @@ func (h *Handler) apiImportExternalProvider(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
+	authMethod := externalAuthMethod
+	providerName := "External OpenAI"
+	if strings.ToLower(strings.TrimSpace(body.AuthMethod)) == "agentrouter" {
+		authMethod = "agentrouter"
+		providerName = "AgentRouter"
+	}
+
 	account := config.Account{
 		ID:          uuid.New().String(),
 		Email:       name,
 		Nickname:    name,
-		AuthMethod:  externalAuthMethod,
-		Provider:    "External OpenAI",
+		AuthMethod:  authMethod,
+		Provider:    providerName,
 		AccessToken: apiKey,
 		BaseURL:     baseURL,
 		Region:      "external",
@@ -8007,7 +9444,7 @@ func (h *Handler) apiImportExternalProvider(w http.ResponseWriter, r *http.Reque
 		"account": map[string]string{
 			"id":       account.ID,
 			"email":    account.Email,
-			"provider": "external_openai",
+			"provider": providerName,
 			"baseUrl":  account.BaseURL,
 		},
 	}
@@ -8720,17 +10157,127 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
+	var req struct {
+		Capability string `json:"capability"`
+		Model      string `json:"model"`
+		Query      string `json:"query"`
+		URL        string `json:"url"`
+		Prompt     string `json:"prompt"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	// Image tests use the same adapter as the public image endpoint for every
+	// account type. This keeps the admin test honest: Kiro accounts return an
+	// explicit unsupported response instead of being sent through chat.
+	if strings.EqualFold(strings.TrimSpace(req.Capability), "image") {
+		start := time.Now()
+		prompt := strings.TrimSpace(req.Prompt)
+		if prompt == "" {
+			prompt = "A cute orange cat sitting by a sunny window, detailed digital illustration"
+		}
+		result, err := callImageGeneration(r, account, imageGenerationRequest{Prompt: prompt, Model: req.Model, N: 1})
+		if err != nil {
+			unsupported := false
+			var unsupportedErr *unsupportedCapabilityError
+			if errors.As(err, &unsupportedErr) {
+				unsupported = true
+			}
+			w.WriteHeader(serviceErrorStatus(err))
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false, "capability": "image", "unsupported": unsupported, "error": err.Error(),
+			})
+			return
+		}
+		h.pool.RecordSuccess(account.ID, "image")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true, "capability": "image", "model": imageModelFor(account, req.Model),
+			"reply": fmt.Sprintf("%d image(s) returned", len(result.Data)), "imageCount": len(result.Data),
+			"elapsedMs": time.Since(start).Milliseconds(),
+		})
+		return
+	}
+
+	// Service accounts must be tested through their native adapter. In
+	// particular, never pass Tavily/Exa/Firecrawl/Jina/OpenRouter credentials
+	// through dispatchChat, which would route them to Kiro or OpenAI chat.
+	if isServiceAccount(account) {
+		capability := strings.ToLower(strings.TrimSpace(req.Capability))
+		if capability == "" {
+			switch {
+			case accountHasCapability(account, "search"):
+				capability = "search"
+			case accountHasCapability(account, "image"):
+				capability = "image"
+			}
+		}
+		if !accountHasCapability(account, capability) {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "unsupported service capability"})
+			return
+		}
+
+		start := time.Now()
+		if capability == "search" {
+			query := strings.TrimSpace(req.Query)
+			if query == "" {
+				query = "OmniProxy health check"
+			}
+			result, err := callSearchProvider(r, account, searchRequest{Query: query, URL: strings.TrimSpace(req.URL), MaxResults: 1})
+			if err != nil {
+				h.pool.RecordError(account.ID, serviceErrorIsQuota(err), "search")
+				w.WriteHeader(serviceErrorStatus(err))
+				json.NewEncoder(w).Encode(map[string]interface{}{"error": err.Error(), "capability": capability})
+				return
+			}
+			h.pool.RecordSuccess(account.ID, "search")
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true, "capability": capability, "provider": result.Provider,
+				"reply": fmt.Sprintf("%d result(s)", len(result.Results)), "resultCount": len(result.Results),
+				"elapsedMs": time.Since(start).Milliseconds(),
+			})
+			return
+		}
+
+		// Image requests returned above. A service account without an explicit
+		// search capability must not fall through to Kiro chat routing.
+		if capability != "search" {
+			w.WriteHeader(http.StatusNotImplemented)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false, "capability": capability, "unsupported": true,
+				"error": "service account does not support chat testing",
+			})
+			return
+		}
+	}
+
 	if err := h.ensureValidToken(account); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
 		return
 	}
 
-	// Parse test model from request body (optional)
-	var req struct {
-		Model string `json:"model"`
+	// AgentRouter's Test Chat is a protocol health check, not a generic
+	// account chat. Keep it identical to the documented Anthropic probe so a
+	// successful result proves the configured key can reach AgentRouter.
+	if isAgentRouterAccount(account) {
+		start := time.Now()
+		reply, err := CallAgentRouterTest(account)
+		if err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		h.pool.RecordSuccess(account.ID, agentRouterTestModel)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":   true,
+			"reply":     reply,
+			"model":     agentRouterTestModel,
+			"elapsedMs": time.Since(start).Milliseconds(),
+		})
+		return
 	}
-	json.NewDecoder(r.Body).Decode(&req)
+
+	// Parse test model from request body (optional)
 	if req.Model == "" {
 		req.Model = "claude-sonnet-4"
 	}
@@ -8768,7 +10315,7 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 			account.BanReason = truncateErrBody([]byte(errMsg))
 			account.BanTime = time.Now().Unix()
 			account.Enabled = false
-			if updateErr := config.UpdateAccount(account.ID, *account); updateErr != nil {
+			if updateErr := config.UpdateAccountPreservingCredentials(account.ID, *account); updateErr != nil {
 				logger.Errorf("[apiTestAccount] Failed to persist BANNED status for %s: %v", account.Email, updateErr)
 			} else {
 				logger.Warnf("[apiTestAccount] Marked %s as BANNED (suspended): %s", account.Email, errMsg)
@@ -8787,7 +10334,7 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 			account.BanReason = "Test failed: " + truncateErrBody([]byte(errMsg))
 			account.BanTime = time.Now().Unix()
 			account.Enabled = false
-			if updateErr := config.UpdateAccount(account.ID, *account); updateErr != nil {
+			if updateErr := config.UpdateAccountPreservingCredentials(account.ID, *account); updateErr != nil {
 				logger.Errorf("[apiTestAccount] Failed to persist BANNED status for %s: %v", account.Email, updateErr)
 			} else {
 				logger.Warnf("[apiTestAccount] Marked %s as BANNED (auth error): %s", account.Email, errMsg)
@@ -8815,7 +10362,7 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		account.BanReason = ""
 		account.BanTime = 0
 		account.Enabled = true
-		if err := config.UpdateAccount(account.ID, *account); err != nil {
+		if err := config.UpdateAccountPreservingCredentials(account.ID, *account); err != nil {
 			logger.Errorf("[apiTestAccount] Failed to persist ban-clear for %s: %v", account.Email, err)
 		} else if wasBanned {
 			logger.Infof("[apiTestAccount] Test succeeded — cleared ban for %s", account.Email)
@@ -8824,10 +10371,10 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 	}
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":     true,
-		"reply":       content,
-		"model":       req.Model,
-		"banCleared":  wasBanned,
+		"success":    true,
+		"reply":      content,
+		"model":      req.Model,
+		"banCleared": wasBanned,
 	})
 }
 
@@ -8845,6 +10392,14 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 	if account == nil {
 		w.WriteHeader(404)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+	if isServiceAccount(account) {
+		h.pool.Reload()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true, "message": "Service account metadata refreshed",
+			"provider": account.Provider, "capabilities": account.Capabilities,
+		})
 		return
 	}
 
@@ -8911,21 +10466,26 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 		// proves the account can actually serve traffic. Refresh only
 		// updates token + usage data; if the account is still banned,
 		// the operator should press "Test" to verify recovery.
-		if !account.Enabled && (account.BanStatus == "" || account.BanStatus == "ACTIVE") {
-			account.Enabled = true
-			_ = config.UpdateAccount(account.ID, *account)
-		}
-		// Refresh token first so JWT-extracted profile + usage call use
-		// the latest access token.
+		// Refresh token first so JWT-extracted profile + usage call use the
+		// latest access token. A failed refresh must not be swallowed: using
+		// the old token here is what produced the misleading 401/BANNED state.
+		var codexRefreshErr error
 		if account.RefreshToken != "" {
-			_ = refreshTokenIfNeeded()
+			codexRefreshErr = refreshCodexAccountToken(account)
 		}
 		refreshCodexAccountID(account)
 		modelsErr := h.fetchAndCacheAccountModels(account)
-		usageErr := fetchCodexUsage(account)
+		var usageErr error
+		if codexRefreshErr == nil {
+			usageErr = fetchCodexUsage(account)
+		} else {
+			usageErr = fmt.Errorf("token refresh failed: %w", codexRefreshErr)
+		}
+		markCodexReauthRequired(account, codexRefreshErr)
+		markCodexReauthRequired(account, usageErr)
 		msg := "Codex account refreshed"
 		if modelsErr != nil && usageErr != nil {
-			msg = "Codex profile refreshed; models + usage unavailable: " + modelsErr.Error()
+			msg = "Codex profile refreshed; models + usage unavailable: " + usageErr.Error()
 		} else if modelsErr != nil {
 			msg = "Codex profile refreshed; models unavailable: " + modelsErr.Error()
 		} else if usageErr != nil {
@@ -8991,9 +10551,9 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 				logger.Warnf("[apiRefreshAccount] Marked %s as BANNED (suspended): %s", account.Email, errMsg)
 			}
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success":    true,
-				"message":    "Account banned: " + truncateErrBody([]byte(errMsg)),
-				"banStatus":  "BANNED",
+				"success":   true,
+				"message":   "Account banned: " + truncateErrBody([]byte(errMsg)),
+				"banStatus": "BANNED",
 			})
 			return
 		}
@@ -9102,7 +10662,13 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		"clientSecret":      account.ClientSecret,
 		"authMethod":        account.AuthMethod,
 		"provider":          account.Provider,
+		"sourceId":          account.SourceID,
+		"providerKind":      account.ProviderKind,
+		"capabilities":      account.Capabilities,
 		"region":            account.Region,
+		"baseUrl":           account.BaseURL,
+		"imageModel":        account.ImageModel,
+		"codexImageModel":   account.CodexImageModel,
 		"expiresAt":         account.ExpiresAt,
 		"machineId":         account.MachineId,
 		"weight":            account.Weight,
@@ -9154,6 +10720,11 @@ func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id
 	if account == nil {
 		w.WriteHeader(404)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+	if isServiceAccount(account) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "service accounts do not expose chat models"})
 		return
 	}
 
@@ -9236,6 +10807,117 @@ func (h *Handler) apiGetAccountModelsCached(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"models":  models,
+	})
+}
+
+func (h *Handler) apiGetAccountImageModels(w http.ResponseWriter, r *http.Request, id string) {
+	accounts := config.GetAccounts()
+	var account *config.Account
+	for i := range accounts {
+		if accounts[i].ID == id {
+			account = &accounts[i]
+			break
+		}
+	}
+	if account == nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+
+	models := make([]map[string]interface{}, 0)
+	source := "kiro"
+	supported := false
+	reason := "upstream does not expose image generation"
+	appendModel := func(id, name, modelSource string) {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			return
+		}
+		for _, existing := range models {
+			if existing["id"] == id {
+				return
+			}
+		}
+		models = append(models, map[string]interface{}{"id": id, "name": firstNonEmpty(name, id), "source": modelSource})
+	}
+
+	switch {
+	case isCodexAccount(account):
+		source, supported, reason = "codex", true, ""
+		appendModel(imageModelFor(account, ""), imageModelFor(account, ""), source)
+		for _, model := range codexSubscriptionModels() {
+			appendModel(model.ModelId, model.ModelName, source)
+		}
+	case isExternalAccount(account):
+		source = "external"
+		discovered, err := fetchExternalProviderModels(account)
+		if err == nil {
+			for _, model := range discovered {
+				// OpenAI-compatible catalogs often omit output modalities. Keep
+				// those IDs selectable as candidates; the real image request is
+				// still the authority on whether the upstream accepts the model.
+				verified := modelSupportsImageOutput(model)
+				modelSource := source
+				if !verified {
+					modelSource = source + ":candidate"
+				}
+				appendImageModel(&models, model.ModelId, model.ModelName, modelSource, verified)
+			}
+		}
+		if err == nil && len(models) > 0 {
+			supported = true
+			reason = ""
+		} else if err != nil {
+			reason = "model discovery failed; custom model is still allowed"
+		} else {
+			reason = "upstream returned no models; custom model is still allowed"
+		}
+	case accountHasCapability(account, "image"):
+		source, supported, reason = "service", true, ""
+		appendModel(imageModelFor(account, ""), imageModelFor(account, ""), source)
+		appendModel("openai/gpt-5-image", "openai/gpt-5-image", source)
+	default:
+		// Kiro's model catalog is useful for selecting a test model even
+		// though Kiro currently has no native image-generation route.
+		source = "kiro:candidate"
+		for _, modelID := range h.pool.GetModelList(account.ID) {
+			appendModel(modelID, modelID, source)
+		}
+		if len(models) == 0 {
+			if discovered, err := ListAvailableModels(account); err == nil {
+				for _, model := range discovered {
+					appendModel(model.ModelId, model.ModelName, source)
+				}
+			}
+		}
+		if len(models) > 0 {
+			reason = "Kiro catalog models are selectable, but this account does not expose native image generation"
+		}
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":       true,
+		"models":        models,
+		"source":        source,
+		"supported":     supported,
+		"customAllowed": true,
+		"reason":        reason,
+	})
+}
+
+func appendImageModel(models *[]map[string]interface{}, id, name, source string, verified bool) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return
+	}
+	for _, existing := range *models {
+		if existing["id"] == id {
+			return
+		}
+	}
+	*models = append(*models, map[string]interface{}{
+		"id": id, "name": firstNonEmpty(name, id), "source": source, "verified": verified,
 	})
 }
 

@@ -66,6 +66,11 @@ function fmtDateStr(s) {
   try { return new Date(s).toLocaleString(); } catch { return s; }
 }
 
+function fmtUnixDate(ts) {
+  if (!ts) return 'Not available';
+  return new Date(ts * 1000).toLocaleString();
+}
+
 // Color + emoji by remaining % (9router convention: >70 green, 30-70 yellow, <30 red)
 function quotaStyle(remaining) {
   if (remaining > 70) return { text: '#16a34a', bg: '#22c55e', bgLight: 'rgba(34,197,94,0.18)', emoji: '🟢' };
@@ -284,6 +289,15 @@ function renderAccountBlock(a) {
     : '<span class="quota-status-dot quota-status-disabled"></span>';
   const planBadge = a.codexPlanType ? `<span class="quota-badge quota-badge-plan">${escapeHtml(a.codexPlanType)}</span>` : '';
   const statusBadge = a.status ? `<span class="quota-badge quota-badge-${escapeHtml(a.status)}">${escapeHtml(a.status)}</span>` : '';
+  const isCodex = (a.provider || '').toLowerCase().includes('codex') || a.codexPlanType;
+  const packageExpiry = a.daysRemaining > 0
+    ? `${fmtNum(a.daysRemaining)} days remaining`
+    : 'Not available';
+  const accountDetailsHtml = `
+    <div class="quota-account-details">
+      <span title="Package expiry reported by the upstream provider"><i class="fa-solid fa-calendar-days"></i> Package: ${escapeHtml(packageExpiry)}</span>
+      ${a.addedAt ? `<span title="When this account was added to OmniProxy"><i class="fa-solid fa-clock"></i> Added: ${escapeHtml(fmtUnixDate(a.addedAt))}</span>` : ''}
+    </div>`;
 
   // Quota rows (9router-style: one row per quota dimension)
   let quotasHtml;
@@ -309,7 +323,6 @@ function renderAccountBlock(a) {
   //   for Codex accounts; clicking it checks available credits first and
   //   shows a toast if none are available.
   const isExternal = (a.provider || '').toLowerCase().includes('external');
-  const isCodex = (a.provider || '').toLowerCase().includes('codex') || a.codexPlanType;
   const refreshIcon = 'fa-solid fa-rotate';
   const refreshLabel = typeof t === 'function' ? t('quota.refreshAccount') : 'Refresh';
   const creditsLabel = typeof t === 'function' ? t('quota.checkCredits') : 'Credits';
@@ -353,6 +366,7 @@ function renderAccountBlock(a) {
           ${planBadge}
         </div>
       </div>
+      ${accountDetailsHtml}
       <div class="quota-block-rows">
         ${quotasHtml}
       </div>

@@ -12,12 +12,12 @@ import (
 // input/output token counts instead of leaving the running estimate untouched.
 func TestUpdateTokensFromEventReadsUpstreamCounts(t *testing.T) {
 	cases := []struct {
-		name      string
-		event     map[string]interface{}
-		startIn   int
-		startOut  int
-		wantIn    int
-		wantOut   int
+		name     string
+		event    map[string]interface{}
+		startIn  int
+		startOut int
+		wantIn   int
+		wantOut  int
 	}{
 		{
 			name: "top-level camelCase",
@@ -130,8 +130,8 @@ func TestSumDailyTotalsNotCappedByRing(t *testing.T) {
 	old := time.Now().UTC().AddDate(0, 0, -100).Format("2006-01-02")
 
 	tr := &UsageTracker{
-		ringCap:   500,
-		ring:      make([]RequestRecord, 500),
+		ringCap: 500,
+		ring:    make([]RequestRecord, 500),
 		dailyData: map[string]*PeriodSummary{
 			today:     {Requests: 4259, PromptTokens: 722756144, CompletionTokens: 2549452, Cost: 5557.5},
 			yesterday: {Requests: 1236, PromptTokens: 147630238, CompletionTokens: 607684, Cost: 1176.9},
@@ -164,6 +164,35 @@ func TestSumDailyTotalsNotCappedByRing(t *testing.T) {
 	}
 	if day.TotalCompletionTokens != 2549452 {
 		t.Fatalf("today completion tokens: got %d, want %d", day.TotalCompletionTokens, 2549452)
+	}
+
+	// "24h" rolls back one UTC day, so it also includes yesterday's bucket —
+	// it must NOT match "today" anymore.
+	roll := &UsageStats{}
+	tr.sumDailyTotalsLocked(roll, "24h")
+	if roll.TotalRequests != 4259+1236 {
+		t.Fatalf("24h total requests: got %d, want %d", roll.TotalRequests, 4259+1236)
+	}
+	if roll.TotalRequests == day.TotalRequests {
+		t.Fatalf("24h must differ from today, both = %d", day.TotalRequests)
+	}
+}
+
+func TestCacheHitTokensUsesEffectiveAggregate(t *testing.T) {
+	// The cache sources are on different requests. max(cacheRead, cachedTokens)
+	// would lose the OpenAI hit tokens after their daily aggregation.
+	if got := cacheHitTokens(200, 20, 120, 90, 10); got != 100 {
+		t.Fatalf("cache hits from effective aggregate: got %d, want 100", got)
+	}
+
+	// Malformed upstream cache counts cannot exceed their request's input total.
+	if got := cacheHitTokens(100, 10, 1, 400, 0); got != 100 {
+		t.Fatalf("cache hits must be clamped to input: got %d, want 100", got)
+	}
+
+	// Legacy aggregates without effective tokens retain the same safety bound.
+	if got := cacheHitTokens(100, 0, 0, 150, 25); got != 100 {
+		t.Fatalf("legacy cache hits must be clamped to input: got %d, want 100", got)
 	}
 }
 
@@ -289,5 +318,33 @@ func TestRecordErrorAppendsFailedRecord(t *testing.T) {
 	}
 	if rec.Model != "claude-opus-4.8" {
 		t.Fatalf("model: got %q, want claude-opus-4.8", rec.Model)
+	}
+}
+
+func TestTokensForAccountSinceUsesPersistedDailyAccountUsage(t *testing.T) {
+	tracker := &UsageTracker{
+		dailyData: map[string]*PeriodSummary{
+			"2026-07-28": {
+				ByAccount: map[string]*PeriodSummary{
+					"codex-a": {PromptTokens: 500, CompletionTokens: 50},
+				},
+			},
+			"2026-07-29": {
+				ByAccount: map[string]*PeriodSummary{
+					"codex-a": {PromptTokens: 1_200, CompletionTokens: 80},
+					"codex-b": {PromptTokens: 9_999, CompletionTokens: 1},
+				},
+			},
+			"2026-07-30": {
+				ByAccount: map[string]*PeriodSummary{
+					"codex-a": {PromptTokens: 2_000, CompletionTokens: 170},
+				},
+			},
+		},
+	}
+
+	start := time.Date(2026, time.July, 29, 4, 0, 0, 0, time.UTC)
+	if got := tracker.TokensForAccountSince("codex-a", start); got != 3_450 {
+		t.Fatalf("window tokens = %d, want 3450", got)
 	}
 }

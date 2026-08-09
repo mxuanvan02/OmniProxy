@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"omniproxy/cli"
 	"omniproxy/config"
 	"omniproxy/logger"
 	"omniproxy/pool"
 	"omniproxy/proxy"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -98,8 +98,11 @@ func startServer(addr string, handler *proxy.Handler) *http.Server {
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 30 * time.Second,
-		ReadTimeout:       60 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		// Claude Code can upload a large context and tool state before the
+		// handler starts streaming. Keep request-body timeout aligned with the
+		// upstream client timeout so slow uploads are not cut at one minute.
+		ReadTimeout: 15 * time.Minute,
+		IdleTimeout: 120 * time.Second,
 	}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err.Error() != "http: Server closed" {

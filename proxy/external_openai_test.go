@@ -4,8 +4,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"omniproxy/config"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -170,6 +171,66 @@ func TestKiroPayloadToOpenAIRequestRestoresToolNames(t *testing.T) {
 	name, _ := fn["name"].(string)
 	if name != originalName {
 		t.Fatalf("tool name = %q, want %q (restored)", name, originalName)
+	}
+}
+
+func TestClaudeToolChoiceReachesExternalOpenAIRequest(t *testing.T) {
+	initConfigForTests(t)
+
+	tool := ClaudeTool{
+		Name:        "Read",
+		Description: "Read a file",
+		InputSchema: map[string]interface{}{"type": "object"},
+	}
+	choices := []struct {
+		name string
+		in   interface{}
+		want interface{}
+	}{
+		{name: "any", in: map[string]interface{}{"type": "any"}, want: "required"},
+		{name: "none", in: map[string]interface{}{"type": "none"}, want: "none"},
+		{name: "auto", in: map[string]interface{}{"type": "auto"}, want: "auto"},
+		{
+			name: "specific tool",
+			in:   map[string]interface{}{"type": "tool", "name": "Read"},
+			want: map[string]interface{}{
+				"type":     "function",
+				"function": map[string]interface{}{"name": "Read"},
+			},
+		},
+	}
+
+	for _, tc := range choices {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := ClaudeToKiro(&ClaudeRequest{
+				Model:      "claude-opus-5",
+				Messages:   []ClaudeMessage{{Role: "user", Content: "inspect the file"}},
+				Tools:      []ClaudeTool{tool},
+				ToolChoice: tc.in,
+			}, false)
+			payload.OriginalModel = "claude-opus-5"
+
+			body, err := kiroPayloadToOpenAIRequest(payload, nil)
+			if err != nil {
+				t.Fatalf("kiroPayloadToOpenAIRequest: %v", err)
+			}
+			if got := body["tool_choice"]; !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("tool_choice = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+
+	noChoice := ClaudeToKiro(&ClaudeRequest{
+		Model:    "claude-opus-5",
+		Messages: []ClaudeMessage{{Role: "user", Content: "answer normally"}},
+		Tools:    []ClaudeTool{tool},
+	}, false)
+	body, err := kiroPayloadToOpenAIRequest(noChoice, nil)
+	if err != nil {
+		t.Fatalf("kiroPayloadToOpenAIRequest without choice: %v", err)
+	}
+	if _, ok := body["tool_choice"]; ok {
+		t.Fatalf("tool_choice should be omitted when the client did not specify one: %#v", body["tool_choice"])
 	}
 }
 
