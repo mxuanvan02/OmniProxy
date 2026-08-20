@@ -1603,33 +1603,8 @@ let testModalMode = 'chat';
   function modalAdd(title, body) {
     title.textContent = t('modal.addAccount');
     body.innerHTML =
-      // ── Kiro category ──
-      '<div class="add-category-section">' +
-      '<div class="add-category-header">' +
-      '<span class="add-category-icon"><i class="fa-solid fa-cloud" aria-hidden="true"></i></span>' +
-      '<span class="add-category-title">' + escapeHtml(t('category.kiro')) + '</span>' +
-      '<span class="add-category-desc">' + escapeHtml(t('modal.kiroCategoryDesc')) + '</span>' +
-      '</div>' +
-      '<div class="method-list">' +
-      methodCard('builderid', t('modal.builderIdTitle'), t('modal.builderIdDesc')) +
-      methodCard('iam', t('modal.iamTitle'), t('modal.iamDesc')) +
-      methodCard('sso', t('modal.ssoTitle'), t('modal.ssoDesc')) +
-      methodCard('social', t('modal.socialTitle'), t('modal.socialDesc')) +
-      methodCard('kirossi', t('modal.kirossiTitle'), t('modal.kirossiDesc')) +
-      methodCard('kirocli', t('modal.kirocliTitle'), t('modal.kirocliDesc')) +
-      methodCard('kiroAuto', t('kiroauto.title'), t('kiroauto.desc')) +
-      methodCard('kiroToken', t('kirotoken.title'), t('kirotoken.desc')) +
-      methodCard('ssocache', t('modal.ssocacheTitle'), t('modal.ssocacheDesc')) +
-      methodCard('local', t('modal.localTitle'), t('modal.localDesc')) +
-      methodCard('credentials', t('modal.credentialsTitle'), t('modal.credentialsDesc')) +
-      methodCard('apikey', t('modal.apikeyTitle'), t('modal.apikeyDesc')) +
-      methodCard('external', t('modal.externalTitle'), t('modal.externalDesc')) +
-      methodCard('agentrouter', t('modal.agentrouterTitle'), t('modal.agentrouterDesc')) +
-      methodCard('cookie', t('modal.cookieTitle'), t('modal.cookieDesc')) +
-      '</div>' +
-      '</div>' +
       // ── Codex category ──
-      '<div class="add-category-section">' +
+      '<div class="add-category-section" data-cat="codex">' +
       '<div class="add-category-header">' +
       '<span class="add-category-icon"><i class="fa-solid fa-robot" aria-hidden="true"></i></span>' +
       '<span class="add-category-title">' + escapeHtml(t('category.codex')) + '</span>' +
@@ -1640,7 +1615,73 @@ let testModalMode = 'chat';
       methodCard('ninerouter', t('modal.ninerouterTitle'), t('modal.ninerouterDesc')) +
       '</div>' +
       '</div>' +
+      // ── External & Gateway category (OpenAI-compatible, AgentRouter) ──
+      '<div class="add-category-section" data-cat="external">' +
+      '<div class="add-category-header">' +
+      '<span class="add-category-icon"><i class="fa-solid fa-network-wired" aria-hidden="true"></i></span>' +
+      '<span class="add-category-title">' + escapeHtml(t('category.external') || 'External & Gateways') + '</span>' +
+      '<span class="add-category-desc">' + escapeHtml(t('modal.externalCategoryDesc') || 'OpenAI-compatible APIs & AgentRouter Gateway') + '</span>' +
+      '</div>' +
+      '<div class="method-list">' +
+      methodCard('external', t('modal.externalTitle'), t('modal.externalDesc')) +
+      methodCard('agentrouter', t('modal.agentrouterTitle'), t('modal.agentrouterDesc')) +
+      '</div>' +
+      '</div>' +
+      // ── Kiro category (Collapsible with primary methods + show more) ──
+      '<div class="add-category-section add-category-collapsible" data-cat="kiro">' +
+      '<div class="add-category-header clickable" id="kiroSectionToggle">' +
+      '<span class="add-category-icon"><i class="fa-solid fa-cloud" aria-hidden="true"></i></span>' +
+      '<span class="add-category-title">' + escapeHtml(t('category.kiro')) + '</span>' +
+      '<span class="add-category-desc">' + escapeHtml(t('modal.kiroCategoryDesc')) + '</span>' +
+      '<span class="add-category-toggle-icon" id="kiroToggleIcon"><i class="fa-solid fa-chevron-down" aria-hidden="true"></i></span>' +
+      '</div>' +
+      '<div class="method-list" id="kiroPrimaryMethods">' +
+      methodCard('builderid', t('modal.builderIdTitle'), t('modal.builderIdDesc')) +
+      methodCard('iam', t('modal.iamTitle'), t('modal.iamDesc')) +
+      methodCard('social', t('modal.socialTitle'), t('modal.socialDesc')) +
+      methodCard('kirossi', t('modal.kirossiTitle'), t('modal.kirossiDesc')) +
+      '</div>' +
+      '<div class="method-list hidden" id="kiroSecondaryMethods">' +
+      methodCard('sso', t('modal.ssoTitle'), t('modal.ssoDesc')) +
+      methodCard('kirocli', t('modal.kirocliTitle'), t('modal.kirocliDesc')) +
+      methodCard('kiroAuto', t('kiroauto.title'), t('kiroauto.desc')) +
+      methodCard('kiroToken', t('kirotoken.title'), t('kirotoken.desc')) +
+      methodCard('ssocache', t('modal.ssocacheTitle'), t('modal.ssocacheDesc')) +
+      methodCard('local', t('modal.localTitle'), t('modal.localDesc')) +
+      methodCard('credentials', t('modal.credentialsTitle'), t('modal.credentialsDesc')) +
+      methodCard('apikey', t('modal.apikeyTitle'), t('modal.apikeyDesc')) +
+      methodCard('cookie', t('modal.cookieTitle'), t('modal.cookieDesc')) +
+      '</div>' +
+      '<div class="add-category-more-wrap">' +
+      '<button type="button" class="btn btn-sm btn-ghost add-category-more-btn" id="kiroShowMoreBtn">' +
+      '<i class="fa-solid fa-ellipsis" aria-hidden="true"></i> ' +
+      '<span id="kiroShowMoreLabel">' + escapeHtml(t('modal.showMoreMethods') || 'Show 9 more Kiro methods...') + '</span>' +
+      '</button>' +
+      '</div>' +
+      '</div>' +
       '<div class="modal-footer"><button class="btn btn-secondary" data-close-add="1" type="button">' + escapeHtml(t('common.cancel')) + '</button></div>';
+
+    // Event listener for Kiro show more toggle
+    var moreBtn = $('kiroShowMoreBtn');
+    if (moreBtn) {
+      moreBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        var sec = $('kiroSecondaryMethods');
+        var icon = $('kiroToggleIcon');
+        var label = $('kiroShowMoreLabel');
+        if (!sec) return;
+        var isHidden = sec.classList.contains('hidden');
+        if (isHidden) {
+          sec.classList.remove('hidden');
+          if (icon) icon.innerHTML = '<i class="fa-solid fa-chevron-up" aria-hidden="true"></i>';
+          if (label) label.textContent = t('modal.showLessMethods') || 'Show fewer Kiro methods';
+        } else {
+          sec.classList.add('hidden');
+          if (icon) icon.innerHTML = '<i class="fa-solid fa-chevron-down" aria-hidden="true"></i>';
+          if (label) label.textContent = t('modal.showMoreMethods') || 'Show 9 more Kiro methods...';
+        }
+      });
+    }
   }
   function modalBuilderId(title, body) {
     title.textContent = t('modal.builderIdTitle');
