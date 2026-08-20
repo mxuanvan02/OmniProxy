@@ -989,7 +989,7 @@ func TestUpstreamErrorStatus(t *testing.T) {
 // ── upsertYAMLModelSection tests ─────────────────────────────────────
 
 func TestUpsertYAMLModelSectionExistingOmniroute(t *testing.T) {
-	// Simulates the hitokiri scenario: existing config with provider: omniroute
+	// Simulates remote migration scenario: existing config with provider: omniroute
 	input := `model:
   default: gpt-5.6-terra
   provider: omniroute
