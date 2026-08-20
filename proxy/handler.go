@@ -67,7 +67,7 @@ func policyModelLimits(model string) (int, int, bool) {
 		return 272000, 128000, true
 	case deepResearchModel:
 		return 272000, 128000, true
-	case "claude-opus-5", "claude-sonnet-5", "claude-fable-5":
+	case "claude-opus-5", "claude-sonnet-5", "claude-haiku-5":
 		return 1_000_000, 128_000, true
 	default:
 		return 0, 0, false
@@ -1255,7 +1255,7 @@ func (h *Handler) refreshAllAccounts() {
 		if needsRefresh {
 			if account.AuthMethod == codexAuthMethod {
 				if err := refreshCodexAccountToken(account); err != nil {
-					markCodexReauthRequired(account, err)
+					markCodexAuthFailure(account, err)
 					logger.Warnf("[BackgroundRefresh] Codex token refresh failed for %s: %v", account.Email, err)
 					// Never probe usage with an access token that is known to be
 					// expired when the refresh-token flow failed.
@@ -1342,7 +1342,7 @@ func (h *Handler) refreshAllAccounts() {
 		// failures are token/account-health signals, not proof of a ban.
 		if account.AuthMethod == codexAuthMethod && account.AccessToken != "" {
 			if err := fetchCodexUsage(account); err != nil {
-				markCodexReauthRequired(account, err)
+				markCodexAuthFailure(account, err)
 				logger.Warnf("[BackgroundRefresh] Codex usage fetch failed for %s: %v", account.Email, err)
 			}
 		}
@@ -1562,120 +1562,93 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleModels returns model list
-func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
-	// try using cached real model list
-	h.modelsCacheMu.RLock()
-	cached := h.cachedModels
-	h.modelsCacheMu.RUnlock()
-	if len(cached) == 0 {
-		h.refreshModelsCache()
-		h.modelsCacheMu.RLock()
-		cached = h.cachedModels
-		h.modelsCacheMu.RUnlock()
-	}
+// canonicalClaude5ModelIDs is the public Claude catalog. Thinking is a request
+// capability parsed by ParseModelAndThinking; it is deliberately not exposed as
+// a second model ID in discovery responses.
+var canonicalClaude5ModelIDs = []string{
+	"claude-sonnet-5",
+	"claude-opus-5",
+}
 
-	thinkingSuffix := config.GetThinkingConfig().Suffix
-
-	models := buildAnthropicModelsResponse(cached, thinkingSuffix)
-	if len(models) == 0 {
-		models = fallbackAnthropicModels(thinkingSuffix)
-	}
-
-	// add alias models
-	models = append(models,
-		buildModelInfo("auto", "kiro-proxy", true),
-		buildModelInfo("gpt-4o", "kiro-proxy", true),
-		buildModelInfo("gpt-4", "kiro-proxy", true),
-	)
-
-	// Append combo entries so agents can discover named combos in /v1/models
-	for _, combo := range config.ListCombos() {
-		models = append(models, buildModelInfo(combo.Name, "combo", true))
-	}
-
-	// Append user-declared extra models (e.g. claude-sonnet-5, claude-opus-4.8)
-	// that the proxy routes via passthrough but the upstream account doesn't
-	// advertise. Emit a thinking variant too so discovery matches the pattern
-	// used for the upstream-cached anthropic models.
-	for _, id := range config.GetExtraModels() {
-		supportsImage := true
-		if strings.HasPrefix(strings.ToLower(id), "claude-") {
-			models = append(models, buildModelInfo(id, "anthropic", supportsImage))
-			models = append(models, buildModelInfo(id+thinkingSuffix, "anthropic", supportsImage))
-		} else {
-			models = append(models, buildModelInfo(id, "kiro-proxy", supportsImage))
+func canonicalClaude5Models() []map[string]interface{} {
+	models := make([]map[string]interface{}, 0, len(canonicalClaude5ModelIDs))
+	for _, id := range canonicalClaude5ModelIDs {
+		entry := buildModelInfo(id, "anthropic", true)
+		entry["token_limits"] = map[string]interface{}{
+			"maxInputTokens":  1_000_000,
+			"maxOutputTokens": 128_000,
 		}
+		models = append(models, entry)
 	}
+	return models
+}
 
-	// Always advertise Codex subscription models so they appear in the
-	// model picker (e.g. when configuring the Codex CLI tool) even before
-	// a Codex account has been added. Runtime routing will fail with a
-	// clear "no codex account" error if none is enabled when a request
-	// actually arrives — but the model catalog should be complete for
-	// configuration/discovery purposes.
-	models = mergeCanonicalModelResponseEntries(models, codexSubscriptionModelsList())
+// mergePublicModelEntries deduplicates catalog entries by lowercase model ID
+// while preserving first-seen order, so canonical metadata wins over a later
+// discovery-cache record for the same ID.
+func mergePublicModelEntries(models []map[string]interface{}) []map[string]interface{} {
+	seen := make(map[string]bool, len(models))
+	out := make([]map[string]interface{}, 0, len(models))
+	for _, model := range models {
+		id, _ := model["id"].(string)
+		key := strings.ToLower(strings.TrimSpace(id))
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, model)
+	}
+	return out
+}
 
+// handleModels returns the configured public catalog. The legacy response
+// contains canonical Claude and Codex models. Rich consumers may request the
+// account-aware catalogue with ?catalog=all.
+func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
+	models := canonicalClaude5Models()
+	if hasEnabledCodexAccount() {
+		models = append(models, codexSubscriptionModelsList()...)
+	}
+	if r.URL.Query().Get("catalog") == "all" {
+		h.modelsCacheMu.RLock()
+		cached := append([]ModelInfo(nil), h.cachedModels...)
+		h.modelsCacheMu.RUnlock()
+		for _, info := range cached {
+			id := strings.TrimSpace(info.ModelId)
+			if id == "" {
+				continue
+			}
+			ownedBy := strings.TrimSpace(info.Provider)
+			if ownedBy == "" {
+				ownedBy = "external"
+			}
+			models = append(models, buildModelInfoWithTokenLimits(id, ownedBy, modelSupportsImage(info.InputTypes), &info))
+		}
+		models = mergePublicModelEntries(models)
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"object": "list",
 		"data":   models,
 	})
-	return
 }
 
-// handleModelByID returns a single model entry by ID. Claude Code CLI and other
-// gateway-aware clients may call /v1/models/{id} to fetch capabilities for a
-// specific model. We search the same model list used by /v1/models.
+
+// handleModelByID returns a single entry from the public catalog.
 func (h *Handler) handleModelByID(w http.ResponseWriter, r *http.Request, modelID string) {
 	if modelID == "" {
 		h.sendClaudeError(w, 404, "not_found_error", "Model ID is required")
 		return
 	}
 
-	// Build the same model list as /v1/models and find the matching entry.
-	h.modelsCacheMu.RLock()
-	cached := h.cachedModels
-	h.modelsCacheMu.RUnlock()
-	if len(cached) == 0 {
-		h.refreshModelsCache()
-		h.modelsCacheMu.RLock()
-		cached = h.cachedModels
-		h.modelsCacheMu.RUnlock()
+	models := canonicalClaude5Models()
+	if hasEnabledCodexAccount() {
+		models = append(models, codexSubscriptionModelsList()...)
 	}
-
-	thinkingSuffix := config.GetThinkingConfig().Suffix
-	models := buildAnthropicModelsResponse(cached, thinkingSuffix)
-	if len(models) == 0 {
-		models = fallbackAnthropicModels(thinkingSuffix)
-	}
-
-	models = append(models,
-		buildModelInfo("auto", "kiro-proxy", true),
-		buildModelInfo("gpt-4o", "kiro-proxy", true),
-		buildModelInfo("gpt-4", "kiro-proxy", true),
-	)
-	for _, combo := range config.ListCombos() {
-		models = append(models, buildModelInfo(combo.Name, "combo", true))
-	}
-	for _, id := range config.GetExtraModels() {
-		supportsImage := true
-		if strings.HasPrefix(strings.ToLower(id), "claude-") {
-			models = append(models, buildModelInfo(id, "anthropic", supportsImage))
-			models = append(models, buildModelInfo(id+thinkingSuffix, "anthropic", supportsImage))
-		} else {
-			models = append(models, buildModelInfo(id, "kiro-proxy", supportsImage))
-		}
-	}
-
-	// Include codex subscription models so /v1/models/{id} can resolve
-	// codex model IDs (e.g. "gpt-5.6-sol") just like /v1/models does.
-	models = mergeCanonicalModelResponseEntries(models, codexSubscriptionModelsList())
-
-	for _, m := range models {
-		if m["id"] == modelID {
+	for _, model := range models {
+		if model["id"] == modelID {
 			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			json.NewEncoder(w).Encode(m)
+			json.NewEncoder(w).Encode(model)
 			return
 		}
 	}
@@ -2113,24 +2086,31 @@ func (h *Handler) apiRefreshAllAccountsModels(w http.ResponseWriter, r *http.Req
 }
 
 // apiRefreshAllAccounts POST /admin/api/accounts/refresh-all
-// Synchronously runs refreshAllAccounts (token + usage + ban detection)
-// for all accounts and returns a summary. Used by the "Refresh All" button.
+// Runs the SAME per-account refresh as the refresh button on each account card
+// (refreshAccountFull), for every account, and returns a summary.
+//
+// It previously delegated to refreshAllAccounts(), the background scheduler's
+// conservative pass: that skips external and service accounts, refreshes the
+// token only when near expiry, never refreshes model catalogs or external
+// credits, and never clears a stale ban. "Refresh All" therefore did strictly
+// less work than clicking refresh on each card, which is not what the label
+// promises.
 func (h *Handler) apiRefreshAllAccounts(w http.ResponseWriter, r *http.Request) {
-	h.refreshAllAccounts()
-	accounts := config.GetAccounts()
-	refreshed, banned, reauthRequired, failed := 0, 0, 0, 0
-	for _, a := range accounts {
-		if a.AccessToken == "" {
-			continue
-		}
-		if a.BanStatus == codexReauthRequiredStatus {
-			reauthRequired++
-		} else if a.BanStatus == "BANNED" || a.BanStatus == "SUSPENDED" || a.BanStatus == "DISABLED" {
-			banned++
-		} else if a.Enabled {
-			refreshed++
-		} else {
+	outcomes := h.refreshAllAccountsFull()
+
+	refreshed, banned, reauthRequired, failed, skipped := 0, 0, 0, 0, 0
+	for _, o := range outcomes {
+		switch {
+		case o.Skipped:
+			skipped++
+		case o.Err != nil:
 			failed++
+		case o.Reauth:
+			reauthRequired++
+		case o.Banned:
+			banned++
+		default:
+			refreshed++
 		}
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -2139,7 +2119,8 @@ func (h *Handler) apiRefreshAllAccounts(w http.ResponseWriter, r *http.Request) 
 		"banned":         banned,
 		"reauthRequired": reauthRequired,
 		"failed":         failed,
-		"message":        fmt.Sprintf("Refreshed %d, banned %d, re-login required %d, failed %d", refreshed, banned, reauthRequired, failed),
+		"skipped":        skipped,
+		"message":        fmt.Sprintf("Refreshed %d, banned %d, re-login required %d, failed %d, skipped %d", refreshed, banned, reauthRequired, failed, skipped),
 	})
 }
 
@@ -2631,7 +2612,7 @@ func modelInfoTokenLimits(info ModelInfo) (int, int, bool) {
 func isCanonicalClaude5Model(model string) bool {
 	model, _ = ParseModelAndThinking(model, "-thinking")
 	model = strings.ToLower(strings.TrimSpace(model))
-	return model == "claude-opus-5" || model == "claude-sonnet-5" || model == "claude-fable-5"
+	return model == "claude-opus-5" || model == "claude-sonnet-5" || model == "claude-haiku-5"
 }
 
 func modelTokenLimitsFromCatalog(catalog []ModelInfo, model string) (int, int, bool) {
@@ -2955,6 +2936,11 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 	startInputTokens := estimatedInputTokens
 	excluded := make(map[string]bool)
 	var lastErr error
+	// lastAccountID remembers the account that produced lastErr so the final
+	// recordError call can attribute the failure to a concrete account. Without
+	// it every failed request landed in Usage with an empty account column and
+	// provider "unknown", making errors untraceable in the dashboard.
+	var lastAccountID string
 	messageStarted := false
 	// Upstream cache values are populated only after the provider emits usage.
 	// The message_start event therefore must not expose the local estimate.
@@ -2991,6 +2977,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				model, attempt)
 			break
 		}
+		lastAccountID = account.ID
 		if err := h.ensureValidToken(account); err != nil {
 			lastErr = err
 			h.usageTracker.RemoveActive(account.ID)
@@ -3447,6 +3434,12 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				// Retry succeeded, proceed to success path
 				goto skipAccountHandling
 			}
+			if pool.IsContentBlockedError(err) {
+				lastErr = err
+				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
+				excluded[account.ID] = true
+				continue
+			}
 			h.usageTracker.RemoveActive(account.ID)
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err, model)
@@ -3534,7 +3527,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		return
 	}
 
-	h.recordError(apiKeyID, "", model, endpointClaude, lastErr.Error())
+	h.recordError(apiKeyID, lastAccountID, model, endpointClaude, lastErr.Error())
 	h.sendClaudeSSEError(w, flusher, "api_error", lastErr.Error())
 }
 
@@ -3774,6 +3767,11 @@ func resolveAccountMeta(accountID string) (provider, accountName string) {
 func (h *Handler) recordError(apiKeyID, accountID, model, endpoint, errMsg string) {
 	atomic.AddInt64(&h.totalRequests, 1)
 	atomic.AddInt64(&h.failedRequests, 1)
+	if apiKeyID != "" {
+		if err := config.RecordApiKeyError(apiKeyID, errMsg); err != nil {
+			logger.Warnf("[ApiKey] failed to record error for key %s: %v", apiKeyID, err)
+		}
+	}
 	if h.usageTracker == nil {
 		return
 	}
@@ -3794,6 +3792,8 @@ func (h *Handler) recordError(apiKeyID, accountID, model, endpoint, errMsg strin
 func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	excluded := make(map[string]bool)
 	var lastErr error
+	// lastAccountID attributes the final failure to a concrete account in Usage.
+	var lastAccountID string
 	cacheKey := payloadCacheKey(payload)
 
 	for attempt := 0; ; attempt++ {
@@ -3801,6 +3801,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		if account == nil {
 			break
 		}
+		lastAccountID = account.ID
 		if err := h.ensureValidToken(account); err != nil {
 			lastErr = err
 			h.usageTracker.RemoveActive(account.ID)
@@ -3888,9 +3889,15 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 				}
 				goto skipNonStreamHandling
 			}
-			//  try refresh+retry before rotating accounts
+			// try refresh+retry before rotating accounts
 			if h.tryRefreshAndRetry(account, payload, callback, err) {
 				goto skipNonStreamHandling
+			}
+			if pool.IsContentBlockedError(err) {
+				lastErr = err
+				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
+				excluded[account.ID] = true
+				continue
 			}
 			h.usageTracker.RemoveActive(account.ID)
 			excluded[account.ID] = true
@@ -3980,7 +3987,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		return
 	}
 
-	h.recordError(apiKeyID, "", model, endpointClaude, lastErr.Error())
+	h.recordError(apiKeyID, lastAccountID, model, endpointClaude, lastErr.Error())
 	h.sendClaudeError(w, upstreamErrorStatus(lastErr), "api_error", lastErr.Error())
 }
 
@@ -4099,6 +4106,8 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 	chatID := "chatcmpl-" + uuid.New().String()
 	excluded := make(map[string]bool)
 	var lastErr error
+	// lastAccountID attributes the final failure to a concrete account in Usage.
+	var lastAccountID string
 	// realCacheRead captures the upstream-reported prompt-cache hit count
 	// (OpenAI prompt_tokens_details.cached_tokens or Kiro cacheReadInputTokens).
 	// When > 0 it is reported to the client via prompt_tokens_details.cached_tokens
@@ -4116,6 +4125,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				model, attempt)
 			break
 		}
+		lastAccountID = account.ID
 		if err := h.ensureValidToken(account); err != nil {
 			lastErr = err
 			h.usageTracker.RemoveActive(account.ID)
@@ -4451,6 +4461,12 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				}
 				goto skipOpenAIStreamHandling
 			}
+			if pool.IsContentBlockedError(err) {
+				lastErr = err
+				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
+				excluded[account.ID] = true
+				continue
+			}
 			h.usageTracker.RemoveActive(account.ID)
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err, model)
@@ -4557,7 +4573,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		return
 	}
 
-	h.recordError(apiKeyID, "", model, endpointOpenAI, lastErr.Error())
+	h.recordError(apiKeyID, lastAccountID, model, endpointOpenAI, lastErr.Error())
 	h.sendOpenAISSEError(w, flusher, "server_error", lastErr.Error())
 }
 
@@ -4565,6 +4581,8 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
 	excluded := make(map[string]bool)
 	var lastErr error
+	// lastAccountID attributes the final failure to a concrete account in Usage.
+	var lastAccountID string
 	cacheKey := payloadCacheKey(payload)
 
 	for attempt := 0; ; attempt++ {
@@ -4572,6 +4590,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		if account == nil {
 			break
 		}
+		lastAccountID = account.ID
 		if err := h.ensureValidToken(account); err != nil {
 			lastErr = err
 			h.usageTracker.RemoveActive(account.ID)
@@ -4652,6 +4671,12 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			if h.tryRefreshAndRetry(account, payload, callback, err) {
 				goto skipOpenAINonStreamHandling
 			}
+			if pool.IsContentBlockedError(err) {
+				lastErr = err
+				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
+				excluded[account.ID] = true
+				continue
+			}
 			h.usageTracker.RemoveActive(account.ID)
 			excluded[account.ID] = true
 			h.handleAccountFailure(account, err, model)
@@ -4702,7 +4727,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		return
 	}
 
-	h.recordError(apiKeyID, "", model, endpointOpenAI, lastErr.Error())
+	h.recordError(apiKeyID, lastAccountID, model, endpointOpenAI, lastErr.Error())
 	h.sendOpenAIError(w, upstreamErrorStatus(lastErr), "server_error", lastErr.Error())
 }
 
@@ -4803,7 +4828,10 @@ const transientRetryBaseDelay = 500 * time.Millisecond
 // This is called BEFORE tryRefreshAndRetry in the retry loops so transient
 // upstream issues are retried in-place without churning through accounts.
 func (h *Handler) tryTransientRetry(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback, err error) bool {
-	if err == nil || !pool.IsTransientError(err) {
+	// This retry policy is intentionally limited to external OpenAI-compatible
+	// providers. Native Kiro/AWS and Codex have separate upstream semantics and
+	// must not inherit this external-provider failover behavior.
+	if !isExternalAccount(account) || err == nil || !pool.IsTransientError(err) {
 		return false
 	}
 	// Hard quota/credit exhaustion never recovers on a same-account retry —
@@ -4813,6 +4841,19 @@ func (h *Handler) tryTransientRetry(account *config.Account, payload *KiroPayloa
 			account.Email, truncateForLog(err.Error()))
 		return false
 	}
+	// Endpoint-global network errors (DNS failure, connection refused) affect
+	// ALL accounts sharing the same upstream endpoint. Retrying the same
+	// account wastes 3×backoff before the same failure — rotate to a
+	// different provider/endpoint immediately instead.
+	if isEndpointGlobalError(err.Error()) {
+		logger.Warnf("[TransientRetry] %s: endpoint-global network error — skipping retry, rotating to different endpoint (err: %s)",
+			account.Email, truncateForLog(err.Error()))
+		return false
+	}
+	// Per-request transient network errors (connection reset, broken pipe, EOF,
+	// timeout) may succeed on retry with the SAME account — the endpoint is
+	// still alive, just this particular connection dropped. Fall through to
+	// the standard retry loop below.
 	for attempt := 1; attempt <= transientRetryMaxAttempts; attempt++ {
 		delay := time.Duration(attempt) * transientRetryBaseDelay
 		logger.Warnf("[TransientRetry] %s: attempt %d/%d after %v (err: %s)",
@@ -5310,25 +5351,18 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 		current["env"] = env
 		// Apply is an endpoint/credential operation. Model selection belongs to
 		// Claude Code settings and must survive UI refreshes or older callers.
-		// Keep the existing allowlist, adding only models explicitly supported
-		// by this installation so advisor selection is not rejected by it.
-		available := make([]interface{}, 0)
-		if existing, ok := current["availableModels"].([]interface{}); ok {
-			available = append(available, existing...)
+		// Replace stale UI state rather than merging it: this installation exposes
+		// only model IDs backed by a working upstream route.
+		current["availableModels"] = []string{
+			"claude-sonnet-5",
+			"claude-opus-5",
 		}
-		seenModels := make(map[string]bool, len(available))
-		for _, raw := range available {
-			if model, ok := raw.(string); ok {
-				seenModels[model] = true
-			}
-		}
-		for _, model := range []string{"claude-fable-5", "gpt-5.6-sol", "claude-opus-5"} {
-			if !seenModels[model] {
-				available = append(available, model)
-				seenModels[model] = true
-			}
-		}
-		current["availableModels"] = available
+		// Claude Code's automatic high-demand fallback uses its Haiku tier.
+		// Route that tier to Sonnet because this installation has no Haiku route.
+		env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "claude-sonnet-5"
+		env["ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"] = "Claude Sonnet 5"
+		env["ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION"] = "Claude Sonnet 5 via the local gateway"
+		current["fallbackModel"] = []string{"claude-sonnet-5"}
 		// `fallbackModels` was an older, non-standard key that caused the
 		// advisor fallback to be confused with the primary model fallback.
 		delete(current, "fallbackModels")
@@ -10307,6 +10341,36 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 	err := dispatchChat(account, kiroPayload, callback)
 	if err != nil {
 		errMsg := err.Error()
+		// Codex accounts: OpenAI returns 401/403 both for a dead session and
+		// for a terminated account, so classify on upstream vocabulary before
+		// falling through to the Kiro-shaped branches below (which explicitly
+		// exclude Codex). Without this, a banned Codex account only ever shows
+		// "Log in again" — a button that can never recover it.
+		if isCodexAccount(account) {
+			switch classifyCodexAuthFailure(err) {
+			case codexAuthFailureBanned:
+				markCodexAuthFailure(account, err)
+				w.WriteHeader(403)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":     errMsg,
+					"banStatus": "BANNED",
+					"banned":    true,
+					"banReason": account.BanReason,
+				})
+				return
+			case codexAuthFailureReauth:
+				markCodexAuthFailure(account, err)
+				w.WriteHeader(401)
+				json.NewEncoder(w).Encode(map[string]interface{}{
+					"error":          errMsg,
+					"banStatus":      codexReauthRequiredStatus,
+					"banned":         false,
+					"reauthRequired": true,
+					"banReason":      account.BanReason,
+				})
+				return
+			}
+		}
 		// 403 "temporarily is suspended" → account is banned by AWS.
 		// Mark BANNED so the UI reflects the real status instead of showing
 		// a raw 500 error on every subsequent test/refresh.
@@ -10394,239 +10458,32 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
 		return
 	}
-	if isServiceAccount(account) {
-		h.pool.Reload()
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true, "message": "Service account metadata refreshed",
-			"provider": account.Provider, "capabilities": account.Capabilities,
-		})
-		return
-	}
 
-	// External OpenAI-compatible providers have no Kiro usage/subscription to
-	// refresh. Refresh their model list and credit balance (via /api/me) so
-	// the admin UI shows real data.
-	if isExternalAccount(account) {
-		modelsErr := h.fetchAndCacheAccountModels(account)
-		creditsErr := h.refreshExternalCredits(account)
-		// 404 from /api/me means the provider doesn't expose a credits API —
-		// not a failure. Downgrade to nil so the toast stays green.
-		if creditsErr == ErrExternalCreditsNotSupported {
-			creditsErr = nil
-		}
-		if modelsErr != nil && creditsErr != nil {
-			w.WriteHeader(500)
-			json.NewEncoder(w).Encode(map[string]string{"error": "External provider refresh failed: " + modelsErr.Error()})
-			return
-		}
-		msg := "External provider refreshed"
-		if modelsErr != nil {
-			msg = "Models refresh failed: " + modelsErr.Error()
-		} else if creditsErr != nil {
-			msg = "Models refreshed; credits unavailable: " + creditsErr.Error()
-		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": msg,
-		})
-		return
-	}
-
-	// First try to refresh the token (regardless of expiry, to ensure token is valid)
-	refreshTokenIfNeeded := func() error {
-		if account.RefreshToken == "" {
-			return nil
-		}
-		newAccessToken, newRefreshToken, newExpiresAt, profileArn, _, _, err := auth.RefreshAccountToken(account)
-		if err != nil {
-			return err
-		}
-		account.AccessToken = newAccessToken
-		if newRefreshToken != "" {
-			account.RefreshToken = newRefreshToken
-		}
-		account.ExpiresAt = newExpiresAt
-		config.UpdateAccountToken(id, newAccessToken, newRefreshToken, newExpiresAt)
-		h.pool.UpdateToken(id, newAccessToken, newRefreshToken, newExpiresAt)
-		if profileArn != "" {
-			account.ProfileArn = profileArn
-			config.UpdateAccountProfileArn(id, profileArn)
-		}
-		return nil
-	}
-
-	// Codex (ChatGPT subscription) accounts have no Kiro usage API to call.
-	// Refresh their JWT-extracted profile (email, name, plan_type), seed
-	// the fixed Codex subscription model list into the cache, and fetch
-	// live usage data (rate-limit %, credits) via a minimal request so
-	// the admin UI shows real-time token usage.
-	if isCodexAccount(account) {
-		// NOTE: Do NOT clear ban here. A banned account should only be
-		// unbanned by a successful test request (apiTestAccount), which
-		// proves the account can actually serve traffic. Refresh only
-		// updates token + usage data; if the account is still banned,
-		// the operator should press "Test" to verify recovery.
-		// Refresh token first so JWT-extracted profile + usage call use the
-		// latest access token. A failed refresh must not be swallowed: using
-		// the old token here is what produced the misleading 401/BANNED state.
-		var codexRefreshErr error
-		if account.RefreshToken != "" {
-			codexRefreshErr = refreshCodexAccountToken(account)
-		}
-		refreshCodexAccountID(account)
-		modelsErr := h.fetchAndCacheAccountModels(account)
-		var usageErr error
-		if codexRefreshErr == nil {
-			usageErr = fetchCodexUsage(account)
-		} else {
-			usageErr = fmt.Errorf("token refresh failed: %w", codexRefreshErr)
-		}
-		markCodexReauthRequired(account, codexRefreshErr)
-		markCodexReauthRequired(account, usageErr)
-		msg := "Codex account refreshed"
-		if modelsErr != nil && usageErr != nil {
-			msg = "Codex profile refreshed; models + usage unavailable: " + usageErr.Error()
-		} else if modelsErr != nil {
-			msg = "Codex profile refreshed; models unavailable: " + modelsErr.Error()
-		} else if usageErr != nil {
-			msg = "Codex profile refreshed; usage unavailable: " + usageErr.Error()
-		} else {
-			msg = "Codex account refreshed (profile + models + usage)"
-		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": true,
-			"message": msg,
-		})
-		return
-	}
-
-	// Kiro accounts: clear ban before retrying usage. GetUsageLimits below
-	// will re-mark BANNED if the account is truly still suspended. This is
-	// safe because Kiro's usage API returns a definitive ban/suspend flag,
-	// unlike Codex where the only reliable probe is a real chat request.
-	// (Codex accounts are handled in the branch above and do NOT unban here.)
-	if account.BanStatus != "" && account.BanStatus != "ACTIVE" {
-		logger.Infof("[apiRefreshAccount] Force-unban %s (was %s), retrying", account.Email, account.BanStatus)
-		account.BanStatus = "ACTIVE"
-		account.BanReason = ""
-		account.BanTime = 0
-		account.Enabled = true
-		if err := config.UpdateAccount(account.ID, *account); err != nil {
-			logger.Errorf("[apiRefreshAccount] Failed to persist unban for %s: %v", account.Email, err)
-		}
-	} else if !account.Enabled {
-		// Inconsistent state: BanStatus=ACTIVE but Enabled=false. Re-enable.
-		account.Enabled = true
-		if err := config.UpdateAccount(account.ID, *account); err != nil {
-			logger.Errorf("[apiRefreshAccount] Failed to re-enable %s: %v", account.Email, err)
-		}
-	}
-
-	// check if token is expiring soon, refresh first
-	if account.ExpiresAt > 0 && time.Now().Unix() > account.ExpiresAt-tokenRefreshSkewSeconds {
-		if err := refreshTokenIfNeeded(); err != nil {
-			w.WriteHeader(500)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
-			return
-		}
-	}
-
-	// get account info
-	info, err := RefreshAccountInfo(account)
+	// The whole refresh body lives in refreshAccountFull so this endpoint and
+	// POST /accounts/refresh-all perform identical work per account.
+	isService := isServiceAccount(account)
+	result, err := h.refreshAccountFull(account)
 	if err != nil {
-		errMsg := err.Error()
-		errLower := strings.ToLower(errMsg)
-
-		// "temporarily is suspended" / "account suspended" / "TEMPORARILY_SUSPENDED"
-		// all mean the account is banned by AWS. Mark BANNED immediately —
-		// no token refresh retry needed, the account itself is rejected.
-		if isSuspensionErrorMessage(errLower) {
-			account.BanStatus = "BANNED"
-			account.BanReason = truncateErrBody([]byte(errMsg))
-			account.BanTime = time.Now().Unix()
-			account.Enabled = false
-			if updateErr := config.UpdateAccount(account.ID, *account); updateErr != nil {
-				logger.Errorf("[apiRefreshAccount] Failed to persist BANNED status for %s: %v", account.Email, updateErr)
-			} else {
-				logger.Warnf("[apiRefreshAccount] Marked %s as BANNED (suspended): %s", account.Email, errMsg)
-			}
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success":   true,
-				"message":   "Account banned: " + truncateErrBody([]byte(errMsg)),
-				"banStatus": "BANNED",
-			})
-			return
-		}
-
-		// if 403/401, token might be stale — try refresh then retry
-		if strings.Contains(errMsg, "403") || strings.Contains(errMsg, "401") || strings.Contains(errMsg, "invalid") || strings.Contains(errMsg, "expired") {
-			if refreshErr := refreshTokenIfNeeded(); refreshErr == nil {
-				// retry
-				info, err = RefreshAccountInfo(account)
-				if err != nil {
-					// Still failed after retry — check if banned
-					if isSuspensionErrorMessage(strings.ToLower(err.Error())) {
-						account.BanStatus = "BANNED"
-						account.BanReason = truncateErrBody([]byte(err.Error()))
-						account.BanTime = time.Now().Unix()
-						account.Enabled = false
-						if updateErr := config.UpdateAccount(account.ID, *account); updateErr != nil {
-							logger.Errorf("[apiRefreshAccount] Failed to persist BANNED status for %s: %v", account.Email, updateErr)
-						} else {
-							logger.Warnf("[apiRefreshAccount] Marked %s as BANNED (suspended after retry): %s", account.Email, err.Error())
-						}
-						json.NewEncoder(w).Encode(map[string]interface{}{
-							"success":   true,
-							"message":   "Account banned: " + truncateErrBody([]byte(err.Error())),
-							"banStatus": "BANNED",
-						})
-						return
-					}
-				}
-			}
-		}
-
-		// Persistent 403 after token refresh retry → account is banned/suspended.
-		// Token refresh fixes stale auth/region issues; if 403 persists, the
-		// account itself is rejected by AWS. Mark BANNED so the UI reflects
-		// the real status instead of showing a raw 500 error.
-		if err != nil && isAuthErrorMessage(err.Error()) && !isExternalAccount(account) && !isCodexAccount(account) {
-			account.BanStatus = "BANNED"
-			account.BanReason = "Persistent 403 after token refresh: " + truncateErrBody([]byte(err.Error()))
-			account.BanTime = time.Now().Unix()
-			account.Enabled = false
-			if updateErr := config.UpdateAccount(account.ID, *account); updateErr != nil {
-				logger.Errorf("[apiRefreshAccount] Failed to persist BANNED status for %s: %v", account.Email, updateErr)
-			} else {
-				logger.Warnf("[apiRefreshAccount] Marked %s as BANNED (persistent 403 after token refresh)", account.Email)
-			}
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"success":   true,
-				"message":   "Account banned: persistent 403 after token refresh",
-				"banStatus": "BANNED",
-			})
-			return
-		}
-
-		// only show error for other errors
-		if err != nil {
-			w.WriteHeader(500)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-	}
-
-	// save to config
-	if err := config.UpdateAccountInfo(id, *info); err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
-		"info":    info,
-	})
+	resp := map[string]interface{}{"success": true}
+	if result.Info != nil {
+		resp["info"] = result.Info
+	}
+	if result.Message != "" {
+		resp["message"] = result.Message
+	}
+	if result.BanStatus != "" {
+		resp["banStatus"] = result.BanStatus
+	}
+	if isService {
+		resp["provider"] = account.Provider
+		resp["capabilities"] = account.Capabilities
+	}
+	json.NewEncoder(w).Encode(resp)
 }
 
 // apiGetAccountFull gets full account info (including sensitive fields)
@@ -11435,23 +11292,37 @@ func (h *Handler) apiGetUsageRequestDetails(w http.ResponseWriter, r *http.Reque
 	pageData := filtered[start:end]
 
 	// Convert to detail format
+	// AccountName and Error travel with each detail row so the UI can attribute
+	// a failure to a specific account without a second lookup. The account
+	// label is non-secret metadata (nickname/email/short ID) produced by
+	// resolveAccountMeta; credentials are never included.
 	type DetailItem struct {
-		Timestamp string         `json:"timestamp"`
-		Model     string         `json:"model"`
-		Provider  string         `json:"provider"`
-		AccountID string         `json:"accountId"`
-		Status    string         `json:"status"`
-		Tokens    map[string]int `json:"tokens"`
-		Latency   map[string]int `json:"latency"`
+		Timestamp   string         `json:"timestamp"`
+		Model       string         `json:"model"`
+		Provider    string         `json:"provider"`
+		AccountID   string         `json:"accountId"`
+		AccountName string         `json:"accountName,omitempty"`
+		Status      string         `json:"status"`
+		Error       string         `json:"error,omitempty"`
+		Tokens      map[string]int `json:"tokens"`
+		Latency     map[string]int `json:"latency"`
 	}
 	details := make([]DetailItem, 0, len(pageData))
 	for _, rec := range pageData {
+		accountName := rec.AccountName
+		if accountName == "" && rec.AccountID != "" {
+			if _, resolved := resolveAccountMeta(rec.AccountID); resolved != "" {
+				accountName = resolved
+			}
+		}
 		details = append(details, DetailItem{
-			Timestamp: rec.Timestamp,
-			Model:     rec.Model,
-			Provider:  rec.Provider,
-			AccountID: rec.AccountID,
-			Status:    rec.Status,
+			Timestamp:   rec.Timestamp,
+			Model:       rec.Model,
+			Provider:    rec.Provider,
+			AccountID:   rec.AccountID,
+			AccountName: accountName,
+			Status:      rec.Status,
+			Error:       rec.Error,
 			Tokens: map[string]int{
 				"prompt_tokens":     rec.InputTokens,
 				"completion_tokens": rec.OutputTokens,

@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"omniproxy/config"
+	"omniproxy/logger"
+	"omniproxy/pool"
 	"strings"
 	"time"
 )
@@ -152,6 +154,8 @@ func (h *Handler) handleResponsesNonStream(
 ) {
 	excluded := make(map[string]bool)
 	var lastErr error
+	// lastAccountID attributes the final failure to a concrete account in Usage.
+	var lastAccountID string
 	cacheKey := payloadCacheKey(payload)
 
 	for attempt := 0; ; attempt++ {
@@ -159,6 +163,7 @@ func (h *Handler) handleResponsesNonStream(
 		if account == nil {
 			break
 		}
+		lastAccountID = account.ID
 		if err := h.ensureValidToken(account); err != nil {
 			lastErr = err
 			h.usageTracker.RemoveActive(account.ID)
@@ -187,13 +192,18 @@ func (h *Handler) handleResponsesNonStream(
 			realCacheCreate = 0
 			attemptProduced = false
 		}
-
 		callback := &KiroStreamCallback{
 			OnOutput:  func() { attemptProduced = true },
 			HasOutput: func() bool { return attemptProduced },
-			OnReset:   resetAttempt,
+			OnReset: func() {
+				if isExternalAccount(account) {
+					resetAttempt()
+				}
+			},
 			OnText: func(text string, isThinking bool) {
-				attemptProduced = true
+				if !isThinking && text != "" {
+					attemptProduced = true
+				}
 				if isThinking {
 					reasoningContent += text
 				} else {
@@ -233,6 +243,12 @@ func (h *Handler) handleResponsesNonStream(
 					h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
 				}
 				goto responsesNonStreamSuccess
+			}
+			if pool.IsContentBlockedError(err) {
+				lastErr = err
+				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
+				excluded[account.ID] = true
+				continue
 			}
 			h.usageTracker.RemoveActive(account.ID)
 			excluded[account.ID] = true
@@ -289,7 +305,7 @@ func (h *Handler) handleResponsesNonStream(
 		h.sendOpenAIError(w, 503, "server_error", "No available accounts")
 		return
 	}
-	h.recordError(apiKeyID, "", model, endpointOpenAIResponses, lastErr.Error())
+	h.recordError(apiKeyID, lastAccountID, model, endpointOpenAIResponses, lastErr.Error())
 	h.sendOpenAIError(w, upstreamErrorStatus(lastErr), "server_error", lastErr.Error())
 }
 
@@ -398,6 +414,8 @@ func (h *Handler) handleResponsesStream(
 
 	excluded := make(map[string]bool)
 	var lastErr error
+	// lastAccountID attributes the final failure to a concrete account in Usage.
+	var lastAccountID string
 	responseStarted := false
 	realCacheRead := 0
 	realCacheCreate := 0
@@ -408,6 +426,7 @@ func (h *Handler) handleResponsesStream(
 		if account == nil {
 			break
 		}
+		lastAccountID = account.ID
 		if err := h.ensureValidToken(account); err != nil {
 			lastErr = err
 			h.usageTracker.RemoveActive(account.ID)
@@ -467,6 +486,10 @@ func (h *Handler) handleResponsesStream(
 		}
 
 		callback := &KiroStreamCallback{
+			// Mark output at the adapter boundary, before any downstream
+			// buffering or formatting. A failed stream must not be replayed after
+			// the provider has emitted reasoning, text, or a tool call.
+			OnOutput: func() { responseStarted = true },
 			OnText: func(text string, isThinking bool) {
 				if text == "" {
 					return
@@ -593,6 +616,12 @@ func (h *Handler) handleResponsesStream(
 				}
 				goto responsesStreamSuccess
 			}
+			if pool.IsContentBlockedError(err) {
+				lastErr = err
+				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
+				excluded[account.ID] = true
+				continue
+			}
 			if !responseStarted {
 				lastErr = err
 				h.usageTracker.RemoveActive(account.ID)
@@ -618,12 +647,12 @@ func (h *Handler) handleResponsesStream(
 			return
 		}
 
+	responsesStreamSuccess:
 		finalContent, _ = extractThinkingFromContent(fullText.String())
 		reasoning = reasoningText.String()
 		if !thinking {
 			reasoning = ""
 		}
-	responsesStreamSuccess:
 
 		if messageStarted {
 			send("response.content_part.done", map[string]interface{}{
@@ -711,7 +740,7 @@ func (h *Handler) handleResponsesStream(
 		})
 		return
 	}
-	h.recordError(apiKeyID, "", model, endpointOpenAIResponses, lastErr.Error())
+	h.recordError(apiKeyID, lastAccountID, model, endpointOpenAIResponses, lastErr.Error())
 	send("response.failed", map[string]interface{}{
 		"type": "response.failed",
 		"response": map[string]interface{}{

@@ -46,7 +46,7 @@ func TestCallExternalAgentRouterHeaders(t *testing.T) {
 		ID:          "test-agentrouter-1",
 		Email:       "test@agentrouter.org",
 		AuthMethod:  "agentrouter",
-		AccessToken: "sk-testkey123",
+		AccessToken: "***",
 		BaseURL:     server.URL + "/v1/messages",
 	}
 
@@ -69,7 +69,7 @@ func TestCallExternalAgentRouterHeaders(t *testing.T) {
 	}
 
 	// Verify the live-validated OpenAI/Stainless fingerprint.
-	if capturedHeaders.Get("Authorization") != "Bearer sk-testkey123" {
+	if capturedHeaders.Get("Authorization") != "Bearer ***" {
 		t.Errorf("Authorization = %q, want Bearer token", capturedHeaders.Get("Authorization"))
 	}
 	if capturedHeaders.Get("User-Agent") != agentRouterUserAgent {
@@ -77,6 +77,201 @@ func TestCallExternalAgentRouterHeaders(t *testing.T) {
 	}
 	if capturedHeaders.Get("x-stainless-lang") != "js" {
 		t.Errorf("x-stainless-lang = %q, want js", capturedHeaders.Get("x-stainless-lang"))
+	}
+}
+
+func TestCallExternalAgentRouterFallsBackToNonStreamBeforeOutput(t *testing.T) {
+	initConfigForTests(t)
+	var streams []bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		stream, _ := body["stream"].(bool)
+		streams = append(streams, stream)
+		if stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"temporary upstream failure\"}}\n\n"))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"recovered"},"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":1}}`))
+	}))
+	defer server.Close()
+
+	account := &config.Account{AuthMethod: "agentrouter", AccessToken: "***", BaseURL: server.URL}
+	payload := &KiroPayload{OriginalModel: "claude-opus-4-8"}
+	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "hi"
+
+	var text, stopReason string
+	var inputTokens, outputTokens, outputSignals int
+	err := CallExternalAgentRouter(account, payload, &KiroStreamCallback{
+		OnOutput:     func() { outputSignals++ },
+		OnText:       func(chunk string, _ bool) { text += chunk },
+		OnStopReason: func(reason string) { stopReason = reason },
+		OnComplete: func(inTok, outTok int) {
+			inputTokens = inTok
+			outputTokens = outTok
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallExternalAgentRouter failed: %v", err)
+	}
+	if text != "recovered" || stopReason != "end_turn" {
+		t.Fatalf("fallback result text=%q stopReason=%q", text, stopReason)
+	}
+	if inputTokens != 7 || outputTokens != 1 || outputSignals != 1 {
+		t.Fatalf("fallback metadata input=%d output=%d outputSignals=%d", inputTokens, outputTokens, outputSignals)
+	}
+	if len(streams) != 2 || !streams[0] || streams[1] {
+		t.Fatalf("stream attempts = %v, want [true false]", streams)
+	}
+}
+
+func TestCallExternalAgentRouterFallsBackOnUnterminatedSSEError(t *testing.T) {
+	initConfigForTests(t)
+	var streams []bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		stream, _ := body["stream"].(bool)
+		streams = append(streams, stream)
+		if stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			// Deliberately omit the trailing newline. ReadString returns this
+			// frame together with io.EOF.
+			_, _ = w.Write([]byte(`data: {"error":{"message":"stream unsupported"}}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"recovered"},"finish_reason":"stop"}]}`))
+	}))
+	defer server.Close()
+
+	account := &config.Account{AuthMethod: "agentrouter", AccessToken: "***", BaseURL: server.URL}
+	payload := &KiroPayload{OriginalModel: "claude-opus-4-8"}
+	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "hi"
+
+	var text string
+	err := CallExternalAgentRouter(account, payload, &KiroStreamCallback{
+		OnText: func(chunk string, _ bool) { text += chunk },
+	})
+	if err != nil {
+		t.Fatalf("CallExternalAgentRouter failed: %v", err)
+	}
+	if text != "recovered" {
+		t.Fatalf("fallback text = %q, want recovered", text)
+	}
+	if len(streams) != 2 || !streams[0] || streams[1] {
+		t.Fatalf("stream attempts = %v, want [true false]", streams)
+	}
+}
+
+func TestCallExternalAgentRouterDoesNotFallbackAfterMetadata(t *testing.T) {
+	initConfigForTests(t)
+	requests := 0
+	cacheSignals := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":0,\"prompt_tokens_details\":{\"cached_tokens\":3}}}\n\n"))
+		_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"stream interrupted\"}}\n\n"))
+	}))
+	defer server.Close()
+
+	account := &config.Account{AuthMethod: "agentrouter", AccessToken: "***", BaseURL: server.URL}
+	payload := &KiroPayload{OriginalModel: "claude-opus-4-8"}
+	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "hi"
+
+	err := CallExternalAgentRouter(account, payload, &KiroStreamCallback{
+		OnCacheRead: func(tokens int) { cacheSignals += tokens },
+	})
+	if err == nil {
+		t.Fatal("expected stream error after metadata")
+	}
+	if cacheSignals != 3 {
+		t.Fatalf("cacheSignals = %d, want 3", cacheSignals)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1 (metadata-bearing attempts must not replay)", requests)
+	}
+}
+
+func TestCallExternalAgentRouterDoesNotFallbackAfterOutput(t *testing.T) {
+	initConfigForTests(t)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"stream interrupted\"}}\n\n"))
+	}))
+	defer server.Close()
+
+	account := &config.Account{AuthMethod: "agentrouter", AccessToken: "***", BaseURL: server.URL}
+	payload := &KiroPayload{OriginalModel: "claude-opus-4-8"}
+	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "hi"
+
+	var text string
+	err := CallExternalAgentRouter(account, payload, &KiroStreamCallback{
+		OnText: func(chunk string, _ bool) { text += chunk },
+	})
+	if err == nil {
+		t.Fatal("expected stream error after partial output")
+	}
+	if text != "partial" {
+		t.Fatalf("text = %q, want partial", text)
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1 (no unsafe replay)", requests)
+	}
+}
+
+func TestCallExternalAgentRouterDoesNotFallbackOnEmptyTruncatedSSE(t *testing.T) {
+	initConfigForTests(t)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[]}\n\n"))
+	}))
+	defer server.Close()
+
+	account := &config.Account{AuthMethod: "agentrouter", AccessToken: "***", BaseURL: server.URL}
+	payload := &KiroPayload{OriginalModel: "claude-opus-4-8"}
+	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "hi"
+
+	if err := CallExternalAgentRouter(account, payload, nil); err == nil {
+		t.Fatal("expected truncated SSE error")
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1 (transport/parser errors must not fallback)", requests)
+	}
+}
+
+func TestCallExternalAgentRouterDoesNotFallbackAfterToolDeltaWithNilCallback(t *testing.T) {
+	initConfigForTests(t)
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"Read\",\"arguments\":\"{\"}}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"stream interrupted\"}}\n\n"))
+	}))
+	defer server.Close()
+
+	account := &config.Account{AuthMethod: "agentrouter", AccessToken: "***", BaseURL: server.URL}
+	payload := &KiroPayload{OriginalModel: "claude-opus-4-8"}
+	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "hi"
+
+	if err := CallExternalAgentRouter(account, payload, nil); err == nil {
+		t.Fatal("expected stream error after tool delta")
+	}
+	if requests != 1 {
+		t.Fatalf("requests = %d, want 1 (tool output must not replay)", requests)
 	}
 }
 

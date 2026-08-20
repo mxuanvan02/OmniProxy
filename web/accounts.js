@@ -218,15 +218,21 @@ let testModalMode = 'chat';
   }
   function getStatusBadge(a) {
     const out = [];
+    // Reason tooltip: without it, BANNED and REAUTH_REQUIRED look equally
+    // opaque and the operator cannot tell an upstream termination from an
+    // expired session without opening the detail drawer.
+    const reasonAttr = a.banReason
+      ? ' title="' + escapeAttr(String(a.banReason)) + '"'
+      : '';
     if (a.banStatus === 'REAUTH_REQUIRED') {
-      out.push('<span class="badge badge-reauth-required">' + escapeHtml(t('accounts.reauthRequired')) + '</span>');
+      out.push('<span class="badge badge-reauth-required"' + reasonAttr + '>' + escapeHtml(t('accounts.reauthRequired')) + '</span>');
       out.push('<span class="badge badge-warning">' + escapeHtml(t('accounts.disabled')) + '</span>');
       return out.join('');
     }
     const isBanned = a.banStatus && a.banStatus !== 'ACTIVE';
     if (isBanned) {
-      if (a.banStatus === 'BANNED') out.push('<span class="badge badge-banned">' + escapeHtml(t('accounts.banned')) + '</span>');
-      else if (a.banStatus === 'SUSPENDED') out.push('<span class="badge badge-suspended">' + escapeHtml(t('accounts.suspended')) + '</span>');
+      if (a.banStatus === 'BANNED') out.push('<span class="badge badge-banned"' + reasonAttr + '>' + escapeHtml(t('accounts.banned')) + '</span>');
+      else if (a.banStatus === 'SUSPENDED') out.push('<span class="badge badge-suspended"' + reasonAttr + '>' + escapeHtml(t('accounts.suspended')) + '</span>');
       out.push('<span class="badge badge-warning">' + escapeHtml(t('accounts.disabled')) + '</span>');
     } else {
       if (!a.hasToken)
@@ -284,6 +290,26 @@ let testModalMode = 'chat';
     }
     if (plan) parts.push(plan);
     return parts.join(' ');
+  }
+  // Full operational label for identifying the account behind an error.
+  // Uses non-secret metadata only; credentials are never rendered here.
+  // opts.includeId controls whether the full account ID is appended.
+  // Card headers stay readable (name + email only) while detail views, test
+  // logs, and error surfaces keep the full ID so an operator can trace the
+  // exact account behind a failure. The card still carries the full identity
+  // in its title attribute, so no traceability is lost.
+  function getAccountIdentityLabel(a, fallbackId, opts) {
+    const includeId = !opts || opts.includeId !== false;
+    if (!a) return fallbackId || '-';
+    const name = a.nickname || a.name || '';
+    const email = a.email ? getDisplayEmail(a.email, null) : '';
+    const id = a.id || fallbackId || '';
+    const parts = [];
+    if (name) parts.push(name);
+    if (email && email !== name) parts.push(email);
+    if (includeId && id && id !== name && id !== email) parts.push('ID: ' + id);
+    if (parts.length === 0 && id) parts.push(id);
+    return parts.join(' · ') || '-';
   }
   function formatUsageBar(pct) {
     if (pct == null || pct === 0) return '-';
@@ -371,7 +397,11 @@ let testModalMode = 'chat';
       const banned = a.banStatus && a.banStatus !== 'ACTIVE';
       const idAttr = escapeAttr(a.id);
       const displayEmail = getDisplayEmail(a.email, a.id);
-      const selectLabel = t('accounts.selectAccount', displayEmail);
+      const accountIdentity = getAccountIdentityLabel(a, a.id);
+      // Card header shows name/email only. The raw UUID is noise at a glance;
+      // it stays in the title attribute and in detail/test/error surfaces.
+      const accountIdentityShort = getAccountIdentityLabel(a, a.id, { includeId: false });
+      const selectLabel = t('accounts.selectAccount', accountIdentityShort);
 
       const refreshSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>';
       const userSvg = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>';
@@ -382,15 +412,16 @@ let testModalMode = 'chat';
       // Codex accounts: show plan + active-limit + chatgpt_account_id badges.
       // These replace the Kiro subscription badge (which defaults to "Free"
       // when subscriptionType is empty — misleading for Codex Plus/Pro plans).
+      // Raw identifiers are not rendered on the card. They stay reachable via
+      // the account detail view (and the card's title attribute), so the card
+      // shows only human-meaningful metadata.
       const codexBadge = isCodex ?
         (getCodexPlanBadge(a.codexPlanType) +
-         getCodexLimitBadge(a.codexActiveLimit) +
-         (a.chatgptAccountId ? '<span class="badge badge-info">ID: ' + escapeHtml(String(a.chatgptAccountId).slice(0, 8)) + '</span>' : ''))
+         getCodexLimitBadge(a.codexActiveLimit))
         : '';
       const serviceBadges = isService ?
         '<span class="badge badge-info">' + escapeHtml(a.provider || a.providerKind || t('accounts.serviceProvider')) + '</span>' +
-        accountCapabilities(a).map(cap => '<span class="badge badge-success">' + escapeHtml(cap === 'search' ? t('category.search') : t('category.image')) + '</span>').join('') +
-        (a.sourceId ? '<span class="badge badge-muted">ID: ' + escapeHtml(String(a.sourceId).slice(0, 8)) + '</span>' : '') : '';
+        accountCapabilities(a).map(cap => '<span class="badge badge-success">' + escapeHtml(cap === 'search' ? t('category.search') : t('category.image')) + '</span>').join('') : '';
 
       return '' +
         '<div class="account-card' + (isSelected ? ' selected' : '') + (reauthRequired ? ' reauth-required' : '') + '" data-id="' + idAttr + '">' +
@@ -398,7 +429,7 @@ let testModalMode = 'chat';
         '<div class="account-info">' +
         '<input type="checkbox" class="account-checkbox" ' + (isSelected ? 'checked' : '') + ' data-id="' + idAttr + '" aria-label="' + escapeAttr(selectLabel) + '" />' +
         '<div class="account-info-text">' +
-        '<div class="account-email">' + escapeHtml(displayEmail) + '</div>' +
+        '<div class="account-email" title="' + escapeAttr(accountIdentity) + '">' + escapeHtml(accountIdentityShort) + '</div>' +
         '<div class="account-nickname">' + (a.nickname ? '<span class="nickname-badge">' + escapeHtml(a.nickname) + '</span>' : '') + '</div>' +
         '<div class="account-meta">' +
         (isKiroNative ? getSubBadge(a.subscriptionType) : '') +
@@ -473,7 +504,7 @@ let testModalMode = 'chat';
           ' <button class="btn btn-icon btn-sm btn-ghost" data-action="refresh" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.refresh')) + '">' + refreshSvg + '</button>' +
           '</div><div class="usage-text"><span>' + escapeHtml(t('detail.codexUsageHint')) + '</span></div></div>' : '') +
         '<div class="account-stats">' +
-        '<div class="account-stat"><div class="account-stat-value">' + (a.requestCount || 0) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.requests')) + '</div></div>' +
+        '<div class="account-stat"><div class="account-stat-value">' + ((a.requestCount || 0) + (a.serviceRequestCount || 0)) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.requests')) + '</div></div>' +
         '<div class="account-stat"><div class="account-stat-value">' + formatNum(a.totalTokens || 0) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.tokens')) + '</div></div>' +
         '<div class="account-stat"><div class="account-stat-value">' + (a.totalCredits || 0).toFixed(1) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.credits')) + '</div></div>' +
         '<div class="account-stat"><div class="account-stat-value">' + escapeHtml(formatTokenExpiry(a.expiresAt)) + '</div><div class="account-stat-label">' + escapeHtml(t('accounts.expiry')) + '</div></div>' +
@@ -881,8 +912,12 @@ let testModalMode = 'chat';
   }
 
   // Detail modal
-  function detailItem(label, value) {
-    return '<div class="detail-item"><div class="detail-label">' + escapeHtml(label) + '</div><div class="detail-value">' + escapeHtml(value) + '</div></div>';
+  function detailItem(label, value, titleValue) {
+    // titleValue lets a row show a short, readable value while keeping the full
+    // (longer) form reachable on hover — used for account identity so the raw
+    // UUID is not rendered inline but is still available for tracing.
+    const titleAttr = titleValue ? ' title="' + escapeAttr(titleValue) + '"' : '';
+    return '<div class="detail-item"><div class="detail-label">' + escapeHtml(label) + '</div><div class="detail-value"' + titleAttr + '>' + escapeHtml(value) + '</div></div>';
   }
   function showDetail(id) {
     const a = accountsData.find(x => x.id === id);
@@ -899,6 +934,7 @@ let testModalMode = 'chat';
     $('detailBody').innerHTML =
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.basicInfo')) + '</h4><div class="detail-grid">' +
       detailItem(t('detail.email'), getDisplayEmail(a.email, null)) +
+      detailItem(t('detail.accountIdentity'), getAccountIdentityLabel(a, a.id, { includeId: false }), getAccountIdentityLabel(a, a.id)) +
       detailItem(t('detail.userId'), a.userId || '-') +
       detailItem(t('detail.authMethod'), formatAuthMethod(a.provider || a.authMethod)) +
       detailItem(t('detail.region'), a.region || 'us-east-1') +
@@ -1252,9 +1288,13 @@ let testModalMode = 'chat';
         url: (($('testSearchURL') && $('testSearchURL').value.trim()) || '')
       };
     }
-    if (isAgentRouterAccountUI(acc)) return { model: 'claude-opus-5' };
-    const choice = $('testModelChoice');
-    return { model: (choice && choice.value.trim()) || 'claude-sonnet-4' };
+    // Chat test must use the model the operator picked in the modal. The
+    // first cached model is only a fallback for when the select is absent
+    // (models still loading, or the account exposes no cached model list).
+    // Do not infer a model from provider/account type.
+    const picked = $('testModelChoice') ? String($('testModelChoice').value || '').trim() : '';
+    const model = picked || String(testModalModels[0] || '').trim();
+    return { model: model };
   }
   function renderTestLog() {
     const c = $('testModalLog');
@@ -1287,19 +1327,20 @@ let testModalMode = 'chat';
     const acc = getTestAccount(testModalAccountId);
     const idAttr = escapeAttr(testModalAccountId);
     const email = acc ? getDisplayEmail(acc.email, acc.id) : testModalAccountId;
+    // Visible label stays name/email only; the raw UUID is noise in the modal
+    // header. The full identity (including ID) remains in the title attribute.
+    const accountIdentity = getAccountIdentityLabel(acc, testModalAccountId);
+    const accountIdentityShort = getAccountIdentityLabel(acc, testModalAccountId, { includeId: false });
     const proxy = acc ? (acc.proxyURL || t('accounts.testLog.globalProxy')) : '?';
     const isSearch = acc && hasCapability(acc, 'search');
     const isImage = acc && hasCapability(acc, 'image');
     const isCodex = isCodexAccountUI(acc);
-    const isAgentRouter = isAgentRouterAccountUI(acc);
     const isImageTest = testModalMode === 'image';
     const isService = isSearch || isImage;
     const statusText = isImageTest
         ? (testModalLoadingImageModels ? t('accounts.imageModelsLoading') : testModalImageModelError ? t('accounts.imageModelsFallback') : testModalImageSupported ? t('accounts.imageTestReady') : t('accounts.imageGenerationUnsupported'))
       : testModalMode === 'search'
         ? t('accounts.searchTestReady')
-      : isAgentRouter
-        ? 'AgentRouter probe: claude-opus-5 / Say OK'
       : testModalLoadingModels
         ? t('accounts.testModelsLoading')
       : testModalModelError
@@ -1334,20 +1375,18 @@ let testModalMode = 'chat';
           '<input type="text" id="testImageModelCustom" value="" placeholder="' + escapeAttr(imageModel || t('accounts.imageModelCustom')) + '" />' +
           (!testModalImageSupported && testModalImageReason ? '<p class="help-block">' + escapeHtml(testModalImageReason) + '</p>' : '') +
           '<button type="button" class="btn btn-sm btn-outline" data-test-action="refresh-image-models">' + escapeHtml(t('accounts.refreshImageModels')) + '</button></div>'
-      : isAgentRouter
-      ? '<input type="text" id="testModelChoice" value="claude-opus-5" readonly />'
       : testModalLoadingModels
       ? '<div class="test-model-loading">' + escapeHtml(t('accounts.testModelsLoading')) + '</div>'
       : testModalModels.length
         ? '<select id="testModelChoice">' +
         testModalModels.map(m => '<option value="' + escapeAttr(m) + '">' + escapeHtml(m) + '</option>').join('') +
         '</select>'
-        : '<input type="text" id="testModelChoice" placeholder="claude-sonnet-4" value="claude-sonnet-4" />';
+        : '<div class="test-model-empty">' + escapeHtml(t('accounts.testModelsFallback')) + '</div>';
 
     body.innerHTML =
       '<div class="test-modal-account">' +
       '<div class="test-modal-account-main">' +
-      '<div class="test-modal-email">' + escapeHtml(email) + '</div>' +
+      '<div class="test-modal-email" title="' + escapeAttr(accountIdentity) + '">' + escapeHtml(accountIdentityShort) + '</div>' +
       '<div class="test-modal-meta">' +
       '<span>' + escapeHtml(formatAuthMethod(acc && (acc.provider || acc.authMethod))) + '</span>' +
       '<span>' + escapeHtml(proxy) + '</span>' +
@@ -1371,7 +1410,7 @@ let testModalMode = 'chat';
       '</div>' +
       '<div class="modal-footer">' +
       '<button class="btn btn-secondary" id="testModalCancelBtn" type="button">' + escapeHtml(t('common.close')) + '</button>' +
-      '<button class="btn btn-primary" id="testRunBtn" data-id="' + idAttr + '" type="button" ' + ((!isAgentRouter && testModalMode === 'chat' && testModalLoadingModels) || (testModalMode === 'image' && testModalLoadingImageModels) ? 'disabled' : '') + '>' + escapeHtml(t('accounts.test')) + '</button>' +
+      '<button class="btn btn-primary" id="testRunBtn" data-id="' + idAttr + '" type="button" ' + ((testModalMode === 'chat' && (testModalLoadingModels || !testModalModels[0])) || (testModalMode === 'image' && testModalLoadingImageModels) ? 'disabled' : '') + '>' + escapeHtml(t('accounts.test')) + '</button>' +
       '</div>';
 
     if (!testModalLoadingModels && !testModalLoadingImageModels) enhanceCustomSelects(body);
@@ -1383,7 +1422,7 @@ let testModalMode = 'chat';
     testModalModels = [];
     testModalImageModels = [];
     testModalMode = 'chat';
-    testModalLoadingModels = !isAgentRouterAccountUI(acc);
+    testModalLoadingModels = true;
     testModalModelError = false;
     testModalLoadingImageModels = true;
     testModalImageModelError = false;
@@ -1396,7 +1435,6 @@ let testModalMode = 'chat';
     const encodedId = encodeURIComponent(id);
     await Promise.all([
       (async () => {
-        if (isAgentRouterAccountUI(acc)) return;
         try {
           const res = await api('/accounts/' + encodedId + '/models/cached');
           const d = await res.json();
@@ -1459,14 +1497,18 @@ let testModalMode = 'chat';
     if (modalBtn) modalBtn.setAttribute('aria-busy', 'true');
     const acc = accountsData.find(a => a.id === id);
     const email = acc ? getDisplayEmail(acc.email, acc.id) : id;
+    // Test-log lines identify the account by name/email. The full ID is
+    // available in the account detail view; repeating a UUID on every log line
+    // makes the log unreadable.
+    const accountIdentity = getAccountIdentityLabel(acc, id, { includeId: false });
     const proxy = acc ? (acc.proxyURL || t('accounts.testLog.globalProxy')) : '?';
     let startMessage;
     if (request.capability === 'image') {
-      startMessage = t('accounts.testLog.startImage', email, request.prompt || '-', request.model || t('accounts.testLog.defaultModel'), proxy);
+      startMessage = t('accounts.testLog.startImage', accountIdentity, request.prompt || '-', request.model || t('accounts.testLog.defaultModel'), proxy);
     } else if (request.capability === 'search') {
-      startMessage = t('accounts.testLog.startSearch', email, request.query || request.url || '-', proxy);
+      startMessage = t('accounts.testLog.startSearch', accountIdentity, request.query || request.url || '-', proxy);
     } else {
-      startMessage = t('accounts.testLog.start', email, request.model || '-', proxy);
+      startMessage = t('accounts.testLog.start', accountIdentity, request.model || '-', proxy);
     }
     addTestLog(startMessage, 'info');
     try {
@@ -1475,15 +1517,15 @@ let testModalMode = 'chat';
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
       const d = await res.json();
       if (d.success) {
-        addTestLog(t('accounts.testLog.success', email, elapsed, d.reply), 'ok');
+        addTestLog(t('accounts.testLog.success', accountIdentity, elapsed, d.reply), 'ok');
         // If the test cleared a ban, log it and reload to reflect the
         // new ACTIVE badge + enabled state immediately.
         if (d.banCleared) {
-          addTestLog(t('accounts.testLog.banCleared', email), 'ok');
+          addTestLog(t('accounts.testLog.banCleared', accountIdentity), 'ok');
           loadAccounts();
         }
       } else {
-        addTestLog(t('accounts.testLog.failed', email, elapsed, d.error || t('common.unknownError')), 'err');
+        addTestLog(t('accounts.testLog.failed', accountIdentity, elapsed, d.error || t('common.unknownError')), 'err');
         // If the account was banned during the test, reload accounts to reflect
         // the new BANNED badge and disable state immediately.
         if (d.banned || d.banStatus === 'BANNED') {
@@ -1491,7 +1533,7 @@ let testModalMode = 'chat';
         }
       }
     } catch (e) {
-      addTestLog(t('accounts.testLog.error', email, e.message), 'err');
+      addTestLog(t('accounts.testLog.error', accountIdentity, e.message), 'err');
     }
     testModalRunning = false;
     if (modalBtn) modalBtn.removeAttribute('aria-busy');
@@ -2333,10 +2375,13 @@ let testModalMode = 'chat';
         codex.forEach((c, i) => {
           const checked = c.hasToken ? 'checked' : '';
           const disabled = c.hasToken ? '' : 'disabled';
-          html += '<label class="ninerouter-row' + (c.hasToken ? '' : ' muted-text') + '">' +
+          // The raw identifier moves to the row tooltip: it is only needed to
+          // disambiguate two identically named accounts, which is rare, and it
+          // otherwise crowds the import list.
+          const codexRowTitle = [c.name || '(unnamed)', c.chatgptAccountId ? 'ID: ' + c.chatgptAccountId : ''].filter(Boolean).join(' · ');
+          html += '<label class="ninerouter-row' + (c.hasToken ? '' : ' muted-text') + '" title="' + escapeAttr(codexRowTitle) + '">' +
             '<input type="checkbox" class="ninerouter-codex-cb" data-idx="' + i + '" data-source-id="' + escapeHtml(c.sourceId || '') + '" ' + checked + ' ' + disabled + ' />' +
             '<span class="ninerouter-name">' + escapeHtml(c.name || '(unnamed)') + '</span>' +
-            (c.chatgptAccountId ? '<span class="badge badge-info">ID: ' + escapeHtml(String(c.chatgptAccountId).slice(0, 8)) + '</span>' : '') +
             (c.planType ? '<span class="badge badge-free">' + escapeHtml(c.planType) + '</span>' : '') +
             (c.hasToken ? '' : '<span class="text-xs">' + escapeHtml(t('ninerouter.noToken')) + '</span>') +
             '</label>';

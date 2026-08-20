@@ -511,6 +511,7 @@ func TestParseModelAndThinking(t *testing.T) {
 		{"thinking suffix on dash form", "claude-opus-4-8-thinking", "claude-opus-4.8", true},
 		{"thinking suffix on dot form", "claude-sonnet-4.5-thinking", "claude-sonnet-4.5", true},
 		{"thinking suffix on legacy alias", "claude-3-5-sonnet-thinking", "claude-sonnet-4.5", true},
+		{"repeated thinking suffix", "claude-sonnet-5-thinking-thinking", "claude-sonnet-5", true},
 
 		// Unknown models pass through unchanged.
 		{"unknown model", "some-other-model", "some-other-model", false},

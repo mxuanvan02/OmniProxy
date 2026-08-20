@@ -3,17 +3,17 @@ package cli
 
 import (
 	"context"
-	"time"
 	"fmt"
-	"os"
-	"os/signal"
-	"path/filepath"
+	"net/http"
 	"omniproxy/config"
 	"omniproxy/logger"
 	"omniproxy/pool"
 	"omniproxy/proxy"
-	"net/http"
+	"os"
+	"os/signal"
+	"path/filepath"
 	"syscall"
+	"time"
 )
 
 // ShowMenu displays the interactive management menu.
@@ -58,8 +58,10 @@ func RunDaemon(configPath string) {
 		Addr:              addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 30 * time.Second,
-		ReadTimeout:       60 * time.Second,
-		IdleTimeout:       120 * time.Second,
+		// Claude Code can upload a large context and tool state before the
+		// handler starts streaming. Keep daemon mode aligned with main.go.
+		ReadTimeout: 15 * time.Minute,
+		IdleTimeout: 120 * time.Second,
 	}
 
 	go func() {

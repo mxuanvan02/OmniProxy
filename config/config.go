@@ -83,6 +83,11 @@ type Account struct {
 	// Bearer key. Empty for native Kiro/AWS accounts.
 	BaseURL string `json:"baseUrl,omitempty"`
 
+	// ModelMappings translates public model IDs to provider-specific IDs for
+	// this account. Routing and usage continue to use the public ID; only the
+	// outbound external-provider request is rewritten.
+	ModelMappings map[string]string `json:"modelMappings,omitempty"`
+
 	// ChatGPTAccountID is the chatgpt_account_id extracted from the Codex
 	// OAuth access token's JWT payload. Required for AuthMethod == "codex":
 	// OpenAI's /v1/responses endpoint routes by this header
@@ -250,6 +255,13 @@ type ApiKeyEntry struct {
 	TokensUsed    int64   `json:"tokensUsed,omitempty"`
 	CreditsUsed   float64 `json:"creditsUsed,omitempty"`
 	RequestsCount int64   `json:"requestsCount,omitempty"`
+
+	// LastError records the most recent request failure attributed to this key.
+	// It is cleared after a successful request and is intentionally limited to a
+	// short, sanitized message by RecordApiKeyError.
+	LastErrorAt int64  `json:"lastErrorAt,omitempty"`
+	LastError   string `json:"lastError,omitempty"`
+	ErrorCount  int64  `json:"errorCount,omitempty"`
 }
 
 // Config represents the global application configuration.
@@ -415,7 +427,6 @@ const (
 	// chunks while the upstream model is reasoning or executing tools.
 	defaultKiroApiTimeoutMs      = 900_000
 	defaultStreamIdleTimeoutSecs = 900
-	defaultClaudeExtraModel      = "claude-fable-5"
 )
 
 // Init initializes the configuration system with the specified file path.
@@ -465,7 +476,7 @@ func loadLocked() error {
 				Accounts:                 []Account{},
 				KiroApiTimeoutMs:         defaultKiroApiTimeoutMs,
 				StreamIdleTimeoutSeconds: defaultStreamIdleTimeoutSecs,
-				ExtraModels:              []string{defaultClaudeExtraModel},
+				ExtraModels:              []string{},
 			}
 			saveBaseline = configSaveBaseline{
 				apiTimeoutMs:             cfg.KiroApiTimeoutMs,
@@ -507,11 +518,6 @@ func loadLocked() error {
 		cfg.StreamIdleTimeoutSeconds = defaultStreamIdleTimeoutSecs
 		configMigrated = true
 	}
-	if !hasModelID(cfg.ExtraModels, defaultClaudeExtraModel) {
-		cfg.ExtraModels = append(cfg.ExtraModels, defaultClaudeExtraModel)
-		configMigrated = true
-	}
-
 	// Migration: if a legacy single ApiKey is present and the new ApiKeys list is empty,
 	// promote it into the new structure. The migrated entry inherits the legacy
 	// RequireApiKey state — if the legacy deployment was public (RequireApiKey=false),

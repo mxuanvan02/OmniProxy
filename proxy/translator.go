@@ -98,10 +98,15 @@ func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 
 	// Strip the configured thinking suffix (e.g. "-thinking") if present.
 	suffixLower := strings.ToLower(thinkingSuffix)
-	if strings.HasSuffix(lower, suffixLower) {
-		thinking = true
-		model = model[:len(model)-len(thinkingSuffix)]
-		lower = strings.ToLower(model)
+	if suffixLower != "" {
+		// Be idempotent: an old catalog may have emitted
+		// "model-thinking-thinking". Thinking is a capability flag, not part
+		// of the upstream model ID, so remove every repeated suffix.
+		for strings.HasSuffix(lower, suffixLower) {
+			thinking = true
+			model = model[:len(model)-len(thinkingSuffix)]
+			lower = strings.ToLower(model)
+		}
 	}
 	model = stripClaudeContextSuffix(model)
 	lower = strings.ToLower(model)
@@ -150,10 +155,13 @@ func MapModel(model string) string {
 // client's original model name for external OpenAI-compatible providers, which
 // route by their own model registry (e.g. "gpt-4o") rather than Kiro aliases.
 func stripThinkingSuffix(model, thinkingSuffix string) string {
-	lower := strings.ToLower(model)
 	suffixLower := strings.ToLower(thinkingSuffix)
-	if suffixLower != "" && strings.HasSuffix(lower, suffixLower) {
-		model = model[:len(model)-len(thinkingSuffix)]
+	if suffixLower != "" {
+		lower := strings.ToLower(model)
+		for strings.HasSuffix(lower, suffixLower) {
+			model = model[:len(model)-len(thinkingSuffix)]
+			lower = strings.ToLower(model)
+		}
 	}
 	return stripClaudeContextSuffix(model)
 }

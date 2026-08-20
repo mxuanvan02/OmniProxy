@@ -87,6 +87,20 @@ function fmtTime(iso) {
   return new Date(iso).toLocaleDateString();
 }
 
+// setHtmlIfChanged writes innerHTML only when the rendered markup actually
+// differs from what is already mounted. The live view re-renders every SSE
+// event and every auto-refresh tick; unconditional innerHTML assignment
+// destroys and rebuilds the subtree each time, which restarts CSS/SVG
+// animations, drops hover/tooltip state, and causes the visible flicker.
+// Comparing the string first makes an unchanged tick a no-op.
+function setHtmlIfChanged(el, html) {
+  if (!el) return false;
+  if (el.dataset.renderHash === html) return false;
+  el.dataset.renderHash = html;
+  el.innerHTML = html;
+  return true;
+}
+
 function createTimeAgoEl(ts) {
   const el = document.createElement('span');
   el.className = 'usage-time-ago';
@@ -594,11 +608,14 @@ function renderTopology() {
   svg += '</g></svg>';
 
   html += svg;
-  container.innerHTML = html;
+  // Rebuilding the topology SVG on every tick restarts each <animate> element
+  // (flow dots, ping rings) from zero and re-creates the drag target, which is
+  // what made the live view stutter. Skip the write when nothing changed.
+  const topoChanged = setHtmlIfChanged(container, html);
   topoSvgBuilt = true;
 
   applyTopoTransform();
-  bindTopoEvents(container);
+  if (topoChanged) bindTopoEvents(container);
   
   // Setup ResizeObserver for auto-fit (9router-style)
   if (container._topoResizeObserver) container._topoResizeObserver.disconnect();
@@ -759,7 +776,15 @@ function renderRecentRequests() {
         '<td><span class="usage-status-dot ' + (isError ? 'error' : 'success') + '"></span></td>' +
         '<td class="usage-recent-model" title="' + escAttr(r.model) + '">' + escHtml(r.model || '-');
       if (isError && r.error) {
-        html += '<div class="usage-recent-error" title="' + escAttr(r.error) + '">' + escHtml(r.error) + '</div>';
+        // An error is only actionable when the operator knows WHICH account
+        // produced it. Prefix the account label (nickname/email, falling back
+        // to the account ID) so failures can be traced without opening the
+        // details drawer.
+        const errAccount = getUsageAccountName(r);
+        const errTitle = (errAccount !== '-' ? errAccount + ' — ' : '') + r.error;
+        html += '<div class="usage-recent-error" title="' + escAttr(errTitle) + '">' +
+          (errAccount !== '-' ? '<span class="usage-recent-error-account">' + escHtml(errAccount) + '</span> ' : '') +
+          escHtml(r.error) + '</div>';
       }
       html += '</td>' +
         '<td class="text-right whitespace-nowrap"><span class="text-primary">' + fmtNum(r.inputTokens) + '↑</span> <span class="text-success">' + fmtNum(r.outputTokens) + '↓</span></td>' +
@@ -771,7 +796,10 @@ function renderRecentRequests() {
     html += '</tbody></table></div>';
   }
 
-  container.innerHTML = html;
+  // Only touch the DOM when the table actually changed. Recent Requests is
+  // re-rendered on every SSE event; rewriting identical markup made rows
+  // flicker and reset the row hover/selection state mid-read.
+  setHtmlIfChanged(container, html);
 }
 
 // ─── Chart (SVG Area) ────────────────────────────────────
@@ -1491,6 +1519,12 @@ function getProviderDisplayName(providerId) {
   return providerId;
 }
 
+function getUsageAccountName(record) {
+  if (!record) return '-';
+  const nameMap = (usageState.stats || {}).accountNames || {};
+  return record.accountName || nameMap[record.accountId] || record.accountId || '-';
+}
+
 
 function collapsibleSection(title, content, defaultOpen, icon) {
   const isOpen = defaultOpen !== false;
@@ -1546,7 +1580,7 @@ function renderRequestDetailsTable() {
 
       html += '<tr class="usage-details-row" data-detail-idx="' + detailsData.indexOf(d) + '">' +
         '<td class="usage-details-model" title="' + escAttr(d.model) + '">' + escHtml(d.model || '-') + '</td>' +
-        '<td>' + escHtml((function() { var nameMap = (usageState.stats || {}).accountNames || {}; var name = nameMap[d.accountId] || d.accountId || '-'; return name.length > 6 ? name.substring(0, 6) + '\u2026' : name; })()) + '</td>' +
+        '<td class="usage-details-account" title="' + escAttr(getUsageAccountName(d)) + '">' + escHtml(getUsageAccountName(d)) + '</td>' +
         '<td><span class="usage-status-dot ' + (ok ? 'success' : 'error') + '"></span> ' + escHtml(translateStatus(d.status)) + '</td>' +
         '<td class="text-right">' + fmtNum(inputTokens) + '</td>' +
         '<td class="text-right">' + fmtNum(outputTokens) + '</td>' +
@@ -1647,12 +1681,21 @@ function renderDetailDrawer() {
     '<div class="usage-drawer-body">' +
     '<div class="usage-drawer-info-grid">' +
     '<div><span class="text-text-muted">' + (typeof t === 'function' ? t('usage.drawer.timestamp') : 'Timestamp:') + '</span> <span>' + new Date(d.timestamp).toLocaleString() + '</span></div>' +
-    '<div><span class="text-text-muted">' + (typeof t === 'function' ? t('usage.drawer.account') : 'Account:') + '</span> <span class="font-medium">' + escHtml((function() { var nameMap = (usageState.stats || {}).accountNames || {}; var name = nameMap[d.accountId] || d.accountId || '-'; return name.length > 6 ? name.substring(0, 6) + '\u2026' : name; })()) + '</span></div>' +
+    '<div><span class="text-text-muted">' + (typeof t === 'function' ? t('usage.drawer.account') : 'Account:') + '</span> <span class="font-medium usage-drawer-account-value" title="' + escAttr(getUsageAccountName(d)) + '">' + escHtml(getUsageAccountName(d)) + '</span></div>' +
     '<div><span class="text-text-muted">' + (typeof t === 'function' ? t('usage.drawer.model') : 'Model:') + '</span> <span class="font-mono">' + escHtml(d.model || '-') + '</span></div>' +
     '<div><span class="text-text-muted">' + (typeof t === 'function' ? t('usage.drawer.status') : 'Status:') + '</span> <span class="' + (d.status === 'success' ? 'text-success' : 'text-error') + '">' + escHtml(translateStatus(d.status)) + '</span></div>' +
     '<div><span class="text-text-muted">' + (typeof t === 'function' ? t('usage.drawer.latency') : 'Latency:') + '</span> <span class="font-mono">' + (typeof t === 'function' ? t('usage.drawer.ttft') : 'TTFT') + ' ' + (d.latency?.ttft || 0) + 'ms / Total ' + (d.latency?.total || 0) + 'ms</span></div>' +
     '<div><span class="text-text-muted">' + (typeof t === 'function' ? t('usage.drawer.inputTokens') : 'Input Tokens:') + '</span> <span class="font-mono">' + fmtNum(inputTokens) + '</span></div>' +
     '<div><span class="text-text-muted">' + (typeof t === 'function' ? t('usage.drawer.outputTokens') : 'Output Tokens:') + '</span> <span class="font-mono">' + fmtNum(outputTokens) + '</span></div>' +
+    // Attribute the failure to a concrete account by name/email. The raw
+    // account ID is kept only in the title attribute so it remains available
+    // for tracing without cluttering the visible error line.
+    (d.error
+      ? '<div class="usage-drawer-error-row"><span class="text-text-muted">' + (typeof t === 'function' ? t('usage.drawer.error') : 'Error:') + '</span> ' +
+        '<span class="text-error usage-drawer-error-value" title="' + escAttr(getUsageAccountName(d) + (d.accountId ? ' · ID: ' + d.accountId : '') + ' — ' + d.error) + '">' +
+        '<span class="usage-recent-error-account">' + escHtml(getUsageAccountName(d)) + '</span>' +
+        ' ' + escHtml(d.error) + '</span></div>'
+      : '') +
     '</div>';
 
   // Request/Response sections (collapsible)

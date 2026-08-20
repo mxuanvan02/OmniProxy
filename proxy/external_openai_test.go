@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -325,13 +326,12 @@ func TestCallExternalOpenAISSEStream(t *testing.T) {
 		`data: [DONE]`,
 		``,
 	}, "\n")
+	modelsRequests := 0
+	var requestedModel string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// resolveExternalModelID may call /v1/models to prefix-match the
-		// requested model against the provider's registry. Serve a minimal
-		// model list so the resolver returns the requested ID unchanged.
 		if r.URL.Path == "/v1/models" {
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"data":[{"id":"gpt-4o"}]}`)
+			modelsRequests++
+			http.Error(w, "model discovery must not run during inference", http.StatusInternalServerError)
 			return
 		}
 		if r.URL.Path != "/v1/chat/completions" {
@@ -340,6 +340,13 @@ func TestCallExternalOpenAISSEStream(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer sk-test" {
 			t.Errorf("auth = %q, want Bearer sk-test", got)
 		}
+		var requestBody struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&requestBody); err != nil {
+			t.Errorf("decode chat request: %v", err)
+		}
+		requestedModel = requestBody.Model
 		w.Header().Set("Content-Type", "text/event-stream")
 		fmt.Fprint(w, sse)
 	}))
@@ -356,6 +363,10 @@ func TestCallExternalOpenAISSEStream(t *testing.T) {
 		Model:    "gpt-4o",
 		Messages: []OpenAIMessage{{Role: "user", Content: "hi"}},
 	}, false)
+	// OpenAI handlers preserve the client-supplied model separately from the
+	// Kiro routing alias produced by OpenAIToKiro. Mirror that production step
+	// so this test verifies the external request model, not the internal alias.
+	payload.OriginalModel = "gpt-4o"
 
 	var text, reasoning string
 	var tools []KiroToolUse
@@ -392,16 +403,95 @@ func TestCallExternalOpenAISSEStream(t *testing.T) {
 	if inTok != 12 || outTok != 7 {
 		t.Errorf("tokens = in=%d out=%d, want in=12 out=7", inTok, outTok)
 	}
+	if modelsRequests != 0 {
+		t.Fatalf("/v1/models requests = %d, want 0 during inference", modelsRequests)
+	}
+	if requestedModel != "gpt-4o" {
+		t.Fatalf("upstream model = %q, want gpt-4o", requestedModel)
+	}
+}
+
+func TestParseExternalOpenAISSERejectsEmptyTerminalStream(t *testing.T) {
+	sse := strings.Join([]string{
+		`data: {"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":0}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	var text string
+	completeCalls := 0
+	err := parseExternalOpenAISSE(strings.NewReader(sse), &KiroStreamCallback{
+		OnText: func(chunk string, _ bool) { text += chunk },
+		OnComplete: func(_, _ int) {
+			completeCalls++
+		},
+	})
+	if err == nil {
+		t.Fatal("expected empty terminal stream to fail")
+	}
+	if !strings.Contains(err.Error(), "without assistant output") {
+		t.Fatalf("error = %q, want missing assistant output", err)
+	}
+	if text != "" {
+		t.Fatalf("text = %q, want empty", text)
+	}
+	if completeCalls != 0 {
+		t.Fatalf("OnComplete calls = %d, want 0", completeCalls)
+	}
+}
+
+func TestParseExternalOpenAISSEAcceptsToolDeltaWithoutContent(t *testing.T) {
+	sse := strings.Join([]string{
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_read","type":"function","function":{"name":"Read","arguments":"{\"path\":\"README.md\"}"}}]}}]}`,
+		``,
+		`data: {"choices":[{"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":12,"completion_tokens":4}}`,
+		``,
+		`data: [DONE]`,
+		``,
+	}, "\n")
+
+	var tools []KiroToolUse
+	completeCalls := 0
+	outputSignals := 0
+	err := parseExternalOpenAISSE(strings.NewReader(sse), &KiroStreamCallback{
+		OnOutput: func() { outputSignals++ },
+		OnToolUse: func(tool KiroToolUse) {
+			tools = append(tools, tool)
+		},
+		OnComplete: func(_, _ int) {
+			completeCalls++
+		},
+	})
+	if err != nil {
+		t.Fatalf("parseExternalOpenAISSE: %v", err)
+	}
+	if outputSignals != 1 {
+		t.Fatalf("OnOutput calls = %d, want 1", outputSignals)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("tool calls = %d, want 1", len(tools))
+	}
+	if tools[0].ToolUseID != "call_read" || tools[0].Name != "Read" {
+		t.Fatalf("tool = %+v", tools[0])
+	}
+	if got := tools[0].Input["path"]; got != "README.md" {
+		t.Fatalf("tool path = %v, want README.md", got)
+	}
+	if completeCalls != 1 {
+		t.Fatalf("OnComplete calls = %d, want 1", completeCalls)
+	}
 }
 
 // TestCallExternalOpenAIJSONFallback verifies a provider that ignores
 // stream=true and returns a single JSON object is still parsed correctly.
 func TestCallExternalOpenAIJSONFallback(t *testing.T) {
 	initConfigForTests(t)
+	modelsRequests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"data":[{"id":"gpt-4o"}]}`)
+			modelsRequests++
+			http.Error(w, "model discovery must not run during inference", http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -433,16 +523,20 @@ func TestCallExternalOpenAIJSONFallback(t *testing.T) {
 	if inTok != 3 || outTok != 2 {
 		t.Errorf("tokens = in=%d out=%d, want in=3 out=2", inTok, outTok)
 	}
+	if modelsRequests != 0 {
+		t.Fatalf("/v1/models requests = %d, want 0 during inference", modelsRequests)
+	}
 }
 
 // TestCallExternalOpenAIAuthError verifies 401 is surfaced (so the pool can
 // disable the account) rather than swallowed.
 func TestCallExternalOpenAIAuthError(t *testing.T) {
 	initConfigForTests(t)
+	modelsRequests := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"data":[{"id":"gpt-4o"}]}`)
+			modelsRequests++
+			http.Error(w, "model discovery must not run during inference", http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(401)
@@ -465,6 +559,9 @@ func TestCallExternalOpenAIAuthError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "401") {
 		t.Errorf("err = %v, want 401", err)
+	}
+	if modelsRequests != 0 {
+		t.Fatalf("/v1/models requests = %d, want 0 during inference", modelsRequests)
 	}
 }
 
@@ -517,5 +614,27 @@ func TestDotToDashClaudeVersion(t *testing.T) {
 		if got := dotToDashClaudeVersion(c.in); got != c.want {
 			t.Errorf("dotToDashClaudeVersion(%q) = %q, want %q", c.in, got, c.want)
 		}
+	}
+}
+
+func TestKiroPayloadToOpenAIRequestAppliesAccountModelMapping(t *testing.T) {
+	payload := OpenAIToKiro(&OpenAIRequest{
+		Model:    "claude-haiku-5",
+		Messages: []OpenAIMessage{{Role: "user", Content: "hi"}},
+	}, false)
+	payload.OriginalModel = "claude-haiku-5"
+	account := &config.Account{ModelMappings: map[string]string{
+		"CLAUDE-HAIKU-5": "claude-sonnet-5",
+	}}
+
+	body, err := kiroPayloadToOpenAIRequest(payload, account)
+	if err != nil {
+		t.Fatalf("kiroPayloadToOpenAIRequest: %v", err)
+	}
+	if got := body["model"]; got != "claude-sonnet-5" {
+		t.Fatalf("outbound model = %v, want claude-sonnet-5", got)
+	}
+	if payload.OriginalModel != "claude-haiku-5" {
+		t.Fatalf("public payload model changed to %q", payload.OriginalModel)
 	}
 }

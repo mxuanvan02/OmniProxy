@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"omniproxy/config"
 	accountpool "omniproxy/pool"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -318,6 +319,125 @@ func TestClaudeStreamFlushesTextBeforeToolUse(t *testing.T) {
 	}
 	if stopReason != "tool_use" {
 		t.Errorf("stop_reason = %q, want tool_use", stopReason)
+	}
+}
+
+func TestClaudeStreamFailsOverAfterEmptyExternalSSE(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+
+	chatTokens := make([]string, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"claude-opus-5"}]}`))
+		case "/v1/chat/completions":
+			chatTokens = append(chatTokens, strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+			w.Header().Set("Content-Type", "text/event-stream")
+			if len(chatTokens) == 1 {
+				// Reproduce Kiro's live failure: a terminal stream with no
+				// assistant delta and zero completion tokens.
+				_, _ = w.Write([]byte("data: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":0}}\n\ndata: [DONE]\n\n"))
+				return
+			}
+			_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"Opus OK\"}}]}\n\ndata: {\"choices\":[{\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":2}}\n\ndata: [DONE]\n\n"))
+		default:
+			t.Errorf("unexpected upstream path %q", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	accounts := []config.Account{
+		{
+			ID:          "kiro-empty",
+			Email:       "kiro-empty",
+			AuthMethod:  externalAuthMethod,
+			AccessToken: "kiro-key",
+			BaseURL:     server.URL,
+			Enabled:     true,
+		},
+		{
+			ID:          "opus-working",
+			Email:       "opus-working",
+			AuthMethod:  externalAuthMethod,
+			AccessToken: "opus-key",
+			BaseURL:     server.URL,
+			Enabled:     true,
+		},
+	}
+	for _, account := range accounts {
+		if err := config.AddAccount(account); err != nil {
+			t.Fatalf("add account %s: %v", account.ID, err)
+		}
+	}
+
+	p := accountpool.GetPool()
+	p.Reload()
+	tracker := &UsageTracker{
+		ringCap:    10,
+		ring:       make([]RequestRecord, 10),
+		activeReqs: make(map[string]ActiveRequest),
+		dailyData:  make(map[string]*PeriodSummary),
+	}
+	h := &Handler{
+		pool:         p,
+		promptCache:  newPromptCacheTracker(defaultPromptCacheTTL),
+		usageTracker: tracker,
+	}
+	payload := &KiroPayload{OriginalModel: "claude-opus-5"}
+	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
+		Content: "Say OK",
+		ModelID: "claude-opus-5",
+		Origin:  "AI_EDITOR",
+	}
+
+	recorder := httptest.NewRecorder()
+	h.handleClaudeStream(recorder, payload, "claude-opus-5", false, claudeThinkingResponseOptions{}, 1, nil, "")
+
+	if len(chatTokens) != 2 {
+		t.Fatalf("chat attempts = %d (%v), want 2", len(chatTokens), chatTokens)
+	}
+	if chatTokens[0] == chatTokens[1] {
+		t.Fatalf("expected failover to a different account, tokens = %v", chatTokens)
+	}
+	if chatTokens[0] != "kiro-key" && chatTokens[0] != "opus-key" {
+		t.Fatalf("unexpected first account token %q", chatTokens[0])
+	}
+	if chatTokens[1] != "kiro-key" && chatTokens[1] != "opus-key" {
+		t.Fatalf("unexpected second account token %q", chatTokens[1])
+	}
+
+	events := parseClaudeSSEEvents(t, recorder.Body.String())
+	gotNames := make([]string, 0, len(events))
+	var visibleText strings.Builder
+	for _, event := range events {
+		gotNames = append(gotNames, event.name)
+		if event.name != "content_block_delta" {
+			continue
+		}
+		delta, _ := event.data["delta"].(map[string]interface{})
+		if delta["type"] == "text_delta" {
+			if text, ok := delta["text"].(string); ok {
+				visibleText.WriteString(text)
+			}
+		}
+	}
+	wantNames := []string{
+		"message_start",
+		"content_block_start",
+		"content_block_delta",
+		"content_block_stop",
+		"message_delta",
+		"message_stop",
+	}
+	if !reflect.DeepEqual(gotNames, wantNames) {
+		t.Fatalf("Claude event order = %v, want %v", gotNames, wantNames)
+	}
+	if got := visibleText.String(); got != "Opus OK" {
+		t.Fatalf("visible text = %q, want Opus OK", got)
 	}
 }
 

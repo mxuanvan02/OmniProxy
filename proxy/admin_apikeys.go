@@ -2,8 +2,8 @@ package proxy
 
 import (
 	"encoding/json"
-	"omniproxy/config"
 	"net/http"
+	"omniproxy/config"
 )
 
 // apiKeyView is the response payload for listing/inspecting API keys. The Key field
@@ -21,9 +21,14 @@ type apiKeyView struct {
 	TokensUsed    int64   `json:"tokensUsed"`
 	CreditsUsed   float64 `json:"creditsUsed"`
 	RequestsCount int64   `json:"requestsCount"`
+	Status        string  `json:"status"`
+	Issue         string  `json:"issue,omitempty"`
+	LastErrorAt   int64   `json:"lastErrorAt,omitempty"`
+	ErrorCount    int64   `json:"errorCount,omitempty"`
 }
 
 func toApiKeyView(e config.ApiKeyEntry) apiKeyView {
+	status, issue := config.ApiKeyHealth(e)
 	return apiKeyView{
 		ID:            e.ID,
 		Name:          e.Name,
@@ -37,6 +42,10 @@ func toApiKeyView(e config.ApiKeyEntry) apiKeyView {
 		TokensUsed:    e.TokensUsed,
 		CreditsUsed:   e.CreditsUsed,
 		RequestsCount: e.RequestsCount,
+		Status:        status,
+		Issue:         issue,
+		LastErrorAt:   e.LastErrorAt,
+		ErrorCount:    e.ErrorCount,
 	}
 }
 

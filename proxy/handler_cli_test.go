@@ -115,8 +115,8 @@ func TestApplyClaudeCliSettingsPreservesModelRouting(t *testing.T) {
 		t.Fatalf("primary model = %v, want opus", got["model"])
 	}
 	fallback, ok := got["fallbackModel"].([]interface{})
-	if !ok || len(fallback) != 1 || fallback[0] != "sonnet" {
-		t.Fatalf("primary fallback = %#v, want [sonnet]", got["fallbackModel"])
+	if !ok || len(fallback) != 1 || fallback[0] != "claude-sonnet-5" {
+		t.Fatalf("primary fallback = %#v, want [claude-sonnet-5]", got["fallbackModel"])
 	}
 	if got["advisorModel"] != "gpt-5.6-sol" {
 		t.Fatalf("advisor model = %v, want gpt-5.6-sol", got["advisorModel"])
@@ -128,16 +128,13 @@ func TestApplyClaudeCliSettingsPreservesModelRouting(t *testing.T) {
 	if !ok {
 		t.Fatalf("availableModels has unexpected type %T", got["availableModels"])
 	}
-	for _, want := range []string{"opus", "sonnet", "claude-fable-5", "gpt-5.6-sol", "claude-opus-5"} {
-		found := false
-		for _, raw := range available {
-			if raw == want {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Fatalf("availableModels missing %q: %#v", want, available)
+	wantAvailable := []interface{}{"claude-sonnet-5", "claude-opus-5"}
+	if len(available) != len(wantAvailable) {
+		t.Fatalf("availableModels = %#v, want exactly %#v", available, wantAvailable)
+	}
+	for i, want := range wantAvailable {
+		if available[i] != want {
+			t.Fatalf("availableModels[%d] = %#v, want %#v; full list=%#v", i, available[i], want, available)
 		}
 	}
 	env, ok := got["env"].(map[string]interface{})
@@ -146,6 +143,9 @@ func TestApplyClaudeCliSettingsPreservesModelRouting(t *testing.T) {
 	}
 	if env["ANTHROPIC_DEFAULT_OPUS_MODEL"] != "claude-opus-5[1m]" {
 		t.Fatalf("opus env model = %v, stale Apply payload overwrote it", env["ANTHROPIC_DEFAULT_OPUS_MODEL"])
+	}
+	if env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "claude-sonnet-5" {
+		t.Fatalf("haiku tier model = %v, want claude-sonnet-5", env["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
 	}
 }
 

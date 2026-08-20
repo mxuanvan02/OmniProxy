@@ -123,8 +123,8 @@ func TestLegacyConfigMigrationAddsClaudeRuntimeDefaults(t *testing.T) {
 	if got := GetStreamIdleTimeout(); got != 15*time.Minute {
 		t.Fatalf("migrated stream idle timeout = %s, want 15m", got)
 	}
-	if !hasModelID(GetExtraModels(), "claude-fable-5") {
-		t.Fatalf("migrated extra models = %v, want claude-fable-5", GetExtraModels())
+	if got := GetExtraModels(); len(got) != 1 || got[0] != "claude-sonnet-5" {
+		t.Fatalf("migrated extra models = %v, want existing list preserved", got)
 	}
 
 	persisted, err := os.ReadFile(configPath)
@@ -142,8 +142,8 @@ func TestLegacyConfigMigrationAddsClaudeRuntimeDefaults(t *testing.T) {
 	if got.APITimeoutMs != defaultKiroApiTimeoutMs || got.StreamIdleTimeoutSeconds != defaultStreamIdleTimeoutSecs {
 		t.Fatalf("persisted runtime defaults = %+v, want %d/%d", got, defaultKiroApiTimeoutMs, defaultStreamIdleTimeoutSecs)
 	}
-	if !hasModelID(got.ExtraModels, defaultClaudeExtraModel) {
-		t.Fatalf("persisted extra models = %v, want %q", got.ExtraModels, defaultClaudeExtraModel)
+	if len(got.ExtraModels) != 1 || got.ExtraModels[0] != "claude-sonnet-5" {
+		t.Fatalf("persisted extra models = %v, want existing list preserved", got.ExtraModels)
 	}
 }
 

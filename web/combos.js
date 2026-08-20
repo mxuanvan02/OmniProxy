@@ -179,9 +179,111 @@
   window.modelTestResults = {};
   window.modelTesting = {};
 
+  // Model families. Grouping is display-only: the routable ID is always the
+  // upstream `id` returned by /v1/models, never a label built from it.
+  const MODEL_FAMILY_RULES = [
+    { id: 'claude', label: 'Claude', match: /claude/ },
+    { id: 'gpt', label: 'GPT / Codex', match: /(^|[^a-z])(gpt|codex|o3|o4)([^a-z]|$)/ },
+    { id: 'gemini', label: 'Gemini', match: /gemini/ },
+    { id: 'deepseek', label: 'DeepSeek', match: /deepseek/ },
+    { id: 'qwen', label: 'Qwen', match: /(qwen|qwq)/ },
+    { id: 'glm', label: 'GLM', match: /glm/ },
+    { id: 'kimi', label: 'Kimi', match: /(kimi|moonshot)/ },
+    { id: 'minimax', label: 'MiniMax', match: /minimax/ },
+    { id: 'grok', label: 'Grok', match: /grok/ },
+    { id: 'llama', label: 'Llama', match: /llama/ },
+    { id: 'mistral', label: 'Mistral', match: /(mistral|mixtral|magistral)/ },
+    { id: 'nemotron', label: 'Nemotron', match: /nemotron/ }
+  ];
+  const MODEL_FAMILY_ORDER = MODEL_FAMILY_RULES.map(r => r.id).concat(['other']);
+  // Capability branches inside a family (Flash / Pro / Max ...). Order matters:
+  // the first match wins, so more specific suffixes come first.
+  const MODEL_VARIANT_RULES = [
+    { id: 'thinking', label: 'Thinking', match: /(thinking|reasoner|reasoning)/ },
+    { id: 'flash', label: 'Flash', match: /flash/ },
+    { id: 'pro', label: 'Pro', match: /pro/ },
+    { id: 'max', label: 'Max', match: /max/ },
+    { id: 'plus', label: 'Plus', match: /plus/ },
+    { id: 'opus', label: 'Opus', match: /opus/ },
+    { id: 'sonnet', label: 'Sonnet', match: /sonnet/ },
+    { id: 'haiku', label: 'Haiku', match: /haiku/ },
+    { id: 'coder', label: 'Coder', match: /(coder|code)/ },
+    { id: 'vision', label: 'Vision', match: /(vision|vl)/ },
+    { id: 'mini', label: 'Mini', match: /(mini|nano|lite|air|spark|flashlite)/ }
+  ];
+
+  function modelBareID(modelId) {
+    const value = String(modelId || '').toLowerCase();
+    const idx = value.lastIndexOf('/');
+    return idx >= 0 ? value.slice(idx + 1) : value;
+  }
+
+  function modelFamily(modelId) {
+    const bare = modelBareID(modelId);
+    for (const rule of MODEL_FAMILY_RULES) {
+      if (rule.match.test(bare)) return rule;
+    }
+    return { id: 'other', label: t('combos.otherModels') || 'Other', match: null };
+  }
+
+  function modelVariant(modelId) {
+    const bare = modelBareID(modelId);
+    for (const rule of MODEL_VARIANT_RULES) {
+      if (rule.match.test(bare)) return rule.id;
+    }
+    return 'base';
+  }
+
+  // Version tokens of a model id, most significant first: "qwen3.8-max" -> [3, 8].
+  //
+  // Only the first version-like numeric run counts. Model ids carry plenty of
+  // other numbers that must not be read as a version, otherwise a big-parameter
+  // or date-stamped build outranks a genuinely newer release:
+  //   - parameter counts / quantization shapes: 235b, 8x22b, 550b, 17b-128e
+  //   - date and build stamps: 2025-12-15, 20251215, 2507
+  function modelVersionKey(modelId) {
+    const bare = modelBareID(modelId)
+      .replace(/\d{4}-\d{2}-\d{2}/g, ' ')
+      .replace(/\b\d{6,8}\b/g, ' ');
+    const re = /(\d+(?:\.\d+)*)([a-z]*)/g;
+    let m;
+    while ((m = re.exec(bare)) !== null) {
+      // A trailing unit letter marks a size, not a version (235b, 8x22b, 128e).
+      if (/^[bkmxe]/.test(m[2] || '')) continue;
+      const major = m[1].split('.')[0];
+      // A bare four-digit year-like token is a build stamp (2507, 2025).
+      if (major.length >= 4 && parseInt(major, 10) >= 1900) continue;
+      return m[1].split('.').map(part => parseInt(part, 10));
+    }
+    return [];
+  }
+
+  function modelIsPrerelease(modelId) {
+    return /(preview|experimental|exp|beta|alpha|rc\d*|snapshot)/.test(modelBareID(modelId));
+  }
+
+  function compareModelRecency(a, b) {
+    const pa = modelIsPrerelease(a) ? 1 : 0;
+    const pb = modelIsPrerelease(b) ? 1 : 0;
+    if (pa !== pb) return pa - pb;
+    const va = modelVersionKey(a);
+    const vb = modelVersionKey(b);
+    const len = Math.max(va.length, vb.length);
+    for (let i = 0; i < len; i++) {
+      const x = va[i] === undefined ? -1 : va[i];
+      const y = vb[i] === undefined ? -1 : vb[i];
+      if (x !== y) return y - x; // newest first
+    }
+    return a.localeCompare(b);
+  }
+
   async function openModelPicker() {
     try {
-      const res = await fetch('/v1/models');
+      // catalog=all is the opt-in OmniProxy catalogue: it adds models learned
+      // from enabled accounts (Gemini/DeepSeek/Qwen/GLM/...) without changing
+      // the conservative default /v1/models contract.
+      let res = await fetch('/v1/models?catalog=all');
+      if (!res.ok) res = await fetch('/v1/models');
       const data = await res.json();
       const models = data.data || [];
       pickerCombos = [];
@@ -232,20 +334,41 @@
       filteredCombos.forEach(c => { html += renderModelItem(c); });
     }
 
-    const sortedProviders = Object.keys(
-      pickerModels.reduce((acc, m) => { acc[m.provider] = true; return acc; }, {})
-    ).sort((a, b) => {
-      const ia = PROVIDER_ALIAS_ORDER.indexOf(a);
-      const ib = PROVIDER_ALIAS_ORDER.indexOf(b);
+    // Group by model family first (Claude, GPT, Gemini, DeepSeek, Qwen, GLM …),
+    // then by capability branch (Flash/Pro/Max/…), newest version first within
+    // each branch. The routable ID is rendered verbatim.
+    const families = new Map();
+    pickerModels.forEach(m => {
+      if (!m.id.toLowerCase().includes(q) && !modelFamily(m.id).label.toLowerCase().includes(q)) return;
+      const family = modelFamily(m.id);
+      const entry = families.get(family.id) || { label: family.label, models: [] };
+      entry.models.push(m);
+      families.set(family.id, entry);
+    });
+
+    const sortedFamilies = [...families.entries()].sort(([a], [b]) => {
+      const ia = MODEL_FAMILY_ORDER.indexOf(a);
+      const ib = MODEL_FAMILY_ORDER.indexOf(b);
       return (ia === -1 ? 999 : ia) - (ib === -1 ? 999 : ib);
     });
 
-    sortedProviders.forEach(provider => {
-      const filtered = pickerModels.filter(m => m.provider === provider && m.id.toLowerCase().includes(q));
-      if (filtered.length === 0) return;
-      const displayName = PROVIDER_ALIAS_NAMES[provider] || provider;
-      html += '<div class="picker-group-header" style="color:var(--text-secondary);">' + escapeHtml(displayName) + '</div>';
-      filtered.forEach(m => { html += renderModelItem(m.id); });
+    sortedFamilies.forEach(([familyId, family]) => {
+      const variantIndex = id => {
+        const i = MODEL_VARIANT_RULES.findIndex(r => r.id === id);
+        return i === -1 ? MODEL_VARIANT_RULES.length : i;
+      };
+      const sorted = family.models.slice().sort((a, b) => {
+        const va = variantIndex(modelVariant(a.id));
+        const vb = variantIndex(modelVariant(b.id));
+        if (va !== vb) return va - vb;
+        return compareModelRecency(a.id, b.id);
+      });
+      html += '<div class="picker-group-header" style="color:var(--text-secondary);">' +
+        escapeHtml(family.label) + ' <span style="opacity:.6;font-weight:400;">(' + sorted.length + ')</span></div>';
+      sorted.forEach(m => {
+        const providerName = PROVIDER_ALIAS_NAMES[m.provider] || m.provider || '';
+        html += renderModelItem(m.id, providerName);
+      });
     });
 
     if (!html) {
@@ -254,7 +377,7 @@
     list.innerHTML = html;
   }
 
-function renderModelItem(modelId) {
+function renderModelItem(modelId, providerName) {
   const selected = pickerSelection.has(modelId);
   const testRes = window.modelTestResults ? window.modelTestResults[modelId] : undefined;
   const testing = window.modelTesting ? window.modelTesting[modelId] : false;
@@ -272,6 +395,7 @@ function renderModelItem(modelId) {
     '<span class="picker-check">' + (selected ? '&#10003;' : '') + '</span>' +
     '<span class="picker-status-icon" style="width:1.1em;text-align:center;flex-shrink:0;">' + statusIcon + '</span>' +
     '<span style="flex:1;">' + escapeHtml(modelId) + '</span>' +
+    (providerName ? '<span class="picker-provider-tag" style="opacity:.55;font-size:0.68rem;flex-shrink:0;">' + escapeHtml(providerName) + '</span>' : '') +
     '<button class="picker-test-btn" onclick="event.stopPropagation();window.testModel(\'' + escapeHtml(modelId).replace(/'/g, '&#39;') + '\')" type="button" title="' + escapeHtml(t('cliTools.testModel')) + '"><i class="fa-solid fa-flask"></i></button>' +
     '</div>';
 }

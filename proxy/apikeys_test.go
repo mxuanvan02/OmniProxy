@@ -2,9 +2,9 @@ package proxy
 
 import (
 	"encoding/json"
-	"omniproxy/config"
 	"net/http"
 	"net/http/httptest"
+	"omniproxy/config"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -81,6 +81,10 @@ func TestAuthenticateRejectsDisabledKey(t *testing.T) {
 	if !strings.Contains(ae.message, "disabled") {
 		t.Fatalf("expected disabled message, got %q", ae.message)
 	}
+	got := config.GetApiKeyEntry(created.ID)
+	if got == nil || got.LastError != "API key disabled" || got.ErrorCount != 1 {
+		t.Fatalf("expected disabled status to be persisted, got %+v", got)
+	}
 }
 
 func TestAuthenticateAcceptsEnabledKey(t *testing.T) {
@@ -142,6 +146,10 @@ func TestAuthenticateRejectsOverTokenLimit(t *testing.T) {
 	if !strings.Contains(ae.message, "token limit") {
 		t.Fatalf("expected token limit message, got %q", ae.message)
 	}
+	got := config.GetApiKeyEntry(created.ID)
+	if got == nil || got.LastError != "token limit exceeded" || got.ErrorCount != 1 {
+		t.Fatalf("expected token-limit status to be persisted, got %+v", got)
+	}
 }
 
 func TestAuthenticateRejectsOverCreditLimit(t *testing.T) {
@@ -172,6 +180,10 @@ func TestAuthenticateRejectsOverCreditLimit(t *testing.T) {
 	}
 	if !strings.Contains(ae.message, "credit limit") {
 		t.Fatalf("expected credit limit message, got %q", ae.message)
+	}
+	got := config.GetApiKeyEntry(created.ID)
+	if got == nil || got.LastError != "credit limit exceeded" || got.ErrorCount != 1 {
+		t.Fatalf("expected credit-limit status to be persisted, got %+v", got)
 	}
 }
 
@@ -305,6 +317,34 @@ func TestRecordSuccessForApiKeyEmptyIDIsNoop(t *testing.T) {
 	}
 	if got.TokensUsed != 0 || got.CreditsUsed != 0 || got.RequestsCount != 0 {
 		t.Fatalf("expected entry untouched when apiKeyID is empty, got %+v", got)
+	}
+}
+
+func TestRecordErrorPersistsApiKeyHealthWithoutUsageTracker(t *testing.T) {
+	mustInitConfig(t)
+	created, err := config.AddApiKey(config.ApiKeyEntry{Name: "upstream", Key: "sk-upstream", Enabled: true})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	h := &Handler{}
+	h.recordError(created.ID, "", "model", endpointOpenAI, "upstream 502\nretry failed")
+	got := config.GetApiKeyEntry(created.ID)
+	if got == nil || got.LastError != "upstream 502 retry failed" || got.LastErrorAt == 0 || got.ErrorCount != 1 {
+		t.Fatalf("expected upstream error metadata without usage tracker, got %+v", got)
+	}
+}
+
+func TestApiKeyViewExposesHealthWithoutSecret(t *testing.T) {
+	view := toApiKeyView(config.ApiKeyEntry{
+		ID: "key-1", Name: "main", Key: "sk-super-secret", Enabled: true,
+		LastError: "upstream failed", LastErrorAt: 123, ErrorCount: 2,
+	})
+	if view.Status != "error" || view.Issue != "upstream failed" || view.LastErrorAt != 123 || view.ErrorCount != 2 {
+		t.Fatalf("unexpected API key health view: %+v", view)
+	}
+	if strings.Contains(view.KeyMasked, "super-secret") || view.KeyMasked == "sk-super-secret" {
+		t.Fatalf("API key view exposed secret: %q", view.KeyMasked)
 	}
 }
 

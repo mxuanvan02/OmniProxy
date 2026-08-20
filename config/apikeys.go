@@ -174,8 +174,59 @@ func RecordApiKeyUsage(id string, tokens int64, credits float64) error {
 			}
 			cfg.ApiKeys[i].RequestsCount++
 			cfg.ApiKeys[i].LastUsedAt = time.Now().Unix()
+			cfg.ApiKeys[i].LastErrorAt = 0
+			cfg.ApiKeys[i].LastError = ""
 			return saveLocked()
 		}
+	}
+	return errors.New("api key not found")
+}
+
+const maxApiKeyErrorLength = 512
+
+// RecordApiKeyError stores a bounded, sanitized failure message for a known key.
+// Unknown key values are never persisted, so random invalid credentials cannot
+// create unbounded state in the configuration file.
+func RecordApiKeyError(id string, message string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return errors.New("config not initialized")
+	}
+	for i := range cfg.ApiKeys {
+		if cfg.ApiKeys[i].ID != id {
+			continue
+		}
+		message = sanitizeApiKeyError(message)
+		if message == "" {
+			message = "request failed"
+		}
+		cfg.ApiKeys[i].LastErrorAt = time.Now().Unix()
+		cfg.ApiKeys[i].LastError = message
+		cfg.ApiKeys[i].ErrorCount++
+		return saveLocked()
+	}
+	return errors.New("api key not found")
+}
+
+// ClearApiKeyError removes the persisted last-error state for a known key.
+// ErrorCount is retained as a cumulative diagnostic counter.
+func ClearApiKeyError(id string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return errors.New("config not initialized")
+	}
+	for i := range cfg.ApiKeys {
+		if cfg.ApiKeys[i].ID != id {
+			continue
+		}
+		if cfg.ApiKeys[i].LastErrorAt == 0 && cfg.ApiKeys[i].LastError == "" {
+			return nil
+		}
+		cfg.ApiKeys[i].LastErrorAt = 0
+		cfg.ApiKeys[i].LastError = ""
+		return saveLocked()
 	}
 	return errors.New("api key not found")
 }
@@ -193,10 +244,30 @@ func ResetApiKeyUsage(id string) error {
 			cfg.ApiKeys[i].TokensUsed = 0
 			cfg.ApiKeys[i].CreditsUsed = 0
 			cfg.ApiKeys[i].RequestsCount = 0
+			cfg.ApiKeys[i].LastErrorAt = 0
+			cfg.ApiKeys[i].LastError = ""
 			return saveLocked()
 		}
 	}
 	return errors.New("api key not found")
+}
+
+func sanitizeApiKeyError(message string) string {
+	message = strings.TrimSpace(message)
+	message = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\t' {
+			return ' '
+		}
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, message)
+	message = strings.TrimSpace(message)
+	if len([]rune(message)) > maxApiKeyErrorLength {
+		message = string([]rune(message)[:maxApiKeyErrorLength]) + "..."
+	}
+	return message
 }
 
 // GenerateApiKeyValue returns a new random 32-byte hex API key prefixed with "sk-".
@@ -229,4 +300,24 @@ func ApiKeyOverLimit(e ApiKeyEntry) (overToken bool, overCredit bool) {
 		overCredit = true
 	}
 	return
+}
+
+// ApiKeyHealth returns a stable status and an operator-facing reason for a
+// configured key. Configuration state takes precedence over a stale request
+// error, so disabled or exhausted keys remain immediately visible in the UI.
+func ApiKeyHealth(e ApiKeyEntry) (status string, issue string) {
+	if !e.Enabled {
+		return "disabled", "API key disabled"
+	}
+	overToken, overCredit := ApiKeyOverLimit(e)
+	if overToken {
+		return "over_limit", "token limit exceeded"
+	}
+	if overCredit {
+		return "over_limit", "credit limit exceeded"
+	}
+	if e.LastError != "" {
+		return "error", e.LastError
+	}
+	return "active", ""
 }

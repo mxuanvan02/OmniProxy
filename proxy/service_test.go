@@ -190,6 +190,55 @@ func TestHandleSearchFailsOverBetweenAccounts(t *testing.T) {
 	}
 }
 
+func TestHandleSearchProviderKindOnlyInputOutput(t *testing.T) {
+	initConfigForTests(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/search" {
+			t.Fatalf("upstream request = %s %s, want POST /search", r.Method, r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer legacy-search-key" {
+			t.Fatalf("upstream authorization = %q", got)
+		}
+		var body map[string]interface{}
+		decodeServiceJSON(t, r, &body)
+		if body["query"] != "golang" || body["max_results"] != float64(2) {
+			t.Fatalf("upstream input = %#v, want query=golang max_results=2", body)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"query":"golang","answer":"Go language","results":[{"title":"The Go Programming Language","url":"https://go.dev","content":"Go is an open source programming language."}]}`)
+	}))
+	defer server.Close()
+
+	// This represents an account imported before explicit Capabilities were
+	// persisted. ProviderKind must be enough for runtime service routing.
+	if err := config.AddAccount(config.Account{
+		ID: "legacy-search", Provider: "tavily", ProviderKind: "search",
+		AccessToken: "legacy-search-key", BaseURL: server.URL, Enabled: true,
+	}); err != nil {
+		t.Fatalf("add search account: %v", err)
+	}
+
+	h := &Handler{pool: getServiceTestPool(t)}
+	request := httptest.NewRequest(http.MethodPost, "/v1/search", strings.NewReader(`{"query":"golang","max_results":2}`))
+	recorder := httptest.NewRecorder()
+	h.handleSearch(recorder, request)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("search status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	var got normalizedSearchResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode search output: %v; body=%s", err, recorder.Body.String())
+	}
+	if got.Query != "golang" || got.Provider != "tavily" || got.Answer != "Go language" {
+		t.Fatalf("search output = %#v, want normalized Tavily response", got)
+	}
+	if len(got.Results) != 1 || got.Results[0].Title != "The Go Programming Language" || got.Results[0].URL != "https://go.dev" {
+		t.Fatalf("search results = %#v, want one Go result", got.Results)
+	}
+}
+
 func TestImageGenerationAdapterAndHandler(t *testing.T) {
 	initConfigForTests(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

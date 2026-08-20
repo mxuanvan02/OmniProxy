@@ -151,6 +151,7 @@ let promptRules = [];
   let apiKeysCache = [];
   let apiKeyEditingId = '';
   let apiKeyModalSubmitting = false;
+  let apiKeysLoadError = false;
 
   async function loadApiKeys() {
     try {
@@ -158,8 +159,10 @@ let promptRules = [];
       if (!res.ok) throw new Error('http ' + res.status);
       const d = await res.json();
       apiKeysCache = Array.isArray(d.apiKeys) ? d.apiKeys : [];
+      apiKeysLoadError = false;
     } catch (e) {
-      apiKeysCache = [];
+      apiKeysLoadError = true;
+      toastError(t('apiKeys.loadFailed'));
     }
     const list = $('apiKeysList');
     if (list) renderApiKeys();
@@ -195,6 +198,10 @@ let promptRules = [];
   function renderApiKeys() {
     const list = $('apiKeysList');
     if (!list) return;
+    if (apiKeysLoadError) {
+      list.innerHTML = '<div class="text-xs" style="padding:0.5rem 0;color:#ef4444;">' + escapeHtml(t('apiKeys.loadFailed')) + '</div>';
+      return;
+    }
     if (!apiKeysCache.length) {
       list.innerHTML = '<div class="muted-text" style="padding:0.5rem 0;">' + escapeHtml(t('apiKeys.empty')) + '</div>';
       return;
@@ -206,8 +213,12 @@ let promptRules = [];
       const migrated = item.migrated
         ? '<span class="text-xs" style="background:rgba(59,130,246,0.15);color:#3b82f6;padding:1px 6px;border-radius:4px;">' + escapeHtml(t('apiKeys.migrated')) + '</span>'
         : '';
-      const disabled = !item.enabled
-        ? '<span class="text-xs" style="background:rgba(239,68,68,0.15);color:#ef4444;padding:1px 6px;border-radius:4px;">' + escapeHtml(t('apiKeys.disabled')) + '</span>'
+      const status = item.status || (item.enabled ? 'active' : 'disabled');
+      const statusLabel = t('apiKeys.status.' + status);
+      const statusColor = status === 'active' ? '#16a34a' : status === 'error' ? '#dc2626' : '#b45309';
+      const statusBadge = '<span class="text-xs" style="background:' + statusColor + '1f;color:' + statusColor + ';padding:1px 6px;border-radius:4px;">' + escapeHtml(statusLabel) + '</span>';
+      const issue = item.issue
+        ? '<div class="text-xs" style="color:#dc2626;overflow-wrap:anywhere;">' + escapeHtml(item.issue) + (item.lastErrorAt ? ' <span class="muted-text">(' + escapeHtml(new Date(item.lastErrorAt * 1000).toLocaleString()) + ')</span>' : '') + '</div>'
         : '';
       const tokensLine = usageLine(t('apiKeys.tokens'), item.tokensUsed || 0, item.tokenLimit || 0);
       const creditsLine = usageLine(t('apiKeys.credits'), item.creditsUsed || 0, item.creditLimit || 0);
@@ -217,7 +228,7 @@ let promptRules = [];
           '<div class="flex items-center gap-2" style="flex-wrap:wrap;">' +
             '<span class="font-semibold">' + name + '</span>' +
             migrated +
-            disabled +
+            statusBadge +
             '<span class="text-xs muted-text font-mono">' + masked + '</span>' +
           '</div>' +
           '<div class="flex items-center gap-2">' +
@@ -234,6 +245,7 @@ let promptRules = [];
           tokensLine +
           creditsLine +
           requestsLine +
+          issue +
         '</div>' +
       '</div>';
     }).join('');

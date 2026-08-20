@@ -839,8 +839,7 @@ func isLargeContextModel(model string) bool {
 	// not accidentally treated as a known Claude 5 model.
 	if strings.HasPrefix(m, "claude-opus-5") ||
 		strings.HasPrefix(m, "claude-sonnet-5") ||
-		strings.HasPrefix(m, "claude-haiku-5") ||
-		strings.HasPrefix(m, "claude-fable-5") {
+		strings.HasPrefix(m, "claude-haiku-5") {
 		return true
 	}
 	// Claude Code's Fable 5 identifier has no minor component, so it cannot

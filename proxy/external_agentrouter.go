@@ -11,6 +11,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -66,41 +67,75 @@ func callAgentRouterOpenAI(account *config.Account, baseURL, apiKey string, payl
 	if err != nil {
 		return fmt.Errorf("agentrouter build request: %w", err)
 	}
-	body["stream"] = true
-	body["stream_options"] = map[string]bool{"include_usage": true}
+
+	// Streaming is the primary path. Retry once as JSON only for an explicit
+	// provider error embedded in HTTP-200 SSE before parser-observed output.
+	// Transport, parse, truncation, idle-timeout, HTTP and post-output failures
+	// are never replayed.
+	streamErr, _ := callAgentRouterOpenAIRequest(account, endpoint, apiKey, body, true, callback)
+	if streamErr == nil {
+		return nil
+	}
+	var providerErr *externalSSEProviderError
+	if !errors.As(streamErr, &providerErr) || providerErr.priorEventObserved || providerErr.outputObserved {
+		return streamErr
+	}
+	if callback != nil && callback.OnReset != nil {
+		callback.OnReset()
+	}
+	fallbackErr, _ := callAgentRouterOpenAIRequest(account, endpoint, apiKey, body, false, callback)
+	if fallbackErr != nil {
+		return fmt.Errorf("agentrouter stream failed before output (%v); non-stream fallback failed: %w", streamErr, fallbackErr)
+	}
+	return nil
+}
+
+// callAgentRouterOpenAIRequest executes one wire attempt. wasSSE is true only
+// when an HTTP 200 response entered the SSE parser; HTTP/auth/transport errors
+// therefore never trigger the stream-to-JSON fallback.
+func callAgentRouterOpenAIRequest(account *config.Account, endpoint, apiKey string, baseBody map[string]interface{}, stream bool, callback *KiroStreamCallback) (err error, wasSSE bool) {
+	body := make(map[string]interface{}, len(baseBody)+2)
+	for key, value := range baseBody {
+		body[key] = value
+	}
+	body["stream"] = stream
+	if stream {
+		body["stream_options"] = map[string]bool{"include_usage": true}
+	} else {
+		delete(body, "stream_options")
+	}
 
 	reqBody, err := json.Marshal(body)
 	if err != nil {
-		return fmt.Errorf("agentrouter marshal: %w", err)
+		return fmt.Errorf("agentrouter marshal: %w", err), false
 	}
 
 	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(reqBody))
 	if err != nil {
-		return fmt.Errorf("agentrouter new request: %w", err)
+		return fmt.Errorf("agentrouter new request: %w", err), false
 	}
-
-	setAgentRouterHeaders(req, apiKey, "text/event-stream")
+	accept := "application/json"
+	if stream {
+		accept = "text/event-stream"
+	}
+	setAgentRouterHeaders(req, apiKey, accept)
 
 	client := GetClientForProxy(ResolveAccountProxyURL(account))
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("agentrouter call %s: %w", account.Email, err)
+		return fmt.Errorf("agentrouter call %s: %w", account.Email, err), false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
 		errBody, _ := io.ReadAll(resp.Body)
-		err := fmt.Errorf("HTTP %d from AgentRouter (%s): %s", resp.StatusCode, account.Email, truncateErrBody(errBody))
-		if resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode == 402 {
-			return err
-		}
-		return err
+		return fmt.Errorf("HTTP %d from AgentRouter (%s): %s", resp.StatusCode, account.Email, truncateErrBody(errBody)), false
 	}
 
 	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
-		return parseExternalOpenAISSE(resp.Body, callback)
+		return parseExternalOpenAISSE(resp.Body, callback), true
 	}
-	return parseExternalOpenAIJSON(resp.Body, callback)
+	return parseExternalOpenAIJSON(resp.Body, callback), false
 }
 
 // CallAgentRouterTest performs the fixed non-streaming OpenAI-compatible probe

@@ -154,12 +154,14 @@ func kiroPayloadToOpenAIRequest(payload *KiroPayload, account *config.Account) (
 	// provider's model registry can match. Only applies to claude-* models;
 	// other model families (gpt-*, o1-*, etc.) pass through unchanged.
 	modelID = dotToDashClaudeVersion(modelID)
-	// Resolve against the provider's model list: some providers use dated
-	// snapshots (e.g. "claude-haiku-4-5-20251001") instead of short IDs.
-	// Prefix-match the cached list to pick the closest available model.
-	if account != nil && !isAgentRouterAccount(account) {
-		modelID = resolveExternalModelID(account, modelID)
-	}
+	modelID = applyExternalModelMapping(account, modelID)
+	// Do not discover models on the inference hot path. A provider's /v1/models
+	// endpoint is optional and may be slow or unavailable even when
+	// /v1/chat/completions is healthy. Resolving a model here would delay every
+	// request by the discovery timeout and can make Claude CLI appear to stop
+	// before the assistant/tool stream starts. Model discovery remains an
+	// explicit admin/cache operation in fetchAndCacheAccountModels and
+	// apiGetAccountModels.
 
 	msgs := make([]map[string]interface{}, 0, 8)
 	history := payload.ConversationState.History
@@ -308,6 +310,24 @@ func kiroPayloadToOpenAIRequest(payload *KiroPayload, account *config.Account) (
 	}
 
 	return body, nil
+}
+
+// applyExternalModelMapping rewrites a public model ID to the model ID used by
+// one external account. Matching is case-insensitive so hand-edited config is
+// not sensitive to model-ID casing.
+func applyExternalModelMapping(account *config.Account, modelID string) string {
+	if account == nil || len(account.ModelMappings) == 0 {
+		return modelID
+	}
+	for source, target := range account.ModelMappings {
+		if strings.EqualFold(strings.TrimSpace(source), modelID) {
+			if target = strings.TrimSpace(target); target != "" {
+				return target
+			}
+			return modelID
+		}
+	}
+	return modelID
 }
 
 // sanitizeExternalToolSchema removes enum constraints that Gemini-compatible
@@ -617,10 +637,24 @@ func normalizeUpstreamStopReason(reason string) string {
 }
 
 type externalSSELineResult struct {
-	recognized bool
-	terminal   bool
-	stopReason string
-	err        error
+	recognized       bool
+	recognizedOutput bool
+	terminal         bool
+	stopReason       string
+	err              error
+}
+
+// externalSSEProviderError identifies an explicit error object carried inside
+// an otherwise HTTP-200 SSE response. The observation flags are parser-owned,
+// so retry safety does not depend on whether the caller supplied callbacks.
+type externalSSEProviderError struct {
+	message            string
+	priorEventObserved bool
+	outputObserved     bool
+}
+
+func (e *externalSSEProviderError) Error() string {
+	return "external provider error: " + e.message
 }
 
 // parseExternalOpenAISSE reads an OpenAI streaming chat-completion SSE stream
@@ -644,6 +678,8 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 	var inputTokens, outputTokens int
 	toolAccums := map[int]*externalToolAccum{}
 	var toolOrder []int
+	sawDataEvent := false
+	sawAssistantOutput := false
 	terminal := false
 	stopReason := ""
 
@@ -685,10 +721,28 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 			}
 			if err == io.EOF {
 				if strings.TrimSpace(line) != "" {
+					// ReadString returns the final unterminated line together with
+					// io.EOF. Handle inline provider errors here as well, otherwise
+					// a clean pre-output error cannot trigger AgentRouter fallback.
+					dataLine := strings.TrimRight(line, "\r\n")
+					if strings.HasPrefix(dataLine, "data:") {
+						data := strings.TrimSpace(strings.TrimPrefix(dataLine, "data:"))
+						if data != "[DONE]" {
+							if errMsg := extractExternalSSEError([]byte(data)); errMsg != "" {
+								return &externalSSEProviderError{
+									message:            errMsg,
+									priorEventObserved: sawDataEvent,
+									outputObserved:     sawAssistantOutput,
+								}
+							}
+						}
+					}
 					result := processExternalSSELine(line, callback, toolAccums, &toolOrder, &inputTokens, &outputTokens)
 					if result.err != nil {
 						return result.err
 					}
+					sawDataEvent = sawDataEvent || result.recognized
+					sawAssistantOutput = sawAssistantOutput || result.recognizedOutput
 					terminal = terminal || result.terminal
 					if result.stopReason != "" {
 						stopReason = result.stopReason
@@ -725,12 +779,18 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 		// the next model instead of treating the empty stream as success.
 		if errMsg := extractExternalSSEError([]byte(data)); errMsg != "" {
 			emitToolCalls()
-			return fmt.Errorf("external provider error: %s", errMsg)
+			return &externalSSEProviderError{
+				message:            errMsg,
+				priorEventObserved: sawDataEvent,
+				outputObserved:     sawAssistantOutput,
+			}
 		}
 		result := processExternalSSEData(data, callback, toolAccums, &toolOrder, &inputTokens, &outputTokens)
 		if result.err != nil {
 			return result.err
 		}
+		sawDataEvent = sawDataEvent || result.recognized
+		sawAssistantOutput = sawAssistantOutput || result.recognizedOutput
 		terminal = terminal || result.terminal
 		if result.stopReason != "" {
 			stopReason = result.stopReason
@@ -738,6 +798,9 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 	}
 	if !terminal {
 		return fmt.Errorf("external SSE stream ended before a terminal finish_reason or [DONE]")
+	}
+	if !sawAssistantOutput {
+		return fmt.Errorf("external SSE stream ended without assistant output")
 	}
 
 	emitToolCalls()
@@ -794,14 +857,32 @@ func processExternalSSEData(data string, callback *KiroStreamCallback, toolAccum
 	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
 		return externalSSELineResult{err: fmt.Errorf("external SSE parse: %w", err)}
 	}
+	sawOutput := false
 	for _, ch := range chunk.Choices {
-		if ch.Delta.Content != "" && callback.OnText != nil {
-			callback.OnText(ch.Delta.Content, false)
+		if ch.Delta.Content != "" {
+			sawOutput = true
+			if callback.OnOutput != nil {
+				callback.OnOutput()
+			}
+			if callback.OnText != nil {
+				callback.OnText(ch.Delta.Content, false)
+			}
 		}
-		if ch.Delta.ReasoningContent != "" && callback.OnText != nil {
-			callback.OnText(ch.Delta.ReasoningContent, true)
+		if ch.Delta.ReasoningContent != "" {
+			sawOutput = true
+			if callback.OnOutput != nil {
+				callback.OnOutput()
+			}
+			if callback.OnText != nil {
+				callback.OnText(ch.Delta.ReasoningContent, true)
+			}
 		}
 		for _, tc := range ch.Delta.ToolCalls {
+			// A tool call is assistant output even when the text delta is empty.
+			sawOutput = true
+			if callback.OnOutput != nil {
+				callback.OnOutput()
+			}
 			acc, ok := toolAccums[tc.Index]
 			if !ok {
 				acc = &externalToolAccum{}
@@ -828,13 +909,17 @@ func processExternalSSEData(data string, callback *KiroStreamCallback, toolAccum
 	for _, ch := range chunk.Choices {
 		if ch.FinishReason != "" {
 			return externalSSELineResult{
-				recognized: true,
-				terminal:   true,
-				stopReason: normalizeUpstreamStopReason(ch.FinishReason),
+				recognized:       true,
+				recognizedOutput: sawOutput,
+				terminal:         true,
+				stopReason:       normalizeUpstreamStopReason(ch.FinishReason),
 			}
 		}
 	}
-	return externalSSELineResult{recognized: true}
+	return externalSSELineResult{
+		recognized:       true,
+		recognizedOutput: sawOutput,
+	}
 }
 
 // extractExternalSSEError checks whether a JSON SSE data payload is an
@@ -907,14 +992,31 @@ func parseExternalOpenAIJSON(body io.Reader, callback *KiroStreamCallback) error
 		return fmt.Errorf("external json parse: %w", err)
 	}
 
+	sawAssistantOutput := false
 	for _, ch := range resp.Choices {
-		if ch.Message.Content != "" && callback.OnText != nil {
-			callback.OnText(ch.Message.Content, false)
+		if ch.Message.Content != "" {
+			sawAssistantOutput = true
+			if callback.OnOutput != nil {
+				callback.OnOutput()
+			}
+			if callback.OnText != nil {
+				callback.OnText(ch.Message.Content, false)
+			}
 		}
-		if ch.Message.ReasoningContent != "" && callback.OnText != nil {
-			callback.OnText(ch.Message.ReasoningContent, true)
+		if ch.Message.ReasoningContent != "" {
+			sawAssistantOutput = true
+			if callback.OnOutput != nil {
+				callback.OnOutput()
+			}
+			if callback.OnText != nil {
+				callback.OnText(ch.Message.ReasoningContent, true)
+			}
 		}
 		for _, tc := range ch.Message.ToolCalls {
+			sawAssistantOutput = true
+			if callback.OnOutput != nil {
+				callback.OnOutput()
+			}
 			var input map[string]interface{}
 			if strings.TrimSpace(tc.Function.Arguments) != "" {
 				if err := json.Unmarshal([]byte(tc.Function.Arguments), &input); err != nil {
@@ -948,6 +1050,9 @@ func parseExternalOpenAIJSON(body io.Reader, callback *KiroStreamCallback) error
 			callback.OnCacheRead != nil {
 			callback.OnCacheRead(resp.Usage.PromptTokensDetails.CachedTokens)
 		}
+	}
+	if !sawAssistantOutput {
+		return fmt.Errorf("external JSON response ended without assistant output")
 	}
 	stopReason := "end_turn"
 	for _, ch := range resp.Choices {

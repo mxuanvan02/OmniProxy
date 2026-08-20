@@ -242,12 +242,78 @@ func TestResetApiKeyUsage(t *testing.T) {
 	}
 }
 
+func TestApiKeyErrorStatePersistsAndClears(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	created, err := AddApiKey(ApiKeyEntry{Name: "health", Key: "sk-health", Enabled: true})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	message := "upstream failed\nAuthorization: Bearer secret\tstatus=502"
+	if err := RecordApiKeyError(created.ID, message); err != nil {
+		t.Fatalf("record error: %v", err)
+	}
+	got := GetApiKeyEntry(created.ID)
+	if got == nil || got.LastErrorAt == 0 || got.ErrorCount != 1 {
+		t.Fatalf("expected persisted error metadata, got %+v", got)
+	}
+	if got.LastError != "upstream failed Authorization: Bearer secret status=502" {
+		t.Fatalf("unexpected sanitized error: %q", got.LastError)
+	}
+
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	got = GetApiKeyEntry(created.ID)
+	if got == nil || got.LastError != "upstream failed Authorization: Bearer secret status=502" {
+		t.Fatalf("expected error metadata to survive reload, got %+v", got)
+	}
+
+	if err := RecordApiKeyUsage(created.ID, 1, 0); err != nil {
+		t.Fatalf("record usage: %v", err)
+	}
+	got = GetApiKeyEntry(created.ID)
+	if got == nil || got.LastError != "" || got.LastErrorAt != 0 || got.ErrorCount != 1 {
+		t.Fatalf("expected successful usage to clear only last error, got %+v", got)
+	}
+
+	if err := RecordApiKeyError("unknown", "must not persist"); err == nil {
+		t.Fatalf("expected unknown key error to fail")
+	}
+}
+
+func TestApiKeyHealth(t *testing.T) {
+	tests := []struct {
+		name   string
+		entry  ApiKeyEntry
+		status string
+		issue  string
+	}{
+		{"active", ApiKeyEntry{Enabled: true}, "active", ""},
+		{"disabled", ApiKeyEntry{Enabled: false}, "disabled", "API key disabled"},
+		{"token limit", ApiKeyEntry{Enabled: true, TokenLimit: 10, TokensUsed: 10}, "over_limit", "token limit exceeded"},
+		{"credit limit", ApiKeyEntry{Enabled: true, CreditLimit: 1, CreditsUsed: 1}, "over_limit", "credit limit exceeded"},
+		{"last error", ApiKeyEntry{Enabled: true, LastError: "upstream failed"}, "error", "upstream failed"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			status, issue := ApiKeyHealth(tc.entry)
+			if status != tc.status || issue != tc.issue {
+				t.Fatalf("ApiKeyHealth(%+v) = (%q, %q), want (%q, %q)", tc.entry, status, issue, tc.status, tc.issue)
+			}
+		})
+	}
+}
+
 func TestApiKeyOverLimit(t *testing.T) {
 	tests := []struct {
-		name        string
-		entry       ApiKeyEntry
-		wantToken   bool
-		wantCredit  bool
+		name       string
+		entry      ApiKeyEntry
+		wantToken  bool
+		wantCredit bool
 	}{
 		{"unlimited", ApiKeyEntry{TokensUsed: 100, CreditsUsed: 5}, false, false},
 		{"under token limit", ApiKeyEntry{TokenLimit: 200, TokensUsed: 100}, false, false},

@@ -46,32 +46,172 @@ const codexAuthMethod = "codex"
 // distinct from BANNED, which represents an upstream account suspension.
 const codexReauthRequiredStatus = "REAUTH_REQUIRED"
 
-func isCodexReauthRequiredError(err error) bool {
-	if err == nil {
-		return false
-	}
-	lower := strings.ToLower(err.Error())
-	return hasStatusToken(lower, "401") ||
-		strings.Contains(lower, "invalid_grant") ||
-		strings.Contains(lower, "bad credentials") ||
-		strings.Contains(lower, "invalid token") ||
-		strings.Contains(lower, "token revoked") ||
-		strings.Contains(lower, "token invalidated")
+// codexAuthFailureKind classifies why OpenAI rejected a Codex account.
+//
+// The distinction matters operationally: a re-login fixes a dead session, but
+// nothing the operator does locally fixes an upstream account termination.
+// Collapsing both into REAUTH_REQUIRED hides bans behind a "Log in again"
+// button that can never succeed.
+type codexAuthFailureKind int
+
+const (
+	// codexAuthFailureNone means the error is not an account-credential
+	// problem (rate limit, 5xx, network, model routing, ...).
+	codexAuthFailureNone codexAuthFailureKind = iota
+	// codexAuthFailureReauth means the session/token is dead but the account
+	// itself is intact — an interactive login restores it.
+	codexAuthFailureReauth
+	// codexAuthFailureBanned means OpenAI terminated, deactivated or
+	// suspended the account. Re-login cannot recover it.
+	codexAuthFailureBanned
+)
+
+// codexBanPhrases are the upstream vocabulary that indicates the ChatGPT
+// account itself was terminated/deactivated/suspended, as opposed to a merely
+// expired or revoked session token.
+//
+// Matching is phrase-based, never status-code-based: a bare 401/403 can also
+// come from a stale token, a regional block or an edge proxy, none of which
+// prove a ban.
+var codexBanPhrases = []string{
+	"account_deactivated",
+	"account deactivated",
+	"account was deactivated",
+	"account has been deactivated",
+	"account_suspended",
+	"account suspended",
+	"account has been suspended",
+	"temporarily_suspended",
+	"access_terminated",
+	"access was terminated",
+	"access has been terminated",
+	"account_terminated",
+	"account terminated",
+	"account_disabled",
+	"account disabled",
+	"disabled your account",
+	"banned",
+	"unusual activity",
+	"suspicious activity",
+	"violat", // covers "violation" / "violating our policies" / "violates"
+	"terms of use",
+	"usage policies",
 }
 
-func markCodexReauthRequired(account *config.Account, err error) {
-	if !isCodexAccount(account) || !isCodexReauthRequiredError(err) {
+// codexReauthPhrases are upstream signals that the credential is dead while
+// the account remains usable after an interactive login.
+var codexReauthPhrases = []string{
+	"invalid_grant",
+	"bad credentials",
+	"invalid token",
+	"token revoked",
+	"token_revoked",
+	"token invalidated",
+	"token_invalidated",
+	"refresh_token_invalidated",
+	"session has ended",
+	"please log in again",
+	"please try signing in again",
+}
+
+func containsAnyPhrase(s string, phrases []string) bool {
+	for _, phrase := range phrases {
+		if strings.Contains(s, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+// classifyCodexAuthFailure decides whether an upstream error means the Codex
+// account is banned, merely needs a fresh login, or is unrelated to auth.
+//
+// Ban detection runs BEFORE re-login detection on purpose: OpenAI returns a
+// 401/403 for terminated accounts too, so a status-code-first ordering would
+// misfile every ban as a session expiry — which is exactly the bug this
+// function exists to prevent.
+func classifyCodexAuthFailure(err error) codexAuthFailureKind {
+	if err == nil {
+		return codexAuthFailureNone
+	}
+	lower := strings.ToLower(err.Error())
+
+	// Quota/rate limits are health signals, not credential failures.
+	if isQuotaErrorMessage(lower) && !containsAnyPhrase(lower, codexBanPhrases) {
+		return codexAuthFailureNone
+	}
+
+	if containsAnyPhrase(lower, codexBanPhrases) {
+		return codexAuthFailureBanned
+	}
+
+	if containsAnyPhrase(lower, codexReauthPhrases) {
+		return codexAuthFailureReauth
+	}
+
+	// A standalone 401 with no recognised vocabulary is treated as a dead
+	// session: it is the recoverable interpretation, and Test/refresh will
+	// re-classify it if the upstream later reports a ban.
+	if hasStatusToken(lower, "401") {
+		return codexAuthFailureReauth
+	}
+
+	return codexAuthFailureNone
+}
+
+// isCodexReauthRequiredError reports whether the error means the account needs
+// a fresh interactive login (and specifically NOT that it was banned).
+func isCodexReauthRequiredError(err error) bool {
+	return classifyCodexAuthFailure(err) == codexAuthFailureReauth
+}
+
+// isCodexBannedError reports whether the error proves OpenAI terminated,
+// deactivated or suspended the account.
+func isCodexBannedError(err error) bool {
+	return classifyCodexAuthFailure(err) == codexAuthFailureBanned
+}
+
+// markCodexAuthFailure persists the correct terminal state for a Codex
+// credential failure: BANNED when the upstream says the account is gone,
+// REAUTH_REQUIRED when only the session died, and nothing at all otherwise.
+func markCodexAuthFailure(account *config.Account, err error) {
+	if !isCodexAccount(account) {
 		return
 	}
-	account.BanStatus = codexReauthRequiredStatus
+	kind := classifyCodexAuthFailure(err)
+	var status string
+	switch kind {
+	case codexAuthFailureBanned:
+		status = "BANNED"
+	case codexAuthFailureReauth:
+		status = codexReauthRequiredStatus
+	default:
+		return
+	}
+
+	// Never downgrade a known ban into a re-login prompt. Once OpenAI has
+	// reported a termination, a later bare 401 must not hide it.
+	if status == codexReauthRequiredStatus && account.BanStatus == "BANNED" {
+		logger.Warnf("[Codex] Keeping %s BANNED; ignoring re-login signal: %v", account.Email, err)
+		return
+	}
+
+	account.BanStatus = status
 	account.BanReason = truncateErrBody([]byte(err.Error()))
 	account.BanTime = time.Now().Unix()
 	account.Enabled = false
 	if persistErr := config.UpdateAccountPreservingCredentials(account.ID, *account); persistErr != nil {
-		logger.Errorf("[Codex] Failed to persist re-login requirement for %s: %v", account.Email, persistErr)
+		logger.Errorf("[Codex] Failed to persist %s status for %s: %v", status, account.Email, persistErr)
 		return
 	}
-	logger.Warnf("[Codex] Marked %s as %s: %v", account.Email, codexReauthRequiredStatus, err)
+	logger.Warnf("[Codex] Marked %s as %s: %v", account.Email, status, err)
+}
+
+// markCodexReauthRequired is retained for call sites that only ever expect a
+// session failure. It delegates to markCodexAuthFailure so ban vocabulary is
+// still classified correctly instead of being flattened into REAUTH_REQUIRED.
+func markCodexReauthRequired(account *config.Account, err error) {
+	markCodexAuthFailure(account, err)
 }
 
 // codexDefaultBaseURL is the upstream endpoint Codex CLI uses for

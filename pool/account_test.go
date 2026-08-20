@@ -84,6 +84,19 @@ func TestGetNextKeepsFiveMinuteTokenAvailable(t *testing.T) {
 	}
 }
 
+func TestGetNextForCapabilityUsesProviderKindWhenCapabilitiesAreMissing(t *testing.T) {
+	p := &AccountPool{
+		serviceAccounts: []config.Account{{
+			ID: "search-legacy", Provider: "tavily", ProviderKind: "search",
+		}},
+	}
+
+	got := p.GetNextForCapability("search", "tavily", nil)
+	if got == nil || got.ID != "search-legacy" {
+		t.Fatalf("search account = %#v, want search-legacy", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // IsAuthFailure
 // ---------------------------------------------------------------------------
@@ -200,6 +213,8 @@ func TestIsTransientErrorIgnoresNonTransient(t *testing.T) {
 		"invalid_grant",
 		"some unrelated error",
 		"model_not_found",
+		"HTTP 503 model gpt-5.6-sol is not available on any configured provider right now",
+		"model claude-opus-5 unavailable on this provider",
 	}
 	for _, msg := range negatives {
 		if IsTransientError(errors.New(msg)) {
@@ -211,6 +226,30 @@ func TestIsTransientErrorIgnoresNonTransient(t *testing.T) {
 func TestIsTransientErrorNilError(t *testing.T) {
 	if IsTransientError(nil) {
 		t.Fatal("IsTransientError(nil) = true, want false")
+	}
+}
+
+func TestIsProviderModelUnavailableError(t *testing.T) {
+	positives := []string{
+		`HTTP 503 from kiro.pix4k.com: {"error":{"code":"upstream_error","message":"model gpt-5.6-sol is not available on any configured provider right now"}}`,
+		"model claude-opus-5 unavailable on this provider",
+		"no available provider for model gpt-5.6-luna",
+	}
+	for _, msg := range positives {
+		if !IsProviderModelUnavailableError(errors.New(msg)) {
+			t.Errorf("IsProviderModelUnavailableError(%q) = false, want true", msg)
+		}
+	}
+
+	negatives := []string{
+		"HTTP 503 system cpu overloaded",
+		"HTTP 503 service unavailable",
+		"HTTP 400 invalid request",
+	}
+	for _, msg := range negatives {
+		if IsProviderModelUnavailableError(errors.New(msg)) {
+			t.Errorf("IsProviderModelUnavailableError(%q) = true, want false", msg)
+		}
 	}
 }
 
@@ -359,6 +398,32 @@ func TestExternalCatalogMatchesClaudeAliasToSnapshot(t *testing.T) {
 	got := p.GetNextForModelExcluding("claude-opus-5[1m]", nil)
 	if got == nil || got.ID != "external" {
 		t.Fatalf("expected Claude alias to match dated snapshot, got %#v", got)
+	}
+}
+
+func TestClaudeRoutingPrefersKnownExternalCatalogOverUnknown(t *testing.T) {
+	p := newTestPool(
+		config.Account{ID: "unknown", AuthMethod: "external_openai"},
+		config.Account{ID: "known", AuthMethod: "external_openai"},
+	)
+	p.SetModelList("known", []string{"claude-opus-5"})
+
+	got := p.GetNextForModelExcluding("claude-opus-5", nil)
+	if got == nil || got.ID != "known" {
+		t.Fatalf("expected known Claude catalog account, got %#v", got)
+	}
+}
+
+// An unavailable or empty external /v1/models response must not become an
+// authoritative empty catalog. Otherwise the account is filtered before the
+// upstream request, even though it may still serve the requested model.
+func TestExternalEmptyCatalogRemainsEligibleForModelRouting(t *testing.T) {
+	p := newTestPool(config.Account{ID: "external", AuthMethod: "external_openai"})
+	p.SetModelList("external", nil)
+
+	got := p.GetNextForModelExcluding("gpt-5.6-sol", nil)
+	if got == nil || got.ID != "external" {
+		t.Fatalf("expected external account with unknown catalog to remain eligible, got %#v", got)
 	}
 }
 

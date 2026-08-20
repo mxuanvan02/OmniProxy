@@ -27,7 +27,7 @@ func modelIDsFromList(t *testing.T, body []byte) []string {
 	return ids
 }
 
-func TestHandleModelsAdvertisesExtraModels(t *testing.T) {
+func TestHandleModelsExposesOnlyCanonicalClaude5Models(t *testing.T) {
 	mustInitConfig(t)
 	if err := config.SetExtraModels([]string{"claude-sonnet-5", "claude-opus-4.8", "claude-fable-5"}); err != nil {
 		t.Fatalf("SetExtraModels: %v", err)
@@ -35,11 +35,9 @@ func TestHandleModelsAdvertisesExtraModels(t *testing.T) {
 	defer config.SetExtraModels(nil)
 
 	h := &Handler{}
-	// Force the cached upstream model list to be empty so the response is
-	// deterministic and only contains the fallback anthropic models, the
-	// hardcoded aliases, and the extra models we just declared.
+	// Public discovery must not depend on the upstream cache or ExtraModels.
 	h.modelsCacheMu.Lock()
-	h.cachedModels = nil
+	h.cachedModels = []ModelInfo{{ModelId: "gpt-5.6-luna"}, {ModelId: "claude-opus-4.8-thinking-thinking"}}
 	h.modelsCacheMu.Unlock()
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
@@ -51,21 +49,13 @@ func TestHandleModelsAdvertisesExtraModels(t *testing.T) {
 	}
 
 	ids := modelIDsFromList(t, rec.Body.Bytes())
-	want := map[string]bool{
-		"claude-sonnet-5":          true,
-		"claude-opus-4.8":          true,
-		"claude-sonnet-5-thinking": true,
-		"claude-opus-4.8-thinking": true,
-		"claude-fable-5":           true,
-		"claude-fable-5-thinking":  true,
+	want := []string{"claude-sonnet-5", "claude-opus-5"}
+	if len(ids) != len(want) {
+		t.Fatalf("expected exactly %d public models, got %v", len(want), ids)
 	}
-	got := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		got[id] = true
-	}
-	for id := range want {
-		if !got[id] {
-			t.Fatalf("expected %q in /v1/models, got %v", id, ids)
+	for i, id := range want {
+		if ids[i] != id {
+			t.Fatalf("model %d = %q, want %q; full list=%v", i, ids[i], id, ids)
 		}
 	}
 }
@@ -87,9 +77,12 @@ func TestHandleModelsWithoutExtraModelsOmitsThem(t *testing.T) {
 
 	ids := modelIDsFromList(t, rec.Body.Bytes())
 	for _, id := range ids {
-		if id == "claude-sonnet-5" || id == "claude-opus-4.8" {
+		if id == "claude-opus-4.8" || id == "claude-opus-4.8-thinking" || id == "claude-fable-5" || id == "claude-fable-5-thinking" {
 			t.Fatalf("unexpected extra model %q when ExtraModels is empty: %v", id, ids)
 		}
+	}
+	if len(ids) != 2 {
+		t.Fatalf("expected canonical Claude catalog, got %v", ids)
 	}
 }
 
@@ -127,16 +120,16 @@ func TestHandleModelsPreservesKiroProviderMetadata(t *testing.T) {
 	for _, model := range response.Data {
 		ownedBy[model.ID] = model.OwnedBy
 	}
-	for _, id := range []string{"claude-sonnet-5", "claude-sonnet-5-thinking"} {
-		if got := ownedBy[id]; got != "kiro-proxy" {
-			t.Fatalf("model %q owned_by = %q, want %q", id, got, "kiro-proxy")
+	for _, id := range []string{"claude-sonnet-5", "claude-opus-5"} {
+		if got := ownedBy[id]; got != "anthropic" {
+			t.Fatalf("model %q owned_by = %q, want %q", id, got, "anthropic")
 		}
 	}
 }
 
-func TestClaudeModelDiscoveryExposesPolicyTokenLimits(t *testing.T) {
+func TestClaudeModelDiscoveryOmitsHaiku(t *testing.T) {
 	mustInitConfig(t)
-	if err := config.SetExtraModels([]string{"claude-fable-5"}); err != nil {
+	if err := config.SetExtraModels([]string{"claude-haiku-5"}); err != nil {
 		t.Fatalf("SetExtraModels: %v", err)
 	}
 	defer config.SetExtraModels(nil)
@@ -166,43 +159,21 @@ func TestClaudeModelDiscoveryExposesPolicyTokenLimits(t *testing.T) {
 		t.Fatalf("decode /v1/models response: %v", err)
 	}
 
-	for _, wantID := range []string{"claude-fable-5", "claude-fable-5-thinking"} {
-		found := false
-		for _, model := range list.Data {
-			if model.ID != wantID {
-				continue
-			}
-			found = true
-			if model.TokenLimits.MaxInputTokens != 1_000_000 || model.TokenLimits.MaxOutputTokens != 128_000 {
-				t.Fatalf("model %q token limits = %#v, want 1000000/128000", wantID, model.TokenLimits)
-			}
-		}
-		if !found {
-			t.Fatalf("model %q missing from /v1/models", wantID)
+	for _, model := range list.Data {
+		if model.ID == "claude-haiku-5" {
+			t.Fatalf("Haiku leaked into /v1/models: %#v", model)
 		}
 	}
 
-	byIDReq := httptest.NewRequest(http.MethodGet, "/v1/models/claude-fable-5", nil)
+	byIDReq := httptest.NewRequest(http.MethodGet, "/v1/models/claude-haiku-5", nil)
 	byIDRec := httptest.NewRecorder()
-	h.handleModelByID(byIDRec, byIDReq, "claude-fable-5")
-	if byIDRec.Code != http.StatusOK {
-		t.Fatalf("/v1/models/claude-fable-5 status = %d: %s", byIDRec.Code, byIDRec.Body.String())
-	}
-	var byID struct {
-		TokenLimits struct {
-			MaxInputTokens  int `json:"maxInputTokens"`
-			MaxOutputTokens int `json:"maxOutputTokens"`
-		} `json:"token_limits"`
-	}
-	if err := json.Unmarshal(byIDRec.Body.Bytes(), &byID); err != nil {
-		t.Fatalf("decode /v1/models/claude-fable-5 response: %v", err)
-	}
-	if byID.TokenLimits.MaxInputTokens != 1_000_000 || byID.TokenLimits.MaxOutputTokens != 128_000 {
-		t.Fatalf("/v1/models/claude-fable-5 token limits = %#v, want 1000000/128000", byID.TokenLimits)
+	h.handleModelByID(byIDRec, byIDReq, "claude-haiku-5")
+	if byIDRec.Code != http.StatusNotFound {
+		t.Fatalf("/v1/models/claude-haiku-5 status = %d, want 404: %s", byIDRec.Code, byIDRec.Body.String())
 	}
 }
 
-func TestClaudeModelPolicyOverridesStaleDiscoveryMetadata(t *testing.T) {
+func TestClaudeModelDiscoveryIgnoresStaleHaikuMetadata(t *testing.T) {
 	mustInitConfig(t)
 
 	staleLimits := &struct {
@@ -210,7 +181,7 @@ func TestClaudeModelPolicyOverridesStaleDiscoveryMetadata(t *testing.T) {
 		MaxOutputTokens int `json:"maxOutputTokens"`
 	}{MaxInputTokens: 200_000, MaxOutputTokens: 100}
 	h := &Handler{cachedModels: []ModelInfo{{
-		ModelId:     "claude-fable-5",
+		ModelId:     "claude-haiku-5",
 		Provider:    "anthropic",
 		TokenLimits: staleLimits,
 	}}}
@@ -236,16 +207,13 @@ func TestClaudeModelPolicyOverridesStaleDiscoveryMetadata(t *testing.T) {
 	}
 
 	for _, model := range list.Data {
-		if model.ID != "claude-fable-5" && model.ID != "claude-fable-5-thinking" {
-			continue
-		}
-		if model.TokenLimits.MaxInputTokens != 1_000_000 || model.TokenLimits.MaxOutputTokens != 128_000 {
-			t.Fatalf("model %q exposed stale token limits: %#v", model.ID, model.TokenLimits)
+		if model.ID == "claude-haiku-5" {
+			t.Fatalf("stale Haiku metadata leaked into public catalog: %#v", model)
 		}
 	}
 }
 
-func TestCodexModelCatalogOverridesStaleDiscoveryMetadata(t *testing.T) {
+func TestPublicClaudeCatalogOmitsCodexModels(t *testing.T) {
 	mustInitConfig(t)
 	h := &Handler{cachedModels: []ModelInfo{{
 		ModelId:    "gpt-5.6-luna",
@@ -278,41 +246,72 @@ func TestCodexModelCatalogOverridesStaleDiscoveryMetadata(t *testing.T) {
 		t.Fatalf("decode /v1/models response: %v", err)
 	}
 
-	count := 0
 	for _, model := range list.Data {
 		if model.ID != "gpt-5.6-luna" {
 			continue
 		}
-		count++
-		if model.OwnedBy != "openai-codex" ||
-			model.TokenLimits.MaxInputTokens != 272_000 ||
-			model.TokenLimits.MaxOutputTokens != 128_000 {
-			t.Fatalf("GPT-5.6 Luna metadata = %#v, want canonical Codex 272000/128000", model)
-		}
-	}
-	if count != 1 {
-		t.Fatalf("/v1/models exposed %d Luna entries, want one", count)
+		t.Fatalf("Codex model leaked into public Claude catalog: %#v", model)
 	}
 
 	byIDReq := httptest.NewRequest(http.MethodGet, "/v1/models/gpt-5.6-luna", nil)
 	byIDRec := httptest.NewRecorder()
 	h.handleModelByID(byIDRec, byIDReq, "gpt-5.6-luna")
-	if byIDRec.Code != http.StatusOK {
-		t.Fatalf("/v1/models/gpt-5.6-luna status = %d: %s", byIDRec.Code, byIDRec.Body.String())
+	if byIDRec.Code != http.StatusNotFound {
+		t.Fatalf("/v1/models/gpt-5.6-luna status = %d, want 404: %s", byIDRec.Code, byIDRec.Body.String())
 	}
-	var byID struct {
-		OwnedBy     string `json:"owned_by"`
-		TokenLimits struct {
-			MaxInputTokens  int `json:"maxInputTokens"`
-			MaxOutputTokens int `json:"maxOutputTokens"`
-		} `json:"token_limits"`
+}
+
+// TestHandleModelsCatalogAllExposesDiscoveredFamilies pins the opt-in contract:
+// the default response stays the conservative canonical catalog, while
+// ?catalog=all publishes account-discovered model IDs verbatim (no renaming,
+// no alias invention) so pickers can group them by family.
+func TestHandleModelsCatalogAllExposesDiscoveredFamilies(t *testing.T) {
+	mustInitConfig(t)
+
+	h := &Handler{cachedModels: []ModelInfo{
+		{ModelId: "qwen3.8-max", Provider: "qwen", InputTypes: []string{"text"}},
+		{ModelId: "glm-5.3", Provider: "zhipu", InputTypes: []string{"text"}},
+		{ModelId: "deepseek-v4-pro", Provider: "deepseek", InputTypes: []string{"text"}},
+		{ModelId: "gemini-3.1-pro-preview", Provider: "google", InputTypes: []string{"text", "image"}},
+		// Duplicate of a canonical entry: must not appear twice.
+		{ModelId: "claude-sonnet-5", Provider: "kiro-proxy", InputTypes: []string{"text"}},
+	}}
+
+	defaultRec := httptest.NewRecorder()
+	h.handleModels(defaultRec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+	if defaultRec.Code != http.StatusOK {
+		t.Fatalf("/v1/models status = %d: %s", defaultRec.Code, defaultRec.Body.String())
 	}
-	if err := json.Unmarshal(byIDRec.Body.Bytes(), &byID); err != nil {
-		t.Fatalf("decode /v1/models/gpt-5.6-luna response: %v", err)
+	for _, id := range modelIDsFromList(t, defaultRec.Body.Bytes()) {
+		if id == "qwen3.8-max" || id == "glm-5.3" || id == "deepseek-v4-pro" || id == "gemini-3.1-pro-preview" {
+			t.Fatalf("discovered model %q leaked into the default catalog", id)
+		}
 	}
-	if byID.OwnedBy != "openai-codex" ||
-		byID.TokenLimits.MaxInputTokens != 272_000 ||
-		byID.TokenLimits.MaxOutputTokens != 128_000 {
-		t.Fatalf("/v1/models/gpt-5.6-luna metadata = %#v, want canonical Codex 272000/128000", byID)
+
+	allRec := httptest.NewRecorder()
+	h.handleModels(allRec, httptest.NewRequest(http.MethodGet, "/v1/models?catalog=all", nil))
+	if allRec.Code != http.StatusOK {
+		t.Fatalf("/v1/models?catalog=all status = %d: %s", allRec.Code, allRec.Body.String())
+	}
+
+	ids := modelIDsFromList(t, allRec.Body.Bytes())
+	counts := make(map[string]int, len(ids))
+	for _, id := range ids {
+		counts[id]++
+	}
+	for _, id := range []string{
+		"claude-sonnet-5",
+		"claude-opus-5",
+		"qwen3.8-max",
+		"glm-5.3",
+		"deepseek-v4-pro",
+		"gemini-3.1-pro-preview",
+	} {
+		if counts[id] == 0 {
+			t.Fatalf("model %q missing from ?catalog=all response: %v", id, ids)
+		}
+		if counts[id] > 1 {
+			t.Fatalf("model %q duplicated %d times in ?catalog=all response", id, counts[id])
+		}
 	}
 }

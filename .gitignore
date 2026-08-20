@@ -17,6 +17,9 @@ superkiro.bak-*
 superkiro_backup_*
 omniproxy.bak-*
 omniproxy_backup_*
+omniproxy.*
+_backups/
+*.log
 *.bak-*.json
 *.new
 superkiro-linux-*

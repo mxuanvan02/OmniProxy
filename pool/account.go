@@ -178,6 +178,12 @@ func accountSupportsCapability(account config.Account, capability string) bool {
 	if capability == "" {
 		return true
 	}
+	// ProviderKind was persisted by earlier service-account imports before
+	// explicit Capabilities became mandatory. Treat it as a capability fallback
+	// so those accounts remain routable after reload.
+	if strings.EqualFold(strings.TrimSpace(account.ProviderKind), capability) {
+		return true
+	}
 	if len(account.Capabilities) > 0 {
 		for _, value := range account.Capabilities {
 			if strings.EqualFold(strings.TrimSpace(value), capability) {
@@ -332,8 +338,15 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 	return best
 }
 
-// SetModelList caches the model set for an account (called by handler after refresh)
+// SetModelList caches the model set for an account (called by handler after refresh).
+// An empty response means the catalog is unavailable/unknown, not that the
+// account supports no models. Preserve any previously known catalog and leave
+// a previously uncached account optimistic so a transient /v1/models failure
+// cannot filter it out before the inference request reaches the provider.
 func (p *AccountPool) SetModelList(accountID string, modelIDs []string) {
+	if len(modelIDs) == 0 {
+		return
+	}
 	set := make(map[string]bool, len(modelIDs))
 	for _, id := range modelIDs {
 		set[strings.ToLower(strings.TrimSpace(id))] = true
@@ -379,6 +392,14 @@ func (p *AccountPool) accountHasModel(accountID, model string) bool {
 		}
 	}
 	return false
+}
+
+// hasKnownModelCatalog reports whether model discovery produced a non-empty
+// catalog for an account. An absent catalog is deliberately distinct from a
+// known catalog that does not contain the requested model.
+func (p *AccountPool) hasKnownModelCatalog(accountID string) bool {
+	list, ok := p.modelLists[accountID]
+	return ok && len(list) > 0
 }
 
 func normalizeCatalogModelID(model string) string {
@@ -448,6 +469,8 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 	// early-return behaviour for zero overhead.
 	useStrategy := p.strategyShouldApply()
 	var preferredCandidates []config.Account
+	var preferredKnown []config.Account
+	var preferredUnknown []config.Account
 	var allCandidates []config.Account
 
 	// Provider-aware routing: when the requested model is a Claude model
@@ -509,15 +532,27 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 			if picked := tryPass(acc); picked != nil {
 				if useStrategy {
 					preferredCandidates = append(preferredCandidates, *picked)
-					continue
+				} else if preferExternal && !p.hasKnownModelCatalog(picked.ID) {
+					// A missing catalog is an unknown capability state. Keep it as
+					// cold-start fallback, but never let it outrank an external
+					// account whose catalog explicitly contains the requested model.
+					preferredUnknown = append(preferredUnknown, *picked)
+				} else {
+					preferredKnown = append(preferredKnown, *picked)
 				}
-				return picked
+				continue
 			}
 		}
 		// Strategy mode: if we collected preferred candidates, pick the best
 		// one by score and return it without falling through to Phase 2.
 		if useStrategy && len(preferredCandidates) > 0 {
 			return pickByStrategy(preferredCandidates, now)
+		}
+		if !useStrategy && len(preferredKnown) > 0 {
+			return &preferredKnown[0]
+		}
+		if !useStrategy && len(preferredUnknown) > 0 {
+			return &preferredUnknown[0]
 		}
 	}
 
@@ -993,6 +1028,26 @@ func IsQuotaExhaustionError(err error) bool {
 	return false
 }
 
+// IsProviderModelUnavailableError reports a provider-local model capability
+// failure. The provider may be healthy, but it cannot serve the requested model;
+// retrying the same account is wasteful and the caller should rotate to another
+// eligible account/provider immediately.
+func IsProviderModelUnavailableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	modelMarker := strings.Contains(lower, "model")
+	if !modelMarker {
+		return false
+	}
+	return (strings.Contains(lower, "not available") &&
+		(strings.Contains(lower, "provider") || strings.Contains(lower, "configured"))) ||
+		strings.Contains(lower, "model unavailable") ||
+		strings.Contains(lower, "unavailable on this provider") ||
+		(strings.Contains(lower, "no available provider") && strings.Contains(lower, "model"))
+}
+
 // IsTransientError reports whether the error is a transient upstream condition
 // (provider overload, 5xx, timeout) that may succeed on a same-account retry
 // after a short backoff. Unlike auth failures, the account stays enabled.
@@ -1014,6 +1069,13 @@ func IsTransientError(err error) bool {
 	}
 	msg := err.Error()
 	lower := strings.ToLower(msg)
+
+	// A provider-local model capability failure is not transient for this
+	// account. Retrying the same provider wastes the retry budget; callers must
+	// rotate to another eligible account/provider instead.
+	if IsProviderModelUnavailableError(err) {
+		return false
+	}
 
 	// A stream that never starts is already bounded by the transport/read
 	// deadline. Repeating it on the same account only multiplies latency; rotate
@@ -1058,6 +1120,20 @@ func IsTransientError(err error) bool {
 	}
 
 	return false
+}
+
+// IsContentBlockedError reports whether err indicates the upstream refused
+// the request payload or model (e.g. AgentRouter HTTP 400 "content-blocked").
+// This is a payload-level refusal, not an account fault. Callers must NOT
+// rotate accounts — the same payload will fail identically on every account.
+func IsContentBlockedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "content-blocked") ||
+		strings.Contains(lower, "content_blocker") ||
+		strings.Contains(lower, "content blocked")
 }
 
 // DisableAccount marks an account as disabled (auth revoked / unrecoverable),

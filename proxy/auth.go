@@ -2,8 +2,8 @@ package proxy
 
 import (
 	"context"
-	"omniproxy/config"
 	"net/http"
+	"omniproxy/config"
 	"strings"
 )
 
@@ -68,12 +68,15 @@ func (h *Handler) authenticate(r *http.Request) (*config.ApiKeyEntry, error) {
 			return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "Invalid or missing API key")
 		}
 		if !entry.Enabled {
+			_ = config.RecordApiKeyError(entry.ID, "API key disabled")
 			return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "API key disabled")
 		}
 		if overToken, overCredit := config.ApiKeyOverLimit(*entry); overToken || overCredit {
 			if overToken {
+				_ = config.RecordApiKeyError(entry.ID, "token limit exceeded")
 				return nil, newAuthError(http.StatusTooManyRequests, "rate_limit_error", "token limit exceeded")
 			}
+			_ = config.RecordApiKeyError(entry.ID, "credit limit exceeded")
 			return nil, newAuthError(http.StatusTooManyRequests, "rate_limit_error", "credit limit exceeded")
 		}
 		return entry, nil

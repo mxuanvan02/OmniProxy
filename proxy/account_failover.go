@@ -57,24 +57,39 @@ func isAuthErrorMessage(msg string) bool {
 		strings.Contains(msg, "refresh token expired")
 }
 
-// isNetworkError reports whether an error string indicates a transport-level
-// network failure (connection refused, DNS failure, timeout, reset, etc.).
-// These affect all accounts equally and should not trigger model-lock cooldowns
-// that exhaust the pool — a brief per-account rotation is sufficient.
-func isNetworkError(msg string) bool {
+// isEndpointGlobalError reports whether an error affects ALL accounts sharing
+// the same upstream endpoint. These errors should skip retry on the same account
+// and rotate to a different provider/endpoint immediately.
+// Examples: DNS failure, connection refused (endpoint is down).
+func isEndpointGlobalError(msg string) bool {
 	lower := strings.ToLower(msg)
-	return strings.Contains(lower, "connection refused") ||
-		strings.Contains(lower, "no such host") ||
-		strings.Contains(lower, "i/o timeout") ||
-		strings.Contains(lower, "connection reset") ||
+	return strings.Contains(lower, "no such host") ||
+		strings.Contains(lower, "connection refused") ||
+		strings.Contains(lower, "dial tcp") && strings.Contains(lower, "no such host") ||
+		strings.Contains(lower, "dial udp")
+}
+
+// isTransientNetworkError reports whether an error is a per-request transport
+// blip that may succeed on retry with the SAME account (same endpoint still alive).
+// Examples: connection reset, broken pipe, EOF, timeout.
+func isTransientNetworkError(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "connection reset") ||
 		strings.Contains(lower, "broken pipe") ||
 		strings.Contains(lower, "eof") ||
-		strings.Contains(lower, "dial tcp") ||
-		strings.Contains(lower, "dial udp") ||
+		strings.Contains(lower, "i/o timeout") ||
 		strings.Contains(lower, "timeout exceeded") || // Go http.Client.Timeout
 		strings.Contains(lower, "client.timeout") || // Go http.Client error prefix
 		strings.Contains(lower, "context deadline exceeded") || // Request context timeout
-		strings.Contains(lower, "stream idle timeout") // idleTimeoutReader — upstream silent after 200
+		strings.Contains(lower, "stream idle timeout") // idleTimeoutReader
+}
+
+// isNetworkError reports whether an error string indicates any transport-level
+// network failure. Union of endpoint-global and per-request transient errors.
+// Used in handleAccountFailure to skip cooldowns — both types affect accounts
+// equally at the pool level and should not trigger model-lock cooldowns.
+func isNetworkError(msg string) bool {
+	return isEndpointGlobalError(msg) || isTransientNetworkError(msg)
 }
 
 // hasStatusToken returns true when status appears in s with non-digit boundaries
@@ -181,6 +196,15 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error, model
 		// re-registration + social fallback internally. If all paths fail, brief
 		// cooldown prevents tight loops while next cycle retries.
 		h.pool.RecordError(account.ID, false, model)
+	case isContentBlockedErrorMessage(errMsg):
+		// "content-blocked" is a payload/model-level refusal from upstream
+		// (typically AgentRouter). The account itself is healthy; rotating
+		// accounts with the same payload will fail identically. Do NOT
+		// record an account error, cooldown, or disable — just log and let
+		// the caller propagate the error to the client.
+		logger.Warnf("[AccountFailover] %s: upstream content-blocked (payload/model-level refusal, not account fault): %v",
+			account.Email, truncateForLog(err.Error()))
+		return
 	case isNetworkError(errMsg):
 		// Network errors (connection refused, DNS failure, timeout) affect all
 		// accounts equally when the gateway is down. Do NOT model-lock — just
@@ -190,4 +214,15 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error, model
 	default:
 		h.pool.RecordError(account.ID, false, model)
 	}
+}
+
+// isContentBlockedErrorMessage reports whether err indicates a payload/model
+// refusal from upstream (AgentRouter returns HTTP 400 with
+// {"error":{"code":"content-blocked","message":"content-blocked (...)",...}}).
+// These are not account faults; do not cooldown or disable.
+func isContentBlockedErrorMessage(msg string) bool {
+	lower := strings.ToLower(msg)
+	return strings.Contains(lower, "content-blocked") ||
+		strings.Contains(lower, "content_blocker") ||
+		strings.Contains(lower, "content blocked")
 }

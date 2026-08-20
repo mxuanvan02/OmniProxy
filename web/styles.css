@@ -2973,9 +2973,9 @@ img.brand-icon {
   color: var(--foreground);
   font-size: 0.9375rem;
   font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.4;
 }
 .test-modal-meta {
   display: flex;
@@ -4383,6 +4383,7 @@ img.brand-icon {
 }
 .usage-details-table {
   width: 100%;
+  min-width: 980px;
   border-collapse: collapse;
   font-size: 0.85rem;
 }
@@ -4408,6 +4409,10 @@ img.brand-icon {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono, monospace);
+}
+.usage-details-account {
+  min-width: 240px;
+  white-space: nowrap;
 }
 .usage-details-view-btn {
   padding: 0.25rem 0.6rem;
@@ -4514,6 +4519,10 @@ img.brand-icon {
   gap: 0.75rem;
   margin-bottom: 1.5rem;
   font-size: 0.9rem;
+}
+.usage-drawer-account-value {
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 .usage-drawer-section {
   margin-bottom: 1.25rem;
@@ -4687,6 +4696,26 @@ img.brand-icon {
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
+}
+/* Account attribution inside an error line. Long nicknames/emails must wrap
+   instead of overflowing the cell, so the operator can always read which
+   account produced the failure. */
+.usage-recent-error-account {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.usage-drawer-error-row {
+  grid-column: 1 / -1;
+}
+.usage-drawer-error-value {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+.usage-drawer-error-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  opacity: 0.8;
 }
 
 /* ─── Quota Tracker Page ─────────────────────────────────── */
