@@ -1,117 +1,75 @@
-<p align="center">
-  <a href="https://github.com/mxuanvan02/OmniProxy">
-    <picture>
-      <img src="web/icon.svg" alt="OmniProxy" style="width: 25%;">
-    </picture>
-  </a>
-</p>
-
 # OmniProxy
-<div align="center">
-  <a href="https://go.dev/">
-    <img src="https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go" alt="Go Version">
-  </a>
-  <a href="https://www.docker.com/">
-    <img src="https://img.shields.io/badge/Docker-Ready-2496ED?style=flat&logo=docker" alt="Docker">
-  </a>
-  <a href="LICENSE">
-    <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License">
-  </a>
-  <a href="https://github.com/mxuanvan02/OmniProxy/releases">
-    <img src="https://img.shields.io/github/v/release/mxuanvan02/OmniProxy?display_name=tag&sort=semver" alt="Release">
-  </a>
-  <a href="https://github.com/mxuanvan02/OmniProxy/stargazers">
-    <img src="https://img.shields.io/github/stars/mxuanvan02/OmniProxy" alt="Stars">
-  </a>
-</div>
-<div align="center">
-  <p>将 Kiro / Codex 账号转换为 OpenAI &amp; Anthropic 兼容的 API 服务。</p>
-</div>
-<div align="center">
-  <a href="README.md">English</a> | 中文 | <a href="README_VN.md">Tiếng Việt</a>
-</div>
-<div align="center">
-  <p>如果这个项目帮到了你，欢迎点个 Star 支持一下。</p>
-</div>
 
+基于 Go 语言实现的 LLM API 代理网关与路由系统。用于连接各类软件开发与 Agent 客户端（Hermes Agent、OpenClaw、K-Dense BYOK、Claude CLI、Cursor、Continue 等）与多个大模型服务提供商（OpenAI Codex、AWS IAM SSO/Builder ID、标准 OpenAI 兼容网关、AgentRouter 以及 Web 搜索服务）。
 
-<p align="center">
-  <a href="https://github.com/mxuanvan02/OmniProxy">
-    <picture>
-      <img src="resources/webui.jpg" alt="OmniProxy" style="width: 75%;">
-    </picture>
-  </a>
-</p>
+OmniProxy 基于 **SuperKiro** 开源项目进行重构与功能扩展，新增了 AgentRouter 协议双向转换、模型家族分类管理、多层级账户轮换与故障隔离机制以及本地管理面板。
 
-## 功能特性
+---
 
-### 核心 API
+[English](README.md) | [Tiếng Việt](README_VN.md) | [中文](README_CN.md)
 
-- **API 兼容** — Anthropic `/v1/messages`、OpenAI `/v1/chat/completions` 与 `/v1/responses`，支持 SSE 流式输出
-- **12 种认证方式** — AWS Builder ID、IAM Identity Center（企业 SSO）、SSO Token、社交登录（Google/GitHub）、Kiro CLI 导入、Kiro SSO 三步浏览器登录、AWS SSO 缓存、Kiro 本地缓存、凭证 JSON、Kiro Web Cookie、API Key (ksk_)、Refresh Token
-- **自动刷新令牌** — 凭证持续有效，无需人工干预
-- **提示词过滤** — 将 Claude Code CLI 系统提示替换为精简后端提示、去除环境噪音、边界标记；自定义正则规则（管理面板）
-- **端点配置** — 自动选择、Kiro、CodeWhisperer、Amazon-Q 端点，支持关闭故障转移
-- **每账号出站代理** — 全局或账号级 SOCKS5 / HTTP 代理
-- **用量追踪** — 每账号额度、令牌、请求次数、超额告警
-- **思考模式** — 可配置触发后缀和输出格式（reasoning_content / thinking / think）
-- **Web 管理面板** — 管理账号与设置，三语界面（EN / CN / VN）
+---
 
-### 多账号池
+## 1. 核心功能
 
-- **轮询负载均衡** — 加权分配
-- **端点故障转移** — 自动切换，组合降级链
-- **Provider 感知路由** — Claude 模型路由到外部 OpenAI 兼容账号，GPT 模型路由到 Codex 账号
-- **按模型冷却** — 配额/认证失败只锁定对应模型，不影响账号其他模型
+* **多协议接口转换：** 提供标准 `/v1/chat/completions`、`/v1/messages` (Anthropic)、`/v1/responses` 与 `/v1/models` 端点。
+* **多鉴权与提供商矩阵：**
+  * **OpenAI Codex OAuth：** 基于浏览器的 PKCE 登录流程，支持令牌自动静默刷新与额度重置周期追踪。
+  * **AgentRouter 协议转换：** 支持专用任务载荷格式，将 `agent_thought` 流式事件实时解析转换为标准 OpenAI `reasoning_content`，维护 `X-Agent-Session-ID` 会话状态。
+  * **外部 OpenAI 兼容端点：** 支持接入各类 OpenAI 兼容第三方接口并自动发现模型列表。
+  * **AWS IAM SSO & Builder ID：** 支持 CodeWhisperer/Kiro 的 SSO 登录与令牌刷新。
+  * **Service API Keys：** 内置集成 Firecrawl、Tavily、Exa 及 Jina Reader 网络搜索服务。
+* **模型家族分类与聚合目录：** 将 500+ 模型标识按 9 大家族（`gpt`、`claude`、`qwen`、`deepseek`、`glm`、`grok`、`llama`、`kimi`、`minimax`）归类，并提供精确的上下文与输出 Token 限制。
+* **账户池调度与容灾隔离：**
+  * 支持加权轮询（Weighted Round-Robin）、成本优化（Cost-Optimized）以及重置周期感知（Reset-Aware）调度策略。
+  * **按模型粒度故障锁定（Per-model lock）：** 发生限流或异常时仅在账户内隔离对应模型，避免单一模型错误导致整个账户被剔除。
+  * **会话级 Prompt 缓存粘性（Sticky Prompt Cache）：** 保持同一对话上下文命中相同上游账户，提升上游 Prompt Cache 命中率。
+* **本地管理面板与监控：** 提供三语（英文、中文、越南语）Web UI、每日 Token 与额度使用统计、API Key 额度管控及模型降级组合（Combos）配置。
 
-### Prompt 缓存优化
+---
 
-- **基于 instructions 的缓存键** — 共享同一系统提示的所有对话共用一个缓存条目，跨对话/Agent 共享
-- **跨对话缓存共享** — 10 个 Agent 使用同一系统提示 → 1 个缓存条目（而非 10 个）
-- **异步缓存预热** — 新轮换账号在后台发送预热请求，首个真实请求即命中缓存
-- **预热去重** — 并发请求同一账号+缓存键不会触发重复预热
-- **Token 阈值** — 短提示（< 1024 tokens）跳过预热，避免浪费配额
-- **缓存粘性路由** — 同一对话的连续请求固定到同一账号，保持缓存热度
+## 2. 架构概览
 
-### 池路由策略（20+ 账号）
-
-对于配额/重置窗口不均匀的大型池，两种可选策略优于轮询：
-
-- **`cost-optimized`** — 优先选择剩余配额最多的账号（最低 `CodexPrimaryUsedPercent` / 最高 `ExtCreditsRemaining`）。减少中途 429。
-- **`reset-aware`** — 避开配额窗口在 30 分钟内重置的账号。在安全账号中回退到 cost-optimized 排序。
-- **`round-robin`**（默认） — 零开销，适合配额均匀的小/中型池。
-
-策略仅在池中 ≥ 20 个唯一账号时激活。缓存粘性路由始终优先于策略 — 缓存命中比任何策略选择都节省更多配额。通过管理面板 → Usage → Pool 标签配置，或 `PATCH /admin/api/pool/strategy`。
-
-## 注意
-
-并非所有 IDE、CLI 工具和 Agent 都经过完整测试。只有 Claude Code、OpenCode 和 Codex 经过测试。
-
-## 快速开始
-
-### Docker Compose（推荐）
-
-```bash
-git clone https://github.com/mxuanvan02/OmniProxy.git
-cd OmniProxy
-mkdir -p data
-docker-compose up -d
+```
+[客户端: Hermes Agent, OpenClaw, K-Dense, Claude CLI, Cursor]
+                                │
+                                ▼  (/v1/chat/completions, /v1/messages, /v1/models)
+┌────────────────────────────────────────────────────────────────────────┐
+│                              OmniProxy                                 │
+│                                                                        │
+│  ┌──────────────────────┐  ┌─────────────────┐  ┌──────────────────┐  │
+│  │     入站请求处理器   │  │   模型家族目录  │  │ API Key 与限额   │  │
+│  │ (OpenAI / Anthropic) │  │   (按家族分组)  │  │     管理系统     │  │
+│  └──────────┬───────────┘  └────────┬────────┘  └─────────┬────────┘  │
+│             │                       │                     │           │
+│             ▼                       ▼                     ▼           │
+│  ┌──────────────────────────────────────────────────────────────────┐  │
+│  │                        账户池路由调度引擎                        │  │
+│  │  - 加权轮询 / 成本优先 / 重置感知策略                            │  │
+│  │  - 按模型粒度的错误冷却与隔离机制                                │  │
+│  │  - 会话粘性路由以复用上游 Prompt Cache                           │  │
+│  └──────────────────────────────────┬───────────────────────────────┘  │
+│                                     │                                  │
+│             ┌───────────────────────┼───────────────────────┐          │
+│             ▼                       ▼                       ▼          │
+│  ┌─────────────────────┐ ┌─────────────────────┐ ┌──────────────────┐  │
+│  │  Codex OAuth 客户端 │ │ AgentRouter 转换器  │ │ 外部兼容提供商   │  │
+│  │  (PKCE / SSE 流转换)│ │ (任务载荷与思考流)  │ │ (OpenAI / 搜索)  │  │
+│  └──────────┬──────────┘ └──────────┬──────────┘ └──────────┬───────┘  │
+└─────────────┼───────────────────────┼───────────────────────┼──────────┘
+              │                       │                       │
+              ▼                       ▼                       ▼
+      [OpenAI Codex]            [AgentRouter]            [第三方提供商]
 ```
 
-### Docker 运行
+---
 
-```bash
-docker run -d \
-  --name omniproxy \
-  -p 8080:8080 \
-  -e ADMIN_PASSWORD=your_secure_password \
-  -v /path/to/data:/app/data \
-  --restart unless-stopped \
-  ghcr.io/mxuanvan02/omniproxy:latest
-```
+## 3. 安装与运行
 
-### 源码编译
+### 环境要求
+* Go 1.25 或更高版本（或使用 Docker）。
 
+### 源码编译运行
 ```bash
 git clone https://github.com/mxuanvan02/OmniProxy.git
 cd OmniProxy
@@ -119,104 +77,94 @@ go build -o omniproxy .
 ./omniproxy
 ```
 
-### 部署到 Zeabur
+服务默认监听 `http://127.0.0.1:8080`（或在 `data/config.json` 中指定的端口）。管理控制台地址为 `http://127.0.0.1:8080/web/`。
 
-仓库已包含 `Dockerfile`，可直接在 Zeabur 上构建运行。
-
-**方式一：面板一键部署**
-
-1. Fork 本仓库到你的 GitHub 账号。
-2. 在 Zeabur 新建服务，选择 **Deploy from GitHub**，绑定刚才 fork 的仓库。
-3. Zeabur 自动识别 `Dockerfile` 并完成构建。
-4. 在 **Networking** 标签暴露端口 `8080` 并绑定域名。
-5. 在 **Variables** 标签至少设置 `ADMIN_PASSWORD`（管理面板密码）。
-6. 如需持久化账号 / 配置，挂载 Volume 到 `/app/data`。
-
-**方式二：CLI 部署**
-
+### 使用 Docker 部署
 ```bash
-npm i -g zeabur
-zeabur auth login
-zeabur deploy
+docker compose up -d
 ```
 
-> 命令需在项目根目录执行。CLI 会生成 `.zeabur/context.json` 记录目标 project / service，包含个人 ID，请勿提交。
+---
 
-部署完成后访问 `https://<你的域名>/admin` 登录管理面板。
+## 4. 配置文件示例 (`data/config.json`)
 
-首次运行会在 `data/config.json` 自动生成配置，挂载 `/app/data` 以持久化。默认管理密码为 `changeme`，生产环境请务必通过 `ADMIN_PASSWORD` 环境变量或在管理面板中修改。
-
-## 使用方法
-
-访问 `http://localhost:8080/admin` 登录、添加账号，然后调用 API：
-
-```bash
-# Claude
-curl http://localhost:8080/v1/messages \
-  -H "Content-Type: application/json" \
-  -H "anthropic-version: 2023-06-01" \
-  -d '{"model":"claude-sonnet-4.5","max_tokens":1024,"messages":[{"role":"user","content":"你好！"}]}'
-
-# OpenAI / Chat
-curl http://localhost:8080/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer any" \
-  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"你好！"}]}'
-
-# OpenAI / Responses
-curl http://localhost:8080/v1/responses \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer any" \
-  -d '{"model":"claude-sonnet-4.5","input":"你好！","max_output_tokens":1024}'
+```json
+{
+  "host": "0.0.0.0",
+  "port": 8080,
+  "password": "your-admin-password",
+  "requireApiKey": false,
+  "accounts": [
+    {
+      "id": "6d45de3c-84bc-403d-840b-78deb9bc43b9",
+      "nickname": "AgentRouter Primary",
+      "authMethod": "agentrouter",
+      "provider": "AgentRouter",
+      "baseUrl": "https://agentrouter.org",
+      "accessToken": "sk-ar-...",
+      "enabled": true,
+      "weight": 1,
+      "region": "external"
+    },
+    {
+      "id": "5f369898-a56b-4072-8cbf-c4166553044e",
+      "nickname": "DeepSeek External",
+      "authMethod": "external_openai",
+      "provider": "External OpenAI",
+      "baseUrl": "https://api.deepseek.com",
+      "accessToken": "sk-...",
+      "enabled": true,
+      "weight": 1,
+      "region": "external"
+    }
+  ]
+}
 ```
 
-## 思考模式
+---
 
-在模型名后加后缀（默认 `-thinking`）即可启用，例如 `claude-sonnet-4.5-thinking`。Claude 兼容请求如果带有顶层 `thinking` 配置，例如 `{"type":"enabled","budget_tokens":2048}` 或 `{"type":"adaptive"}`，也会自动启用 thinking 模式。输出格式可在管理面板「设置 - Thinking 模式」中配置。
+## 5. 客户端集成
 
-## 出站代理
+### Hermes Agent / OpenClaw
+```yaml
+providers:
+  omniproxy:
+    base_url: "http://127.0.0.1:8080/v1"
+    api_key: "***"
+    models:
+      - gpt-5.6-sol
+      - claude-opus-5
+      - deepseek-v4-pro
+      - qwen3.8-max
+```
 
-可在管理面板「设置 - 出站代理设置」中配置代理。支持 SOCKS5 和 HTTP 代理。
+### K-Dense BYOK
+在 `.env` 中配置：
+```env
+OMNIPROXY_BASE_URL=http://127.0.0.1:8080/v1
+DEFAULT_MODEL_PROVIDER=omniproxy
+```
 
-设置保存后即时生效，无需重启服务。
+### Claude CLI (`~/.claude/settings.json`)
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:8080"
+  }
+}
+```
 
-## 环境变量
+---
 
-| 变量 | 说明 | 默认值 |
-|-----|------|-------|
-| `CONFIG_PATH` | 配置文件路径 | `data/config.json` |
-| `ADMIN_PASSWORD` | 管理面板密码（覆盖配置文件） | - |
+## 6. 自动化测试
 
-## 参与贡献
+运行全套单元与集成测试：
+```bash
+go test -count=1 ./...
+```
 
-欢迎友好交流。遇到问题时，建议先让 Claude Code、Codex 等工具帮忙排查一下，大部分问题都能自己解决。如果能直接提个 PR 就更好了。
+---
 
-开发设置和指南请参阅 [CONTRIBUTING.md](CONTRIBUTING.md)。
+## 7. 开源协议
 
-## 更新日志
-
-发布历史和重要变更请参阅 [CHANGELOG.md](CHANGELOG.md)。
-
-## 致谢
-
-OmniProxy 是从 [Kiro-Go](https://github.com/Quorinex/Kiro-Go) fork 出来的，并基于它开发。原项目提供了 Kiro 账号管理、令牌刷新和 OpenAI / Anthropic 兼容 API 层的基础。
-
-OmniProxy 相比上游的主要新增：
-
-- Codex（ChatGPT 订阅）账号支持与用量追踪
-- 外部 OpenAI 兼容 Provider 支持
-- 基于 instructions 的 Prompt 缓存键，跨对话共享
-- 异步缓存预热（去重 + Token 阈值）
-- 池路由策略（cost-optimized、reset-aware）适用于 20+ 账号池
-- 组合降级链，每个组合可独立配置策略
-- Web 管理面板，三语界面（EN / CN / VN）
-- 每账号出站代理（SOCKS5 / HTTP）
-- 自定义正则规则的提示词过滤系统
-
-## 免责声明
-
-本项目仅供学习和研究目的使用，与 Amazon、AWS 或 Kiro 没有任何关联。用户需自行确保使用行为符合所有适用的服务条款和法律法规，使用风险自负。
-
-## 许可证
-
-[MIT](LICENSE) — Copyright (c) 2026 mxuanvan02
+本项目采用 [MIT](LICENSE) 开源许可证。基于 SuperKiro 项目构建与扩展。
