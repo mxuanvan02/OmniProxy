@@ -886,6 +886,7 @@
   "detail.codexCreditsBalance": "Số dư tín dụng",
   "detail.codexCreditsUnlimited": "Tín dụng không giới hạn",
   "detail.codexCreditsNA": "N/A (gói đăng ký)",
+  "detail.codexResetCredits": "Credit Bank Reset",
   "detail.codexLastChecked": "Cập nhật lúc",
   "detail.codexUsageHint": "Dữ liệu sử dụng được lấy tự động từ header phản hồi của upstream mỗi request.",
   "modal.codexTitle": "Codex (gói ChatGPT)",

@@ -885,6 +885,7 @@
   "detail.codexCreditsBalance": "积分余额",
   "detail.codexCreditsUnlimited": "无限积分",
   "detail.codexCreditsNA": "不适用（订阅制）",
+  "detail.codexResetCredits": "重置额度券",
   "detail.codexLastChecked": "更新时间",
   "detail.codexUsageHint": "用量数据从每次请求的上游响应头自动捕获。",
   "modal.codexTitle": "Codex（ChatGPT 订阅）",

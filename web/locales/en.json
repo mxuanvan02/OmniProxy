@@ -886,6 +886,7 @@
   "detail.codexCreditsBalance": "Credits Balance",
   "detail.codexCreditsUnlimited": "Unlimited Credits",
   "detail.codexCreditsNA": "N/A (subscription)",
+  "detail.codexResetCredits": "Bank Reset Credits",
   "detail.codexLastChecked": "Last Updated",
   "detail.codexUsageHint": "Usage data is captured automatically from upstream response headers on each request.",
   "modal.codexTitle": "Codex (ChatGPT Subscription)",

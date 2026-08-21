@@ -1038,6 +1038,9 @@ let testModalMode = 'chat';
           detailItem(t('detail.codexCreditsUnlimited'), a.codexCreditsUnlimited ? '✓' : '✗')
           : detailItem(t('detail.codexCreditsBalance'), t('detail.codexCreditsNA')) +
             detailItem(t('detail.codexCreditsUnlimited'), t('detail.codexCreditsNA'))) +
+        // Bank-reset credits: always shown for Codex accounts, including 0,
+        // so the operator can see the real count instead of a missing row.
+        detailItem(t('detail.codexResetCredits'), String(a.codexResetCreditsAvailable || 0)) +
         (a.codexUsageCheckedAt ? detailItem(t('detail.codexLastChecked'), new Date(a.codexUsageCheckedAt * 1000).toLocaleString()) : '') +
         '</div>' +
         '<p class="help-block">' + escapeHtml(t('detail.codexUsageHint')) + '</p>' +
