@@ -1201,6 +1201,33 @@ func dispatchChat(account *config.Account, payload *KiroPayload, callback *KiroS
 	return CallKiroAPI(account, payload, callback)
 }
 
+// resolveExternalTestModel picks a concrete model ID for the provider-validation
+// ping. Hard-coding "auto" fails on providers whose registry has no such alias
+// (they answer HTTP 503 model_not_found), so the provider's own /v1/models list
+// is consulted first and "auto" is kept only as a last-resort fallback for
+// providers that expose no catalog at all.
+func resolveExternalTestModel(account *config.Account) string {
+	if account == nil {
+		return "auto"
+	}
+	models, err := fetchExternalProviderModels(account)
+	if err != nil || len(models) == 0 {
+		return "auto"
+	}
+	// Prefer an explicit "auto" entry when the provider really advertises it.
+	for _, m := range models {
+		if strings.EqualFold(strings.TrimSpace(m.ModelId), "auto") {
+			return "auto"
+		}
+	}
+	for _, m := range models {
+		if id := strings.TrimSpace(m.ModelId); id != "" {
+			return id
+		}
+	}
+	return "auto"
+}
+
 // testExternalProvider performs a minimal chat-completion round-trip against
 // the external provider to validate the base_url + api_key pair. Returns the
 // upstream latency on success, or an error describing the failure.
@@ -1213,7 +1240,7 @@ func testExternalProvider(account *config.Account) (time.Duration, error) {
 		return time.Since(start), nil
 	}
 
-	model := "auto"
+	model := resolveExternalTestModel(account)
 	payload := &KiroPayload{}
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.ConversationID = "omniproxy-test"
