@@ -23,6 +23,24 @@ const defaultImageModel = "gpt-5.6-luna"
 const defaultCodexImageHostModel = "gpt-5.5"
 const defaultCodexImageToolModel = "gpt-image-2"
 
+// codexImageToolModels lists the image models the Codex image_generation tool
+// accepts. These are NOT text models: the host model (defaultCodexImageHostModel)
+// runs the tool, and one of these is passed as the tool's own "model" field.
+// Keep gpt-image-2 first — it is the current default the tool expects.
+func codexImageToolModels() []struct{ ID, Name string } {
+	return []struct{ ID, Name string }{
+		{"gpt-image-2", "GPT Image 2"},
+		{"gpt-image-1", "GPT Image 1"},
+		{"gpt-image-1-mini", "GPT Image 1 Mini"},
+	}
+}
+
+// isCodexImageToolModel reports whether id is a valid image model for the
+// Codex image_generation tool (gpt-image-* family).
+func isCodexImageToolModel(id string) bool {
+	return strings.HasPrefix(strings.TrimSpace(id), "gpt-image-")
+}
+
 const maxImageResponseBytes = 64 << 20
 
 type imageGenerationRequest struct {
@@ -71,21 +89,28 @@ func imageModelFor(account *config.Account, requested string) string {
 			if model = strings.TrimSpace(account.CodexImageModel); model != "" {
 				return model
 			}
+			// A Codex account generates images through the image_generation
+			// tool, so its default must be an image model (gpt-image-*), not
+			// the generic text default.
+			return defaultCodexImageToolModel
 		}
 	}
 	return defaultImageModel
 }
 
 func codexImageToolModel(account *config.Account, requested string) string {
+	// The tool's "model" field only accepts the gpt-image-* family. A text
+	// model configured on the account (e.g. a legacy gpt-5.x value) must NOT
+	// be forwarded here — the upstream rejects it — so validate before use.
 	if account != nil {
-		if model := strings.TrimSpace(account.CodexImageModel); model != "" {
+		if model := strings.TrimSpace(account.CodexImageModel); isCodexImageToolModel(model) {
 			return model
 		}
 	}
 	// Permit an explicit image model from clients that use the standard
 	// gpt-image-* naming, while keeping OmniProxy's legacy gpt-5.6 aliases
 	// from being sent as the tool model.
-	if model := strings.TrimSpace(requested); strings.HasPrefix(model, "gpt-image-") {
+	if model := strings.TrimSpace(requested); isCodexImageToolModel(model) {
 		return model
 	}
 	return defaultCodexImageToolModel

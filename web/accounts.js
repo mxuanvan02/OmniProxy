@@ -1045,7 +1045,7 @@ let testModalMode = 'chat';
 
       '<div class="detail-section"><h4>' + escapeHtml(t('accounts.imageModel')) + '</h4>' +
       '<div class="machine-id-row">' +
-      '<input type="text" id="imageModelInput" value="' + escapeAttr(a.imageModel || a.codexImageModel || '') + '" placeholder="gpt-5.4" />' +
+      '<input type="text" id="imageModelInput" value="' + escapeAttr(a.imageModel || a.codexImageModel || '') + '" placeholder="gpt-image-2" />' +
       '<button class="btn btn-sm btn-primary" data-detail-action="saveImageModel" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
       '</div>' +
       '<p class="help-block">' + escapeHtml(t('accounts.imageModelHint')) + '</p></div>' +

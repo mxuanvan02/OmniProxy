@@ -6876,7 +6876,10 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"codexCreditsBalance":       a.CodexCreditsBalance,
 			"codexCreditsUnlimited":     a.CodexCreditsUnlimited,
 			"codexCreditsKnown":         a.CodexCreditsKnown,
-			"codexUsageCheckedAt":       a.CodexUsageCheckedAt,
+			// Always emitted (even when 0) so the UI can show the real count
+			// and disable the Bank Reset button instead of hiding it.
+			"codexResetCreditsAvailable": a.CodexResetCreditsAvailable,
+			"codexUsageCheckedAt":        a.CodexUsageCheckedAt,
 			"imageModel":                a.ImageModel,
 			"codexImageModel":           a.CodexImageModel,
 			"tokenRefreshedAt":          a.TokenRefreshedAt,
@@ -10722,10 +10725,17 @@ func (h *Handler) apiGetAccountImageModels(w http.ResponseWriter, r *http.Reques
 
 	switch {
 	case isCodexAccount(account):
+		// Codex image generation runs through the image_generation tool, whose
+		// "model" field only accepts the gpt-image-* family. Listing the text
+		// models (gpt-5.6-*) here was wrong: selecting one produced an
+		// upstream rejection. Offer the configured model first (if it is a
+		// valid image model), then the known gpt-image-* catalog.
 		source, supported, reason = "codex", true, ""
-		appendModel(imageModelFor(account, ""), imageModelFor(account, ""), source)
-		for _, model := range codexSubscriptionModels() {
-			appendModel(model.ModelId, model.ModelName, source)
+		if configured := strings.TrimSpace(account.CodexImageModel); isCodexImageToolModel(configured) {
+			appendModel(configured, configured, source)
+		}
+		for _, model := range codexImageToolModels() {
+			appendModel(model.ID, model.Name, source)
 		}
 	case isExternalAccount(account):
 		source = "external"

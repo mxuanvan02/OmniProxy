@@ -58,7 +58,11 @@ type quotaAccountRow struct {
 	CodexSecondaryResetAt      int64  `json:"codexSecondaryResetAt,omitempty"`
 	CodexCreditsBalance        *int   `json:"codexCreditsBalance,omitempty"`
 	CodexCreditsUnlimited      bool   `json:"codexCreditsUnlimited,omitempty"`
-	CodexResetCreditsAvailable int    `json:"codexResetCreditsAvailable,omitempty"`
+	// CodexResetCreditsAvailable is intentionally NOT omitempty: the UI must
+	// be able to render "0" and disable the Bank Reset button. With omitempty
+	// a zero count disappears from the payload, which is indistinguishable
+	// from "field not supported" on the client side.
+	CodexResetCreditsAvailable int `json:"codexResetCreditsAvailable"`
 	// External
 	ExtCreditLimit      float64 `json:"extCreditLimit,omitempty"`
 	ExtCreditsRemaining float64 `json:"extCreditsRemaining,omitempty"`
