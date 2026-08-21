@@ -1596,9 +1596,33 @@ func codexConsumeResetCredit(account *config.Account) (int, error) {
 			return 0, fmt.Errorf("no chatgpt_account_id")
 		}
 	}
-	// Generate a unique redeem_request_id (UUID v4 shape). The upstream
-	// dedupes on this id, so a retry with the same id is idempotent.
-	redeemID := generateCodexRedeemID()
+	// redeem_request_id: the upstream dedupes on this id, so a retry with the
+	// SAME id is idempotent and does not burn a second credit. We therefore
+	// reuse a pending id left over from an inconclusive attempt (network
+	// error, timeout, 5xx) instead of generating a fresh one every call.
+	redeemID := strings.TrimSpace(account.CodexResetRedeemID)
+	reusedRedeemID := redeemID != ""
+	if !reusedRedeemID {
+		redeemID = generateCodexRedeemID()
+		// Persist BEFORE the POST: if the process dies mid-request we must
+		// still know which id was (possibly) already redeemed upstream.
+		account.CodexResetRedeemID = redeemID
+		if err := config.UpdateAccountPreservingCredentials(account.ID, *account); err != nil {
+			logger.Errorf("[codexConsumeResetCredit] Failed to persist pending redeem id for %s: %v", account.Email, err)
+		}
+	} else {
+		logger.Infof("[codexConsumeResetCredit] Reusing pending redeem id for %s (idempotent retry)", account.Email)
+	}
+	// clearPendingRedeemID drops the stored id once the outcome is conclusive.
+	clearPendingRedeemID := func() {
+		if account.CodexResetRedeemID == "" {
+			return
+		}
+		account.CodexResetRedeemID = ""
+		if err := config.UpdateAccountPreservingCredentials(account.ID, *account); err != nil {
+			logger.Errorf("[codexConsumeResetCredit] Failed to clear pending redeem id for %s: %v", account.Email, err)
+		}
+	}
 	reqBody, _ := json.Marshal(map[string]string{"redeem_request_id": redeemID})
 	endpoint := codexBaseURL(account) + "/backend-api/wham/rate-limit-reset-credits/consume"
 	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(reqBody))
@@ -1614,11 +1638,19 @@ func codexConsumeResetCredit(account *config.Account) (int, error) {
 	client := GetClientForProxy(ResolveAccountProxyURL(account))
 	resp, err := client.Do(req)
 	if err != nil {
+		// INCONCLUSIVE: the POST may or may not have reached the upstream.
+		// Keep the pending redeem id so the next attempt is idempotent.
 		return 0, fmt.Errorf("do: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
+		// 5xx / 429: upstream may have applied the redemption before failing
+		// to answer — keep the pending id. 4xx (except 429) is a definitive
+		// rejection, so the id was never redeemed and can be dropped.
+		if resp.StatusCode < 500 && resp.StatusCode != 429 {
+			clearPendingRedeemID()
+		}
 		return 0, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateErrBody(body))
 	}
 	var parsed struct {
@@ -1627,18 +1659,23 @@ func codexConsumeResetCredit(account *config.Account) (int, error) {
 		Message      string `json:"message"`
 	}
 	if err := json.Unmarshal(body, &parsed); err != nil {
+		// HTTP 200 with an unparseable body: the redemption most likely did
+		// happen upstream, so keep the pending id rather than risk a second one.
 		return 0, fmt.Errorf("parse: %w", err)
 	}
 	if parsed.Code == "no_credit" {
+		clearPendingRedeemID()
 		return 0, nil // not an error — operator knows no credits left
 	}
 	if parsed.Code != "reset" || parsed.WindowsReset == 0 {
+		clearPendingRedeemID()
 		msg := parsed.Message
 		if msg == "" {
 			msg = string(body)
 		}
 		return 0, fmt.Errorf("reset failed: code=%s windows_reset=%d msg=%s", parsed.Code, parsed.WindowsReset, msg)
 	}
+	clearPendingRedeemID()
 	return parsed.WindowsReset, nil
 }
 

@@ -205,6 +205,12 @@ type Account struct {
 	CodexCreditsUnlimited               bool   `json:"codexCreditsUnlimited,omitempty"`      // unlimited credits flag
 	CodexCreditsKnown                   bool   `json:"codexCreditsKnown,omitempty"`          // true when upstream sent x-codex-credits-* headers (pay-as-you-go); false for ChatGPT Plus subscription (no credit balance)
 	CodexResetCreditsAvailable          int    `json:"codexResetCreditsAvailable,omitempty"` // bank-reset credits available (from wham/usage rate_limit_reset_credits.available_count)
+	// CodexResetRedeemID holds the redeem_request_id of a bank-reset consume
+	// attempt that did not return a conclusive answer (network error, timeout,
+	// non-200). The upstream dedupes on this id, so reusing it on retry makes
+	// the operation idempotent instead of burning a second credit. Cleared on
+	// any conclusive outcome (reset / no_credit / explicit upstream failure).
+	CodexResetRedeemID                  string `json:"codexResetRedeemId,omitempty"`
 	CodexUsageCheckedAt                 int64  `json:"codexUsageCheckedAt,omitempty"`        // last header capture timestamp
 	ImageModel                          string `json:"imageModel,omitempty"`                 // model used by image-generation tests/requests
 	CodexImageModel                     string `json:"codexImageModel,omitempty"`            // model used with the Codex image_generation tool

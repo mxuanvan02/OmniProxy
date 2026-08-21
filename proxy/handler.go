@@ -2251,6 +2251,19 @@ func (h *Handler) apiResetAccountCredits(w http.ResponseWriter, r *http.Request,
 		json.NewEncoder(w).Encode(map[string]string{"error": "Token refresh failed: " + err.Error()})
 		return
 	}
+	// Guard: a bank reset clears quota counters but does NOT clear a ban —
+	// only a successful test request does. Consuming a credit on a banned
+	// account would burn a non-refundable resource while the account stays
+	// unroutable. Require the operator to clear the ban first (press Test).
+	if account.BanStatus != "" && account.BanStatus != "ACTIVE" {
+		w.WriteHeader(409)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success":   false,
+			"error":     "Account is banned (" + account.BanStatus + "). A bank reset does not clear a ban — press Test to clear it first, otherwise the credit would be spent on an unroutable account.",
+			"banStatus": account.BanStatus,
+		})
+		return
+	}
 	// First check if the account actually has a credit available. This
 	// avoids burning a consume request (and getting a no_credit response)
 	// when the operator clicks the button on an account with no credits.
@@ -2303,9 +2316,12 @@ func (h *Handler) apiResetAccountCredits(w http.ResponseWriter, r *http.Request,
 		account.CodexResetCreditsAvailable--
 	}
 	h.pool.ClearCooldown(account.ID)
-	if !account.Enabled && (account.BanStatus == "" || account.BanStatus == "ACTIVE") {
-		account.Enabled = true
-	}
+	// NOTE: we deliberately do NOT re-enable a disabled account here. The
+	// enabled flag is an explicit operator decision (an account may be off
+	// on purpose); silently flipping it would put the account back into the
+	// routing pool without consent. We report the state instead so the UI
+	// can tell the operator the reset landed but the account is still off.
+	stillDisabled := !account.Enabled
 	if err := config.UpdateAccountPreservingCredentials(account.ID, *account); err != nil {
 		logger.Errorf("[apiResetAccountCredits] Failed to persist cleared counters for %s: %v", account.Email, err)
 	}
@@ -2313,11 +2329,16 @@ func (h *Handler) apiResetAccountCredits(w http.ResponseWriter, r *http.Request,
 	h.pool.Reload()
 	logger.Infof("[apiResetAccountCredits] Consumed 1 bank-reset credit for %s — %d windows reset upstream",
 		account.Email, windowsReset)
+	msg := fmt.Sprintf("Bank reset credit consumed for %s — %d rate-limit windows reset", account.Email, windowsReset)
+	if stillDisabled {
+		msg += " (account is still disabled — enable it to put it back in the routing pool)"
+	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":      true,
-		"windowsReset": windowsReset,
-		"available":    available - 1,
-		"message":      fmt.Sprintf("Bank reset credit consumed for %s — %d rate-limit windows reset", account.Email, windowsReset),
+		"success":       true,
+		"windowsReset":  windowsReset,
+		"available":     available - 1,
+		"stillDisabled": stillDisabled,
+		"message":       msg,
 	})
 }
 
