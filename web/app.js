@@ -985,7 +985,6 @@ let customSelectRefreshQueued = false;
       else if (action === 'refreshCredits') refreshAccountCredits(id, btn.closest('.account-card'));
       else if (action === 'refreshToken') refreshAccountToken(id);
       else if (action === 'resetQuota') resetAccountQuota(id, btn.closest('.account-card'));
-      else if (action === 'reauth') reauthAccount(id, btn);
       else if (action === 'loginAgain') loginCodexAgain(id);
       else if (action === 'changeCodexPassword') changeCodexPassword(id);
     });

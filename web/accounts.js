@@ -450,7 +450,6 @@ let testModalMode = 'chat';
         '<button class="btn btn-icon btn-sm btn-ghost" data-action="detail" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.detail')) + '">' + userSvg + '</button>' +
         '<button class="btn btn-icon btn-sm btn-ghost" data-action="copyJSON" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.copyJSON')) + '">' + copySvg + '</button>' +
         (reauthRequired ? '<button class="btn btn-sm btn-danger" data-action="loginAgain" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.reauthRequiredHint')) + '">' + escapeHtml(t('accounts.loginAgain')) + '</button>' : '') +
-        (banned && isCodex && !reauthRequired ? '<button class="btn btn-sm btn-warning" data-action="reauth" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.reauth')) + '">' + escapeHtml(t('accounts.reauth')) + '</button>' : '') +
         (banned ? '' :
           '<button class="btn btn-sm ' + (a.enabled ? 'btn-outline' : 'btn-primary') + '" data-action="toggle" data-id="' + idAttr + '" data-enabled="' + (!a.enabled) + '">' +
           escapeHtml(a.enabled ? t('accounts.disable') : t('accounts.enable')) +
@@ -513,14 +512,29 @@ let testModalMode = 'chat';
   }
 
   // Account actions
+  // refreshAccount refreshes the OAuth token + usage for one account. It does
+  // NOT clear a ban — Test does that. Previously a separate "reauth" button hit
+  // this same endpoint for banned Codex accounts; that duplicate was removed and
+  // its confirmation prompt folded in here, shown only when the account is banned.
   async function refreshAccount(id, card) {
+    const acc = accountsData.find(a => a.id === id);
+    const isBanned = !!(acc && acc.banStatus && acc.banStatus !== 'ACTIVE');
+    if (isBanned) {
+      const ok = await confirmAction(t('accounts.confirmReauth'), {
+        title: t('accounts.reauth'),
+        confirmText: t('accounts.reauth'),
+        variant: 'warning'
+      });
+      if (!ok) return;
+    }
     if (card) card.classList.add('loading');
     try {
       const res = await api('/accounts/' + id + '/refresh', { method: 'POST' });
       const d = await res.json();
       if (d.success) {
         loadAccounts();
-        if (d.message) toast(t('accounts.refreshed') + ': ' + d.message, 'success');
+        if (isBanned) toast(d.message || t('accounts.reauthDone'), 'success');
+        else if (d.message) toast(t('accounts.refreshed') + ': ' + d.message, 'success');
       } else {
         toastError(t('accounts.refreshFailed') + ': ' + (d.error || ''));
       }
@@ -588,7 +602,18 @@ let testModalMode = 'chat';
       toastError(t('detail.restoreRefreshTokenFailed'));
     }
   }
+  // toggleAccount enables/disables an account. Disabling removes the account
+  // from the routing pool immediately, so it is confirmed to avoid a stray
+  // click silently dropping a provider. Enabling is non-destructive.
   async function toggleAccount(id, enabled) {
+    if (!enabled) {
+      const ok = await confirmAction(t('accounts.confirmDisable'), {
+        title: t('accounts.disable'),
+        confirmText: t('accounts.disable'),
+        variant: 'danger'
+      });
+      if (!ok) return;
+    }
     await api('/accounts/' + id, { method: 'PUT', body: JSON.stringify({ enabled }) });
     loadAccounts();
   }
@@ -617,32 +642,9 @@ let testModalMode = 'chat';
     }
     if (card) card.classList.remove('loading');
   }
-  // reauthAccount refreshes the OAuth token + usage for a single banned
-  // Codex account. It does NOT clear the ban — only a successful Test
-  // request can do that. Use this to refresh stale tokens before testing.
-  async function reauthAccount(id, btn) {
-    const ok = await confirmAction(t('accounts.confirmReauth'), {
-      title: t('accounts.reauth'),
-      confirmText: t('accounts.reauth'),
-      variant: 'warning'
-    });
-    if (!ok) return;
-    if (btn) { btn.disabled = true; btn.textContent = t('common.loading') || '...'; }
-    try {
-      // apiRefreshAccount refreshes token + usage but does NOT clear ban.
-      const res = await api('/accounts/' + id + '/refresh', { method: 'POST' });
-      const d = await res.json();
-      if (d.success) {
-        toast(d.message || t('accounts.reauthDone'), 'success');
-        loadAccounts(); loadStats();
-      } else {
-        toastError((d.error || t('accounts.reauthFailed')));
-      }
-    } catch (e) {
-      toastError(t('accounts.reauthFailed'));
-    }
-    if (btn) { btn.disabled = false; btn.textContent = t('accounts.reauth'); }
-  }
+  // NOTE: the former reauthAccount() was removed — it hit the same
+  // POST /accounts/{id}/refresh endpoint as refreshAccount(), which now carries
+  // its confirmation prompt for banned accounts. See refreshAccount() above.
   function loginCodexAgain(id) {
     const account = accountsData.find(a => a.id === id);
     if (!account) return;

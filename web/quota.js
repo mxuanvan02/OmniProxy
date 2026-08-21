@@ -500,7 +500,12 @@ function wireToolbarEvents() {
   const next = $('quotaNextPage');
   if (next) next.onclick = () => { quotaState.page++; renderAccountBlocks(); };
 
-  // Per-block action buttons (refresh quota / check credits / bank reset)
+  // Per-block action buttons (refresh quota / check credits / bank reset).
+  //
+  // refresh-quota and check-credits hit the same endpoints as the Accounts tab
+  // buttons, so they delegate to the shared handlers in accounts.js instead of
+  // duplicating the fetch + toast logic. That keeps one source of truth per
+  // action; the direct api() call is only a fallback if accounts.js is absent.
   document.querySelectorAll('.quota-block-btn[data-action]').forEach(btn => {
     btn.onclick = async () => {
       if (btn.classList.contains('is-loading')) return;
@@ -510,10 +515,18 @@ function wireToolbarEvents() {
       btn.disabled = true;
       try {
         if (action === 'refresh-quota') {
-          await api(`/accounts/${accountId}/refresh`, { method: 'POST' });
+          if (typeof refreshAccount === 'function') {
+            await refreshAccount(accountId, null);
+          } else {
+            await api(`/accounts/${accountId}/refresh`, { method: 'POST' });
+          }
           await loadQuotaData();
         } else if (action === 'check-credits') {
-          await api(`/accounts/${accountId}/credits`, { method: 'POST' });
+          if (typeof refreshAccountCredits === 'function') {
+            await refreshAccountCredits(accountId, null);
+          } else {
+            await api(`/accounts/${accountId}/credits`, { method: 'POST' });
+          }
           await loadQuotaData();
         } else if (action === 'bank-reset') {
           // First check if the account has any bank-reset credits available.
