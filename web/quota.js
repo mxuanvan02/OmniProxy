@@ -604,6 +604,9 @@ function initQuotaPage() {
   // flows through the proxy. The backend reads live in-memory pool stats
   // (not persisted config), so each poll reflects the latest counters.
   quotaState.refreshTimer = setInterval(() => {
+    // Skip while the tab is hidden — nothing is rendered, so the fetch is pure
+    // waste (~16 MB/h at this interval). onQuotaVisible() catches up on return.
+    if (document.hidden) return;
     if (!$('tabQuota').classList.contains('hidden')) loadQuotaData();
   }, 5000);
 
@@ -639,6 +642,18 @@ function renderSkeletonBlocks(count) {
     </div>`).join('');
   return `<div class="quota-blocks-grid">${blocks}</div>`;
 }
+
+// Catch-up on return to a visible tab: the interval above skipped every tick
+// while hidden, so load once immediately rather than waiting out the remainder.
+function onQuotaVisible() {
+  if (document.hidden) return;
+  if (!quotaState.refreshTimer) return; // page not active
+  const tab = $('tabQuota');
+  if (!tab || tab.classList.contains('hidden')) return;
+  loadQuotaData();
+}
+
+document.addEventListener('visibilitychange', onQuotaVisible);
 
 function destroyQuotaPage() {
   if (quotaState.refreshTimer) {

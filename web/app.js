@@ -1127,10 +1127,43 @@ let customSelectRefreshQueued = false;
     if (yr) yr.textContent = new Date().getFullYear();
     wireEvents();
     if (password) tryAutoLogin();
-    setInterval(() => {
-      if (!$('mainPage').classList.contains('hidden')) loadStats();
+    startStatsPolling();
+  }
+
+  // Header stats polling. Previously a bare setInterval with no clearInterval
+  // anywhere, so it kept firing on a hidden/background tab forever — the exact
+  // pattern that pins a browser's CPU on a dashboard left open overnight.
+  let statsTimer = null;
+
+  function statsPollDue() {
+    // Skip while the tab is hidden: the header is not visible, so the fetch is
+    // pure waste. The visibilitychange handler does one catch-up fetch on
+    // return, so the numbers are never stale once the tab is looked at again.
+    if (document.hidden) return false;
+    return !$('mainPage').classList.contains('hidden');
+  }
+
+  function startStatsPolling() {
+    stopStatsPolling();
+    statsTimer = setInterval(() => {
+      if (statsPollDue()) loadStats();
     }, 10000);
   }
+
+  function stopStatsPolling() {
+    if (statsTimer) {
+      clearInterval(statsTimer);
+      statsTimer = null;
+    }
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) return;
+    // Catch up immediately instead of waiting out the remaining interval.
+    if (!$('mainPage').classList.contains('hidden')) loadStats();
+  });
+
+  window.addEventListener('pagehide', stopStatsPolling);
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);

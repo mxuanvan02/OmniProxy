@@ -11,6 +11,13 @@ let logsState = {
   bound: false,
   maxLines: 500,      // reduced from 2048 — fewer DOM nodes = less lag
   renderPending: false,  // throttle: coalesce rapid SSE bursts into one render
+  // SSE reconnect bookkeeping — see usage.js for the rationale. The old
+  // `if (logsState.eventSource)` guard stopped zombie streams but still
+  // hammered every 3s and could stack multiple pending timers.
+  sseGeneration: 0,
+  sseRetryTimer: null,
+  sseRetryDelay: 0,
+  lastEventID: '',    // sent back as Last-Event-ID so the server resumes
 };
 
 // Map a raw log line's 6-char prefix to a level. Lines are formatted by the Go
@@ -90,15 +97,55 @@ async function fetchLogsSnapshot() {
   } catch (e) { console.error('[Logs] snapshot error:', e); }
 }
 
+const LOGS_SSE_RETRY_BASE_MS = 3000;
+const LOGS_SSE_RETRY_MAX_MS = 60000;
+
+function scheduleLogsSSERetry(generation) {
+  if (generation !== logsState.sseGeneration) return;
+  if (logsState.sseRetryTimer) return;
+
+  const prev = logsState.sseRetryDelay || 0;
+  const delay = prev === 0
+    ? LOGS_SSE_RETRY_BASE_MS
+    : Math.min(prev * 2, LOGS_SSE_RETRY_MAX_MS);
+  logsState.sseRetryDelay = delay;
+
+  logsState.sseRetryTimer = setTimeout(() => {
+    logsState.sseRetryTimer = null;
+    if (generation !== logsState.sseGeneration) return;
+    connectLogsSSE();
+  }, delay);
+}
+
 function connectLogsSSE() {
   if (logsState.eventSource) {
     logsState.eventSource.close();
   }
+  if (logsState.sseRetryTimer) {
+    clearTimeout(logsState.sseRetryTimer);
+    logsState.sseRetryTimer = null;
+  }
+  const generation = logsState.sseGeneration;
   try {
-    const es = new EventSource('/admin/api/logs/stream?pwd=' + encodeURIComponent(password));
+    // A freshly constructed EventSource does NOT send the Last-Event-ID header
+    // (the browser only does that on its own internal reconnect), so the
+    // resume cursor is passed explicitly as a query parameter.
+    let url = '/admin/api/logs/stream?pwd=' + encodeURIComponent(password);
+    if (logsState.lastEventID) {
+      url += '&lastEventId=' + encodeURIComponent(logsState.lastEventID);
+    } else {
+      // First connect: only replay what the viewer can actually hold.
+      url += '&tail=' + logsState.maxLines;
+    }
+    const es = new EventSource(url);
     logsState.eventSource = es;
 
+    es.onopen = function () {
+      logsState.sseRetryDelay = 0;
+    };
+
     es.onmessage = function (e) {
+      if (e.lastEventId) logsState.lastEventID = e.lastEventId;
       if (logsState.paused) return;
       try {
         const data = JSON.parse(e.data);
@@ -110,11 +157,24 @@ function connectLogsSSE() {
     };
 
     es.onerror = function () {
-      setTimeout(() => { if (logsState.eventSource) connectLogsSSE(); }, 3000);
+      scheduleLogsSSERetry(generation);
     };
   } catch (e) {
     console.error('[Logs] SSE connect error:', e);
-    setTimeout(() => { if (logsState.eventSource) connectLogsSSE(); }, 5000);
+    scheduleLogsSSERetry(generation);
+  }
+}
+
+function disconnectLogsSSE() {
+  logsState.sseGeneration++;
+  logsState.sseRetryDelay = 0;
+  if (logsState.sseRetryTimer) {
+    clearTimeout(logsState.sseRetryTimer);
+    logsState.sseRetryTimer = null;
+  }
+  if (logsState.eventSource) {
+    logsState.eventSource.close();
+    logsState.eventSource = null;
   }
 }
 
@@ -151,13 +211,12 @@ function bindLogsEvents() {
 
 function initLogsPage() {
   bindLogsEvents();
-  fetchLogsSnapshot();
+  // No fetchLogsSnapshot() here: the SSE endpoint already replays the tail as
+  // its initial burst. Doing both fetched the same ring buffer twice (~480 KB)
+  // and could duplicate lines in the viewer.
   connectLogsSSE();
 }
 
 function destroyLogsPage() {
-  if (logsState.eventSource) {
-    logsState.eventSource.close();
-    logsState.eventSource = null;
-  }
+  disconnectLogsSSE();
 }

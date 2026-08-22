@@ -22,12 +22,24 @@ import (
 )
 
 // RingBuffer holds a fixed-capacity circular buffer of log entries.
+//
+// Every line also gets a monotonically increasing sequence number. The SSE log
+// viewer uses it as the event id so a reconnecting client can send
+// Last-Event-ID and receive only the lines it missed, instead of the whole
+// buffer being replayed on every reconnect.
 type RingBuffer struct {
 	mu    sync.Mutex
 	lines []string
 	cap   int
 	pos   int
 	full  bool
+	seq   uint64 // sequence number of the most recently written line
+}
+
+// SeqLine pairs a log line with its global sequence number.
+type SeqLine struct {
+	Seq  uint64
+	Line string
 }
 
 // NewRingBuffer creates a ring buffer with the given capacity.
@@ -37,20 +49,33 @@ func NewRingBuffer(capacity int) *RingBuffer {
 
 // Write appends data to the ring buffer as a log line.
 func (rb *RingBuffer) Write(p []byte) (int, error) {
+	rb.AppendLine(string(p))
+	return len(p), nil
+}
+
+// AppendLine stores a line and returns the sequence number assigned to it.
+// Callers that need the sequence must use this instead of Write followed by
+// Seq(), which would race with a concurrent writer.
+func (rb *RingBuffer) AppendLine(line string) uint64 {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
-	rb.lines[rb.pos] = string(p)
+	rb.lines[rb.pos] = line
 	rb.pos = (rb.pos + 1) % rb.cap
 	if rb.pos == 0 {
 		rb.full = true
 	}
-	return len(p), nil
+	rb.seq++
+	return rb.seq
 }
 
 // Lines returns all entries in chronological order.
 func (rb *RingBuffer) Lines() []string {
 	rb.mu.Lock()
 	defer rb.mu.Unlock()
+	return rb.linesLocked()
+}
+
+func (rb *RingBuffer) linesLocked() []string {
 	if !rb.full {
 		out := make([]string, rb.pos)
 		copy(out, rb.lines[:rb.pos])
@@ -59,6 +84,45 @@ func (rb *RingBuffer) Lines() []string {
 	out := make([]string, rb.cap)
 	copy(out, rb.lines[rb.pos:])
 	copy(out[rb.cap-rb.pos:], rb.lines[:rb.pos])
+	return out
+}
+
+// Seq returns the sequence number of the most recently written line.
+func (rb *RingBuffer) Seq() uint64 {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+	return rb.seq
+}
+
+// SeqLines returns buffered lines with their sequence numbers, in chronological
+// order. Only lines with Seq > after are returned, capped to the newest `limit`
+// entries (limit <= 0 means no cap).
+//
+// Because the buffer is finite, a client that was away long enough for its
+// cursor to fall off the back gets whatever is still retained — resume is
+// best-effort, not a durable log.
+func (rb *RingBuffer) SeqLines(after uint64, limit int) []SeqLine {
+	rb.mu.Lock()
+	defer rb.mu.Unlock()
+
+	lines := rb.linesLocked()
+	if len(lines) == 0 {
+		return nil
+	}
+	// The oldest retained line has sequence (seq - len + 1).
+	firstSeq := rb.seq - uint64(len(lines)) + 1
+
+	out := make([]SeqLine, 0, len(lines))
+	for i, line := range lines {
+		s := firstSeq + uint64(i)
+		if s <= after {
+			continue
+		}
+		out = append(out, SeqLine{Seq: s, Line: line})
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[len(out)-limit:]
+	}
 	return out
 }
 
@@ -86,9 +150,10 @@ var (
 	// logSubscribers receives every formatted log line as it is written, so the
 	// web log viewer can live-tail. Kept in the logger package (not proxy) to
 	// avoid an import cycle: proxy imports logger, so logger must not import proxy.
-	logSubMu      sync.RWMutex
-	logSubs       = map[int]func(string){}
-	logSubNextID  int
+	logSubMu     sync.RWMutex
+	logSubs      = map[int]func(string){}
+	logSubsSeq   = map[int]func(uint64, string){}
+	logSubNextID int
 )
 
 // Subscribe registers fn to receive every log line written from now on. fn is
@@ -109,20 +174,41 @@ func Subscribe(fn func(string)) func() {
 	}
 }
 
+// SubscribeSeq is like Subscribe but also delivers the line's global sequence
+// number, which SSE consumers emit as the event id for Last-Event-ID resume.
+// fn must be non-blocking (see Subscribe).
+func SubscribeSeq(fn func(seq uint64, line string)) func() {
+	logSubMu.Lock()
+	id := logSubNextID
+	logSubNextID++
+	logSubsSeq[id] = fn
+	logSubMu.Unlock()
+	return func() {
+		logSubMu.Lock()
+		delete(logSubsSeq, id)
+		logSubMu.Unlock()
+	}
+}
+
 // notifyLog fans a formatted line out to all subscribers. Non-blocking is the
 // subscriber's responsibility (see Subscribe).
-func notifyLog(line string) {
+func notifyLog(seq uint64, line string) {
 	logSubMu.RLock()
 	for _, fn := range logSubs {
 		fn(line)
+	}
+	for _, fn := range logSubsSeq {
+		fn(seq, line)
 	}
 	logSubMu.RUnlock()
 }
 
 // emit writes a formatted line to both the ring buffer and any live subscribers.
+// The sequence number comes back from AppendLine so the id handed to SSE clients
+// always matches the buffer slot, even under concurrent writers.
 func emit(line string) {
-	LogBuf.Write([]byte(line))
-	notifyLog(line)
+	seq := LogBuf.AppendLine(line)
+	notifyLog(seq, line)
 }
 
 // logLine formats a message the same way the standard loggers do: prefix + date + message.

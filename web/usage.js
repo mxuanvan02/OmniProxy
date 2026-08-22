@@ -15,6 +15,12 @@ let usageState = {
   chartData: [],
   eventSource: null,
   refreshTimer: null,
+  // SSE reconnect bookkeeping. `sseGeneration` is bumped on every explicit
+  // disconnect so a retry timer scheduled by a *previous* connection cannot
+  // resurrect the stream after the user left the page (zombie EventSource).
+  sseGeneration: 0,
+  sseRetryTimer: null,
+  sseRetryDelay: 0,
   detailsData: [],
   detailsPagination: { page: 1, pageSize: 20, totalItems: 0, totalPages: 0 },
   detailsLoading: false,
@@ -140,13 +146,49 @@ async function fetchUsageChart(period) {
 }
 
 // ─── SSE ─────────────────────────────────────────────────
+// Reconnect policy: exponential backoff (3s → 6s → 12s → … capped at 60s)
+// instead of a fixed 3s hammer. A flapping backend used to cost ~281 MB/h of
+// full-buffer replays; backoff plus Last-Event-ID resume keeps that near zero.
+const USAGE_SSE_RETRY_BASE_MS = 3000;
+const USAGE_SSE_RETRY_MAX_MS = 60000;
+
+function scheduleUsageSSERetry(generation) {
+  // Never stack timers, and never retry for a generation that was already
+  // torn down by disconnectUsageSSE().
+  if (generation !== usageState.sseGeneration) return;
+  if (usageState.sseRetryTimer) return;
+
+  const prev = usageState.sseRetryDelay || 0;
+  const delay = prev === 0
+    ? USAGE_SSE_RETRY_BASE_MS
+    : Math.min(prev * 2, USAGE_SSE_RETRY_MAX_MS);
+  usageState.sseRetryDelay = delay;
+
+  usageState.sseRetryTimer = setTimeout(() => {
+    usageState.sseRetryTimer = null;
+    // Re-check: the user may have left the page while this timer was pending.
+    if (generation !== usageState.sseGeneration) return;
+    connectUsageSSE();
+  }, delay);
+}
+
 function connectUsageSSE() {
   if (usageState.eventSource) {
     usageState.eventSource.close();
   }
+  if (usageState.sseRetryTimer) {
+    clearTimeout(usageState.sseRetryTimer);
+    usageState.sseRetryTimer = null;
+  }
+  const generation = usageState.sseGeneration;
   try {
     const es = new EventSource('/admin/api/usage/stream?pwd=' + encodeURIComponent(password));
     usageState.eventSource = es;
+
+    es.onopen = function () {
+      // Successful connect resets the backoff ladder.
+      usageState.sseRetryDelay = 0;
+    };
 
     es.onmessage = function (e) {
       try {
@@ -167,15 +209,23 @@ function connectUsageSSE() {
     };
 
     es.onerror = function () {
-      setTimeout(() => connectUsageSSE(), 3000);
+      scheduleUsageSSERetry(generation);
     };
   } catch (e) {
     console.error('[Usage] SSE connect error:', e);
-    setTimeout(() => connectUsageSSE(), 5000);
+    scheduleUsageSSERetry(generation);
   }
 }
 
 function disconnectUsageSSE() {
+  // Bump the generation first: any retry timer already scheduled by the
+  // connection we are about to close becomes a no-op.
+  usageState.sseGeneration++;
+  usageState.sseRetryDelay = 0;
+  if (usageState.sseRetryTimer) {
+    clearTimeout(usageState.sseRetryTimer);
+    usageState.sseRetryTimer = null;
+  }
   if (usageState.eventSource) {
     usageState.eventSource.close();
     usageState.eventSource = null;
@@ -187,6 +237,11 @@ function disconnectUsageSSE() {
 // Details tab is skipped (user is paginating / filtering).
 function refreshActiveTab() {
   if (!autoRefreshEnabled) return;
+  // Hidden tab: nothing is on screen, so skip the fetch entirely. /usage/stats
+  // is the heaviest payload in the dashboard (~205 KB), and at 5s that is
+  // ~140 MB/h burned on a tab nobody is looking at. onUsageVisible() below does
+  // a single catch-up fetch when the tab comes back.
+  if (document.hidden) return;
   const tab = usageState.activeTab;
   if (tab === 'overview') {
     fetchUsageStats(usageState.period);
@@ -1787,6 +1842,19 @@ function initUsagePage() {
   // Reset topology first-seen tracking
   topoFirstSeen = {};
 }
+
+// Catch-up on return to a visible tab: refreshActiveTab() skipped every tick
+// while hidden, so fetch once immediately instead of waiting out the interval.
+// The SSE stream is also re-opened, because the browser may have dropped it
+// while the tab was backgrounded.
+function onUsageVisible() {
+  if (document.hidden) return;
+  if (!usageState.refreshTimer) return; // page not active
+  if (!usageState.eventSource) connectUsageSSE();
+  refreshActiveTab();
+}
+
+document.addEventListener('visibilitychange', onUsageVisible);
 
 function destroyUsagePage() {
   disconnectUsageSSE();

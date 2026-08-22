@@ -11262,21 +11262,60 @@ func (h *Handler) apiLogsStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
+	// Resume cursor. Browsers send Last-Event-ID automatically on their own
+	// reconnect; a client that constructs a fresh EventSource has to pass
+	// ?lastEventId= explicitly because the header is not settable there.
+	var after uint64
+	resume := r.Header.Get("Last-Event-ID")
+	if resume == "" {
+		resume = r.URL.Query().Get("lastEventId")
+	}
+	if resume != "" {
+		if v, err := strconv.ParseUint(resume, 10, 64); err == nil {
+			after = v
+		}
+	}
+
+	// tail caps the initial replay. Without it every reconnect re-sent the whole
+	// 2048-line buffer (~480 KB), most of which the viewer immediately discarded
+	// because it only retains a few hundred lines.
+	tail := 0
+	if t := r.URL.Query().Get("tail"); t != "" {
+		if v, err := strconv.Atoi(t); err == nil && v > 0 {
+			tail = v
+		}
+	}
+	if after == 0 && tail == 0 {
+		tail = 500 // matches the viewer's default retention
+	}
+
 	// Buffered so a slow client never blocks the logging goroutine.
-	lineCh := make(chan string, 256)
-	unsub := logger.Subscribe(func(line string) {
+	type seqLine struct {
+		seq  uint64
+		line string
+	}
+	lineCh := make(chan seqLine, 256)
+	// Subscribe BEFORE taking the snapshot so no line can slip through the gap
+	// between the two; overlap is removed by the seq > lastSent check below.
+	unsub := logger.SubscribeSeq(func(seq uint64, line string) {
 		select {
-		case lineCh <- line:
+		case lineCh <- seqLine{seq: seq, line: line}:
 		default: // drop for this client when its buffer is full
 		}
 	})
 	defer unsub()
 
-	// Send the existing buffered lines as the initial snapshot.
-	for _, line := range logger.LogBuf.Lines() {
+	writeLine := func(seq uint64, line string) {
 		if data, err := json.Marshal(map[string]string{"line": line}); err == nil {
-			fmt.Fprintf(w, "data: %s\n\n", data)
+			fmt.Fprintf(w, "id: %d\ndata: %s\n\n", seq, data)
 		}
+	}
+
+	// Initial replay: only what the client is missing.
+	var lastSent uint64
+	for _, sl := range logger.LogBuf.SeqLines(after, tail) {
+		writeLine(sl.Seq, sl.Line)
+		lastSent = sl.Seq
 	}
 	flusher.Flush()
 
@@ -11291,11 +11330,13 @@ func (h *Handler) apiLogsStream(w http.ResponseWriter, r *http.Request) {
 		case <-keepalive.C:
 			fmt.Fprintf(w, ": ping\n\n")
 			flusher.Flush()
-		case line := <-lineCh:
-			if data, err := json.Marshal(map[string]string{"line": line}); err == nil {
-				fmt.Fprintf(w, "data: %s\n\n", data)
-				flusher.Flush()
+		case sl := <-lineCh:
+			if sl.seq <= lastSent {
+				continue // already delivered in the snapshot
 			}
+			writeLine(sl.seq, sl.line)
+			lastSent = sl.seq
+			flusher.Flush()
 		}
 	}
 }
