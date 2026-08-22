@@ -165,12 +165,42 @@ let testModalMode = 'chat';
     return method;
   }
 
+  // Capability label lookup. Rendering reads this table instead of a hard-coded
+  // search/image pair so a capability discovered from a provider catalog shows a
+  // real label the moment the backend reports it.
+  const CAPABILITY_LABEL_KEYS = {
+    'chat': 'category.chat',
+    'search': 'category.search',
+    'image': 'category.image',
+    'embedding': 'category.embedding',
+    'audio-stt': 'category.audioStt',
+    'audio-tts': 'category.audioTts',
+    'moderation': 'category.moderation',
+    'video': 'category.video'
+  };
+
+  function capabilityLabel(capability) {
+    const key = CAPABILITY_LABEL_KEYS[String(capability || '').toLowerCase()];
+    // Unknown capabilities still render (raw id) rather than disappearing, so a
+    // new backend capability is visible before the locale catches up.
+    return key ? t(key) : String(capability || '');
+  }
+
+  // accountCapabilities merges three sources: explicitly configured
+  // capabilities, the legacy providerKind field, and capabilities discovered
+  // from the provider's own /v1/models catalog. Configured values win on order;
+  // discovered values are appended so they never mask an explicit setting.
   function accountCapabilities(a) {
     const capabilities = Array.isArray(a && a.capabilities) ? a.capabilities : [];
+    const discovered = Array.isArray(a && a.discoveredCapabilities) ? a.discoveredCapabilities : [];
     const kind = String((a && a.providerKind) || '').toLowerCase();
     const result = capabilities.map(value => String(value).toLowerCase().trim()).filter(Boolean);
     if (kind === 'search' && !result.includes('search')) result.push('search');
     if (kind === 'image' && !result.includes('image')) result.push('image');
+    discovered.forEach(value => {
+      const normalized = String(value).toLowerCase().trim();
+      if (normalized && !result.includes(normalized)) result.push(normalized);
+    });
     return result;
   }
   function hasCapability(a, capability) {
@@ -421,7 +451,7 @@ let testModalMode = 'chat';
         : '';
       const serviceBadges = isService ?
         '<span class="badge badge-info">' + escapeHtml(a.provider || a.providerKind || t('accounts.serviceProvider')) + '</span>' +
-        accountCapabilities(a).map(cap => '<span class="badge badge-success">' + escapeHtml(cap === 'search' ? t('category.search') : t('category.image')) + '</span>').join('') : '';
+        accountCapabilities(a).map(cap => '<span class="badge badge-success">' + escapeHtml(capabilityLabel(cap)) + '</span>').join('') : '';
 
       return '' +
         '<div class="account-card' + (isSelected ? ' selected' : '') + (reauthRequired ? ' reauth-required' : '') + '" data-id="' + idAttr + '">' +

@@ -58,6 +58,17 @@ type Account struct {
 	SourceID     string   `json:"sourceId,omitempty"`
 	ProviderKind string   `json:"providerKind,omitempty"` // chat, search, image, unsupported
 	Capabilities []string `json:"capabilities,omitempty"` // explicit service capabilities
+	// DiscoveredCapabilities is derived from the provider's own /v1/models
+	// catalog instead of a hard-coded provider name table. It is kept separate
+	// from Capabilities on purpose: Capabilities participates in chat/service
+	// pool partitioning, so writing discovered values into it would silently
+	// move an OpenAI-compatible chat account into the service pool. Endpoint
+	// routing consults both fields; pool partitioning still consults only
+	// Capabilities.
+	DiscoveredCapabilities []string `json:"discoveredCapabilities,omitempty"`
+	// CapabilitiesDiscoveredAt records when the catalog classification last
+	// ran (Unix seconds). Zero means never discovered.
+	CapabilitiesDiscoveredAt int64 `json:"capabilitiesDiscoveredAt,omitempty"`
 	Region       string   `json:"region"`                 // AWS region for OIDC endpoints
 	StartUrl     string   `json:"startUrl,omitempty"`     // AWS SSO start URL
 	ExpiresAt    int64    `json:"expiresAt,omitempty"`    // Token expiration timestamp (Unix seconds)

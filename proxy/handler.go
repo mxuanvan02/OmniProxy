@@ -1442,6 +1442,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.handleImageGeneration(w, ar)
+	// Capability passthrough endpoints (embeddings, audio, image edits,
+	// moderations). Routing is driven by the account capability table rather
+	// than a per-endpoint provider switch, so a provider that starts serving a
+	// new capability becomes reachable after a catalog refresh with no code
+	// change.
+	case capabilityRouteMatches(path):
+		route, _ := lookupCapabilityEndpoint(path)
+		ar := h.authenticateForOpenAI(w, r)
+		if ar == nil {
+			return
+		}
+		h.handleCapabilityPassthrough(w, ar, route)
 	case path == "/v1/models" || path == "/models":
 		h.handleModels(w, r)
 	case strings.HasPrefix(path, "/v1/models/") || strings.HasPrefix(path, "/models/"):
@@ -1966,6 +1978,17 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 		modelIDs := make([]string, 0, len(models))
 		for _, m := range models {
 			modelIDs = append(modelIDs, m.ModelId)
+		}
+		// Classify what this provider can actually serve from its own catalog
+		// instead of inferring capabilities from the provider name. Persisted
+		// only when the set changed, so a periodic refresh does not rewrite
+		// config on every cycle.
+		if applyDiscoveredCapabilities(account, models) {
+			if err := config.UpdateAccountPreservingCredentials(account.ID, *account); err != nil {
+				logger.Warnf("[Capabilities] Failed to persist discovered capabilities for %s: %v", account.Email, err)
+			} else {
+				logger.Infof("[Capabilities] %s -> %s", account.Email, strings.Join(account.DiscoveredCapabilities, ", "))
+			}
 		}
 		h.pool.SetModelList(account.ID, modelIDs)
 		h.modelsCacheMu.Lock()
@@ -5158,6 +5181,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetSettings(w, r)
 	case path == "/settings" && r.Method == "POST":
 		h.apiUpdateSettings(w, r)
+	case path == "/capabilities" && r.Method == "GET":
+		h.apiGetCapabilities(w, r)
 	case path == "/stats" && r.Method == "GET":
 		h.apiGetStats(w, r)
 	case path == "/stats/reset" && r.Method == "POST":
@@ -6809,6 +6834,8 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"sourceId":                  a.SourceID,
 			"providerKind":              a.ProviderKind,
 			"capabilities":              a.Capabilities,
+			"discoveredCapabilities":    a.DiscoveredCapabilities,
+			"capabilitiesDiscoveredAt":  a.CapabilitiesDiscoveredAt,
 			"region":                    a.Region,
 			"enabled":                   a.Enabled,
 			"banStatus":                 a.BanStatus,
