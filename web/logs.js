@@ -47,6 +47,9 @@ function logLineMatchesFilter(entry) {
   return true;
 }
 
+const LOGS_RENDER_DEBOUNCE_MS = 150;
+let logsRenderTimer = null;
+
 function renderLogs() {
   const viewer = document.getElementById('logsViewer');
   if (!viewer) return;
@@ -74,15 +77,47 @@ function renderLogs() {
   }
 }
 
-// Throttled render: coalesce rapid SSE bursts into a single render frame so
-// the page doesn't freeze when hundreds of log lines arrive in quick succession.
-function scheduleRender() {
+// Throttled render: coalesce rapid render requests into a single repaint so the
+// page doesn't freeze when hundreds of log lines arrive in quick succession.
+//
+// Two coalescing modes share this one entry point on purpose — an earlier pass
+// added a second timer-based scheduler alongside this rAF one, which meant two
+// independent pending-render flags could both fire for the same burst.
+//
+//   scheduleRender()      → next animation frame. For SSE line arrival, where
+//                           the goal is "don't render 200x per second" but the
+//                           newest line should still appear immediately.
+//   scheduleRender(150)    → debounced. For the search box, where each keystroke
+//                           invalidates the previous filter result, so rendering
+//                           intermediate states is wasted work.
+function scheduleRender(delayMs) {
+  if (delayMs > 0) {
+    // Debounce: restart the clock on every call so a burst of keystrokes
+    // collapses into one repaint after the user pauses.
+    if (logsRenderTimer) clearTimeout(logsRenderTimer);
+    logsRenderTimer = setTimeout(() => {
+      logsRenderTimer = null;
+      renderLogs();
+    }, delayMs);
+    return;
+  }
   if (logsState.renderPending) return;
   logsState.renderPending = true;
   requestAnimationFrame(() => {
     logsState.renderPending = false;
     renderLogs();
   });
+}
+
+// cancelScheduledRender drops any pending repaint. Called on teardown so a
+// queued timer cannot fire against a viewer the user already navigated away
+// from — the same class of bug as the SSE retry timers fixed earlier.
+function cancelScheduledRender() {
+  if (logsRenderTimer) {
+    clearTimeout(logsRenderTimer);
+    logsRenderTimer = null;
+  }
+  logsState.renderPending = false;
 }
 
 async function fetchLogsSnapshot() {
@@ -191,7 +226,11 @@ function bindLogsEvents() {
   });
   if (searchInput) searchInput.addEventListener('input', function () {
     logsState.search = this.value.trim().toLowerCase();
-    renderLogs();
+    // Debounced: renderLogs() rebuilds up to maxLines (500) DOM nodes, so
+    // repainting on every keystroke makes typing feel sticky. 150ms is below
+    // the threshold where the delay is noticeable but collapses a burst of
+    // keystrokes into a single repaint.
+    scheduleRender(LOGS_RENDER_DEBOUNCE_MS);
   });
   if (pauseBtn) pauseBtn.addEventListener('click', function () {
     logsState.paused = !logsState.paused;
@@ -219,4 +258,8 @@ function initLogsPage() {
 
 function destroyLogsPage() {
   disconnectLogsSSE();
+  // Drop any pending repaint. Without this a debounced render queued by the
+  // search box can fire after the user has switched tabs, rebuilding a viewer
+  // that is no longer on screen.
+  cancelScheduledRender();
 }

@@ -16,6 +16,10 @@ let quotaState = {
   sortMode: 'expiring',  // 'expiring' | 'remaining-asc' | 'remaining-desc'
   page: 1,
   pageSize: 20,
+  // Serialized form of the last /quota/overview + /cache/stats pair. Used to
+  // skip renderQuotaPage() when a 5s poll returns identical data, which would
+  // otherwise rebuild the table via innerHTML and reset scroll position.
+  lastSignature: null,
 };
 
 // ─── Helpers ─────────────────────────────────────────────
@@ -102,6 +106,13 @@ async function loadQuotaData() {
     ]);
     quotaState.data = quotaRes;
     quotaState.cacheData = cacheRes;
+    // Skip the repaint when nothing changed. renderQuotaPage() rebuilds the
+    // whole table via innerHTML, so a no-op tick would otherwise reset scroll
+    // position and close any open custom-select on a 5s cadence.
+    const signature = JSON.stringify(quotaRes) + '|' + JSON.stringify(cacheRes);
+    const changed = signature !== quotaState.lastSignature;
+    quotaState.lastSignature = signature;
+    if (!changed && !isFirstLoad) return;
     renderQuotaPage();
   } catch (e) {
     console.error('[Quota] load failed:', e);

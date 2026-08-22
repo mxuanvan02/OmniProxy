@@ -63,11 +63,34 @@ let testModalMode = 'chat';
     }
     return out;
   }
-  function onFilterChange() {
+  // onFilterChange is wired to both the keyword input (one event per keystroke)
+  // and the status/category selects (one event per choice). renderAccounts()
+  // rebuilds the entire grouped list via innerHTML, so repainting per keystroke
+  // makes typing in the filter box feel sticky once the pool grows past a few
+  // dozen accounts.
+  //
+  // The select paths render immediately — a single discrete choice should not
+  // feel delayed. Only the free-text path is debounced.
+  const FILTER_DEBOUNCE_MS = 150;
+  let filterDebounceTimer = null;
+
+  function onFilterChange(opts) {
     filterKeyword = $('filterSearch').value;
     filterStatus = $('filterStatusSelect').value;
     const catSel = $('filterCategorySelect');
     if (catSel) filterCategory = catSel.value;
+    if (opts && opts.debounce) {
+      if (filterDebounceTimer) clearTimeout(filterDebounceTimer);
+      filterDebounceTimer = setTimeout(() => {
+        filterDebounceTimer = null;
+        renderAccounts();
+      }, FILTER_DEBOUNCE_MS);
+      return;
+    }
+    if (filterDebounceTimer) {
+      clearTimeout(filterDebounceTimer);
+      filterDebounceTimer = null;
+    }
     renderAccounts();
   }
   function toggleSelectAll(checked) {

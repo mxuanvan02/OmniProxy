@@ -122,12 +122,33 @@ function updateTimeAgoEls() {
 }
 
 // ─── API ─────────────────────────────────────────────────
+// lastStatsSignature holds the raw JSON text of the previous /usage/stats
+// response. renderUsagePage() rebuilds large subtrees via innerHTML, which on
+// every 5s tick discards focus, text selection and scroll position inside the
+// tables. When the proxy is idle the payload is byte-identical, so comparing
+// the serialized body lets an unchanged poll skip the repaint entirely.
+//
+// Note this is separate from the server-side ETag: a 304 still resolves to the
+// cached body here, so the client comparison is what actually prevents the DOM
+// churn. The ETag saves bandwidth; this saves the repaint.
+let lastStatsSignature = null;
+
+// invalidateStatsSignature forces the next fetch to repaint even if the payload
+// is unchanged. Required whenever local view state (period, tab, filters)
+// changes, because the same bytes must then render differently.
+function invalidateStatsSignature() {
+  lastStatsSignature = null;
+}
+
 async function fetchUsageStats(period) {
   try {
     const res = await api('/usage/stats?period=' + (period || usageState.period));
     if (res.ok) {
-      usageState.stats = await res.json();
-      console.log('[Usage] stats loaded, totalRequests:', usageState.stats.totalRequests);
+      const body = await res.text();
+      const changed = body !== lastStatsSignature;
+      lastStatsSignature = body;
+      usageState.stats = JSON.parse(body);
+      if (!changed) return;
       renderUsagePage();
     } else {
       console.error('[Usage] fetchStats failed:', res.status, res.statusText);
@@ -1206,6 +1227,10 @@ function renderPeriodSelector() {
       usageState.period = period;
       container.querySelectorAll('.usage-period-btn').forEach(b => b.classList.remove('active'));
       this.classList.add('active');
+      // A different period is a different query, but the response can still be
+      // byte-identical to the previous one (e.g. an idle proxy where 24h and 7d
+      // both report zeros). Drop the signature so the switch always repaints.
+      invalidateStatsSignature();
       fetchUsageStats(period);
       fetchUsageChart(period);
     });
@@ -1232,6 +1257,9 @@ function renderUsageTabs() {
       usageState.activeTab = tab;
       container.querySelectorAll('.usage-tab-btn').forEach(b => b.classList.remove('active'));
       this.classList.add('active');
+      // Same payload, different view: the next fetch must repaint even though
+      // the bytes have not changed.
+      invalidateStatsSignature();
       renderActiveTab();
     });
   });

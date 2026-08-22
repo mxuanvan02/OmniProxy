@@ -5059,7 +5059,9 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case path == "/accounts" && r.Method == "GET":
-		h.apiGetAccounts(w, r)
+		// Polled every ~5s by the dashboard (~76 KiB). Revalidate so unchanged
+		// pool state costs a header exchange instead of a full payload.
+		withETag(w, r, h.apiGetAccounts)
 	case path == "/accounts" && r.Method == "POST":
 		h.apiAddAccount(w, r)
 	case path == "/accounts/batch" && r.Method == "POST":
@@ -5284,7 +5286,9 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiResetCliToolSettings(bw, r, toolID)
 
 	case path == "/usage/stats" && r.Method == "GET":
-		h.apiGetUsageStats(w, r)
+		// Largest polled payload (~205 KiB every 5s). Revalidation collapses
+		// idle periods to a 304 header exchange.
+		withETag(w, r, h.apiGetUsageStats)
 	case path == "/usage/chart" && r.Method == "GET":
 		h.apiGetUsageChart(w, r)
 	case path == "/usage/stream" && r.Method == "GET":
@@ -5296,7 +5300,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	case path == "/pricing" && r.Method == "GET":
 		h.apiGetPricing(w, r)
 	case path == "/quota/overview" && r.Method == "GET":
-		h.apiGetQuotaOverview(w, r)
+		// Polled every ~5s by the quota tab (~23 KiB).
+		withETag(w, r, h.apiGetQuotaOverview)
 	case path == "/cache/stats" && r.Method == "GET":
 		h.apiGetCacheStats(w, r)
 	case path == "/compression/stats" && r.Method == "GET":

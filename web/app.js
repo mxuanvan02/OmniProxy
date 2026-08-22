@@ -961,8 +961,10 @@ let customSelectRefreshQueued = false;
       else batchAction(a);
     }));
 
-    $('filterSearch').addEventListener('input', onFilterChange);
-    $('filterStatusSelect').addEventListener('change', onFilterChange);
+    // Free-text input is debounced (one event per keystroke, full list rebuild);
+    // the select is a discrete choice and renders immediately.
+    $('filterSearch').addEventListener('input', () => onFilterChange({ debounce: true }));
+    $('filterStatusSelect').addEventListener('change', () => onFilterChange());
 
     $('accountsList').addEventListener('click', e => {
       const cb = e.target.closest('.account-checkbox');
