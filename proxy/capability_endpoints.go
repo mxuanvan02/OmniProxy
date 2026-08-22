@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"omniproxy/config"
 	"omniproxy/logger"
+	"sort"
 	"strings"
 )
 
@@ -340,24 +341,42 @@ func (h *Handler) apiGetCapabilities(w http.ResponseWriter, r *http.Request) {
 	accounts := config.GetAccounts()
 
 	type accountCapabilityView struct {
-		ID           string   `json:"id"`
-		Email        string   `json:"email,omitempty"`
-		Nickname     string   `json:"nickname,omitempty"`
-		Provider     string   `json:"provider,omitempty"`
-		Enabled      bool     `json:"enabled"`
-		Configured   []string `json:"configured"`
-		Discovered   []string `json:"discovered"`
-		Effective    []string `json:"effective"`
-		DiscoveredAt int64    `json:"discoveredAt,omitempty"`
+		ID           string                                  `json:"id"`
+		Email        string                                  `json:"email,omitempty"`
+		Nickname     string                                  `json:"nickname,omitempty"`
+		Provider     string                                  `json:"provider,omitempty"`
+		Enabled      bool                                    `json:"enabled"`
+		Configured   []string                                `json:"configured"`
+		Discovered   []string                                `json:"discovered"`
+		Effective    []string                                `json:"effective"`
+		DiscoveredAt int64                                   `json:"discoveredAt,omitempty"`
+		Probes       map[string]config.CapabilityProbeResult `json:"probes,omitempty"`
+		Verified     []string                                `json:"verified,omitempty"`
 	}
 
 	views := make([]accountCapabilityView, 0, len(accounts))
 	counts := make(map[string]int)
 	enabledCounts := make(map[string]int)
+	verifiedCounts := make(map[string]int)
+	probeFailureCounts := make(map[string]int)
 
 	for i := range accounts {
 		account := accounts[i]
 		effective := effectiveAccountCapabilities(&account)
+		verified := make([]string, 0, len(account.CapabilityProbes))
+		for capability, probe := range account.CapabilityProbes {
+			if probe.OK {
+				verified = append(verified, capability)
+				if account.Enabled {
+					verifiedCounts[capability]++
+				}
+			} else if account.Enabled {
+				probeFailureCounts[capability]++
+			}
+		}
+		sort.SliceStable(verified, func(a, b int) bool {
+			return capabilityRank(verified[a]) < capabilityRank(verified[b])
+		})
 		views = append(views, accountCapabilityView{
 			ID:           account.ID,
 			Email:        account.Email,
@@ -368,6 +387,8 @@ func (h *Handler) apiGetCapabilities(w http.ResponseWriter, r *http.Request) {
 			Discovered:   account.DiscoveredCapabilities,
 			Effective:    effective,
 			DiscoveredAt: account.CapabilitiesDiscoveredAt,
+			Probes:       account.CapabilityProbes,
+			Verified:     verified,
 		})
 		for _, capability := range effective {
 			counts[capability]++
@@ -382,7 +403,19 @@ func (h *Handler) apiGetCapabilities(w http.ResponseWriter, r *http.Request) {
 		Accounts       int    `json:"accounts"`
 		EnabledAccount int    `json:"enabledAccounts"`
 		Endpoint       string `json:"endpoint,omitempty"`
-		Available      bool   `json:"available"`
+		// Available means "an enabled account advertises this capability". It
+		// is derived from the provider catalog, which is aspirational: a model
+		// can be listed with no channel behind it, and the endpoint path may
+		// return 404. Do not read it as "callable".
+		Available bool `json:"available"`
+		// VerifiedAccounts counts enabled accounts where a probe actually got a
+		// 2xx from the endpoint. This is the claim that means "callable".
+		VerifiedAccounts int `json:"verifiedAccounts"`
+		// ProbeFailures counts enabled accounts where a probe ran and failed,
+		// so an operator can tell "never probed" from "probed and broken".
+		ProbeFailures int `json:"probeFailures"`
+		// Verified is true only when at least one enabled account passed a probe.
+		Verified bool `json:"verified"`
 	}
 
 	endpointFor := make(map[string]string, len(capabilityEndpoints))
@@ -398,11 +431,14 @@ func (h *Handler) apiGetCapabilities(w http.ResponseWriter, r *http.Request) {
 	summary := make([]capabilitySummary, 0, len(discoverableCapabilities))
 	for _, capability := range discoverableCapabilities {
 		summary = append(summary, capabilitySummary{
-			Capability:     capability,
-			Accounts:       counts[capability],
-			EnabledAccount: enabledCounts[capability],
-			Endpoint:       endpointFor[capability],
-			Available:      enabledCounts[capability] > 0,
+			Capability:       capability,
+			Accounts:         counts[capability],
+			EnabledAccount:   enabledCounts[capability],
+			Endpoint:         endpointFor[capability],
+			Available:        enabledCounts[capability] > 0,
+			VerifiedAccounts: verifiedCounts[capability],
+			ProbeFailures:    probeFailureCounts[capability],
+			Verified:         verifiedCounts[capability] > 0,
 		})
 	}
 

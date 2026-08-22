@@ -206,6 +206,46 @@ let testModalMode = 'chat';
   function hasCapability(a, capability) {
     return accountCapabilities(a).includes(capability);
   }
+
+  // capabilityProbeState answers a question the catalog cannot: did the endpoint
+  // actually answer? A provider can advertise an embedding model with no channel
+  // behind it (503) or not implement the path at all (404), so a badge derived
+  // only from /v1/models overstates what is callable.
+  //   'verified' - a probe got 2xx
+  //   'failed'   - a probe ran and did not get 2xx
+  //   ''         - never probed; the badge stays neutral rather than claiming
+  //                either way
+  function capabilityProbeState(a, capability) {
+    const probes = (a && a.capabilityProbes) || null;
+    if (!probes || typeof probes !== 'object') return '';
+    const probe = probes[String(capability || '').toLowerCase()];
+    if (!probe || typeof probe !== 'object') return '';
+    return probe.ok ? 'verified' : 'failed';
+  }
+
+  // capabilityBadge renders one capability with its verification state encoded
+  // in colour, and the probe outcome in the tooltip so an operator can tell
+  // "never probed" from "probed and broken" without opening the console.
+  function capabilityBadge(a, capability) {
+    const state = capabilityProbeState(a, capability);
+    const probe = ((a && a.capabilityProbes) || {})[String(capability || '').toLowerCase()] || {};
+    let cls = 'badge-info';
+    let mark = '';
+    let title = t('capability.notProbed');
+    if (state === 'verified') {
+      cls = 'badge-success';
+      mark = ' \u2713';
+      title = t('capability.verified') + (probe.latencyMs ? ' (' + probe.latencyMs + 'ms)' : '');
+    } else if (state === 'failed') {
+      cls = 'badge-danger';
+      mark = ' \u2717';
+      title = t('capability.probeFailed') +
+        (probe.status ? ' HTTP ' + probe.status : '') +
+        (probe.detail ? ' \u2014 ' + String(probe.detail).slice(0, 160) : '');
+    }
+    return '<span class="badge ' + cls + '" title="' + escapeHtml(title) + '">' +
+      escapeHtml(capabilityLabel(capability)) + mark + '</span>';
+  }
   function isServiceAccountUI(a) {
     return hasCapability(a, 'search') || hasCapability(a, 'image');
   }
@@ -451,7 +491,7 @@ let testModalMode = 'chat';
         : '';
       const serviceBadges = isService ?
         '<span class="badge badge-info">' + escapeHtml(a.provider || a.providerKind || t('accounts.serviceProvider')) + '</span>' +
-        accountCapabilities(a).map(cap => '<span class="badge badge-success">' + escapeHtml(capabilityLabel(cap)) + '</span>').join('') : '';
+        accountCapabilities(a).map(cap => capabilityBadge(a, cap)).join('') : '';
 
       return '' +
         '<div class="account-card' + (isSelected ? ' selected' : '') + (reauthRequired ? ' reauth-required' : '') + '" data-id="' + idAttr + '">' +
@@ -479,6 +519,10 @@ let testModalMode = 'chat';
         (isCodex ? '<button class="btn btn-icon btn-sm btn-ghost" data-action="changeCodexPassword" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.changeCodexPassword')) + '">' + externalLinkSvg + '</button>' : '') +
         '<button class="btn btn-icon btn-sm btn-ghost" data-action="detail" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.detail')) + '">' + userSvg + '</button>' +
         '<button class="btn btn-icon btn-sm btn-ghost" data-action="copyJSON" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.copyJSON')) + '">' + copySvg + '</button>' +
+        // Probing only makes sense for OpenAI-compatible providers: Kiro/Codex
+        // speak proprietary protocols, so an /v1/embeddings shaped request would
+        // fail for reasons unrelated to capability.
+        (isExternal ? '<button class="btn btn-xs btn-outline" data-action="probeCapabilities" data-id="' + idAttr + '" title="' + escapeAttr(t('capability.notProbed')) + '">' + escapeHtml(t('accounts.probeCapabilities')) + '</button>' : '') +
         (reauthRequired ? '<button class="btn btn-sm btn-danger" data-action="loginAgain" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.reauthRequiredHint')) + '">' + escapeHtml(t('accounts.loginAgain')) + '</button>' : '') +
         (banned ? '' :
           '<button class="btn btn-sm ' + (a.enabled ? 'btn-outline' : 'btn-primary') + '" data-action="toggle" data-id="' + idAttr + '" data-enabled="' + (!a.enabled) + '">' +
@@ -647,6 +691,44 @@ let testModalMode = 'chat';
     await api('/accounts/' + id, { method: 'PUT', body: JSON.stringify({ enabled }) });
     loadAccounts();
   }
+  // probeAccountCapabilities calls each advertised capability endpoint to find
+  // out whether it actually answers. The catalog cannot tell us this: a model
+  // may be listed with no channel behind it (503), or the endpoint path may not
+  // exist at all (404). Only the cheap endpoints are probed by default so a
+  // diagnostic click never bills meaningful usage.
+  async function probeAccountCapabilities(id, btn) {
+    const ok = await confirmAction(t('accounts.confirmProbeCapabilities'), {
+      title: t('accounts.probeCapabilities'),
+      confirmText: t('common.confirm'),
+      variant: 'primary'
+    });
+    if (!ok) return;
+    const card = btn ? btn.closest('.account-card') : null;
+    if (card) card.classList.add('loading');
+    const dismiss = toast(t('accounts.probeCapabilities') + '…', 'info', { duration: 0 });
+    try {
+      const res = await api('/accounts/' + id + '/probe-capabilities', { method: 'POST' });
+      const d = await res.json();
+      dismiss();
+      if (d.success) {
+        const verified = Array.isArray(d.verified) ? d.verified : [];
+        const failed = Array.isArray(d.failed) ? d.failed : [];
+        const parts = [];
+        if (verified.length) parts.push('✓ ' + verified.join(', '));
+        if (failed.length) parts.push('✗ ' + failed.join(', '));
+        toast(t('accounts.probeDone') + (parts.length ? ': ' + parts.join(' · ') : ''),
+          failed.length && !verified.length ? 'warning' : 'success');
+        loadAccounts();
+      } else {
+        toastError(d.error || t('common.failed'));
+      }
+    } catch (e) {
+      dismiss();
+      toastError(t('common.failed'));
+    }
+    if (card) card.classList.remove('loading');
+  }
+
   // resetAccountQuota clears the Codex primary/secondary usage counters so
   // the pool treats the account as fully available again. Only meaningful
   // for Codex accounts whose codexPrimaryUsedPercent has hit 100.

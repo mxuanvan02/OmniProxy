@@ -37,6 +37,29 @@ func GenerateMachineId() string {
 		bytes[0:4], bytes[4:6], bytes[6:8], bytes[8:10], bytes[10:16])
 }
 
+// CapabilityProbeResult records what happened when a capability endpoint was
+// actually called against a provider. It exists because a provider catalog is
+// aspirational: /v1/models may advertise an embedding model that has no channel
+// behind it, and the endpoint path itself may return 404. "Advertised" and
+// "verified" are therefore different claims and are stored separately.
+type CapabilityProbeResult struct {
+	// OK is true only when the upstream returned a 2xx response.
+	OK bool `json:"ok"`
+	// Status is the upstream HTTP status. Zero means the request never
+	// produced a response (network/transport failure).
+	Status int `json:"status,omitempty"`
+	// Model is the catalog model ID used for the probe, when the endpoint
+	// requires one.
+	Model string `json:"model,omitempty"`
+	// Detail is a truncated upstream error message, kept for diagnosis. It is
+	// never populated with credentials.
+	Detail string `json:"detail,omitempty"`
+	// CheckedAt is the Unix second timestamp of the probe.
+	CheckedAt int64 `json:"checkedAt,omitempty"`
+	// LatencyMs is the observed round-trip time.
+	LatencyMs int64 `json:"latencyMs,omitempty"`
+}
+
 // Account represents a Kiro API account with authentication credentials and usage statistics.
 type Account struct {
 	// Basic identification
@@ -69,6 +92,12 @@ type Account struct {
 	// CapabilitiesDiscoveredAt records when the catalog classification last
 	// ran (Unix seconds). Zero means never discovered.
 	CapabilitiesDiscoveredAt int64 `json:"capabilitiesDiscoveredAt,omitempty"`
+	// CapabilityProbes records the outcome of actually calling each capability
+	// endpoint, keyed by capability ID. A provider catalog is an aspirational
+	// list: a model can be listed with no channel behind it, and an endpoint
+	// path may not be implemented at all. Discovery alone therefore cannot tell
+	// "advertised" from "works", so probe results are stored separately.
+	CapabilityProbes map[string]CapabilityProbeResult `json:"capabilityProbes,omitempty"`
 	Region       string   `json:"region"`                 // AWS region for OIDC endpoints
 	StartUrl     string   `json:"startUrl,omitempty"`     // AWS SSO start URL
 	ExpiresAt    int64    `json:"expiresAt,omitempty"`    // Token expiration timestamp (Unix seconds)

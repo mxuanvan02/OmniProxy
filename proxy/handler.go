@@ -5095,6 +5095,9 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/image-models") && r.Method == "GET":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/image-models")
 		h.apiGetAccountImageModels(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/probe-capabilities") && r.Method == "POST":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/probe-capabilities")
+		h.apiProbeAccountCapabilities(w, r, id)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/credits") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/credits")
 		h.apiRefreshAccountCredits(w, r, id)
@@ -6836,6 +6839,7 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"capabilities":              a.Capabilities,
 			"discoveredCapabilities":    a.DiscoveredCapabilities,
 			"capabilitiesDiscoveredAt":  a.CapabilitiesDiscoveredAt,
+			"capabilityProbes":          a.CapabilityProbes,
 			"region":                    a.Region,
 			"enabled":                   a.Enabled,
 			"banStatus":                 a.BanStatus,
