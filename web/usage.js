@@ -29,6 +29,11 @@ let usageState = {
   selectedDetail: null,
   isDrawerOpen: false,
   activeTab: 'overview',
+  // Details receives completed-request deltas from the shared Usage SSE stream.
+  detailsLastEventId: 0,
+  detailsPendingEvents: [],
+  detailsSeenKeys: new Set(),
+  detailsSeenOrder: [],
 };
 
 // Cache sub-tab state
@@ -214,6 +219,9 @@ function connectUsageSSE() {
     es.onmessage = function (e) {
       try {
         const data = JSON.parse(e.data);
+        if (data.requestCompleted) {
+          applyDetailsRequestCompleted(data.requestCompleted, data.eventId);
+        }
         if (data.recentRequests || data.activeRequests) {
           if (usageState.stats) {
             if (data.recentRequests) usageState.stats.recentRequests = data.recentRequests;
@@ -1300,7 +1308,10 @@ function renderActiveTab() {
     fetchPoolStrategy();
   } else {
     detailsEl.classList.remove('hidden');
-    disconnectUsageSSE();
+    // Details uses the same one-way Usage SSE as Overview. Completed request
+    // events are applied as deltas; the paginated request is only the initial
+    // snapshot or an explicit filter/page refresh.
+    connectUsageSSE();
     fetchRequestDetails();
   }
 }
@@ -1576,6 +1587,10 @@ async function fetchRequestDetails() {
     if (res.ok) {
       const data = await res.json();
       usageState.detailsData = data.details || [];
+      // Mark snapshot rows before flushing events that arrived while this
+      // request was in flight. This prevents the same record from appearing
+      // twice when it is present in both the snapshot and the SSE queue.
+      usageState.detailsData.forEach(rememberDetailsKey);
       usageState.detailsPagination = { ...usageState.detailsPagination, ...data.pagination };
     }
 
@@ -1589,6 +1604,7 @@ async function fetchRequestDetails() {
     console.error('[Usage] fetchDetails error:', e);
   } finally {
     usageState.detailsLoading = false;
+    mergePendingDetailsEvents();
     renderRequestDetailsTable();
   }
 }
@@ -1608,6 +1624,120 @@ function getUsageAccountName(record) {
   return record.accountName || nameMap[record.accountId] || record.accountId || '-';
 }
 
+// Keep the deduplication window bounded so a long-lived dashboard does not
+// retain one key per request forever. The server event id is process-local;
+// the record key also protects against a request appearing in the initial page
+// snapshot and then arriving through SSE while that snapshot is loading.
+const DETAILS_SEEN_KEY_LIMIT = 1000;
+function detailsRecordKey(record) {
+  if (!record) return '';
+  const tokens = record.tokens || {};
+  return [
+    record.timestamp || '', record.model || '', record.provider || '',
+    record.accountId || '', record.status || '', record.error || '',
+    tokens.prompt_tokens || tokens.input_tokens || record.inputTokens || 0,
+    tokens.completion_tokens || record.outputTokens || 0,
+  ].join('|');
+}
+
+function rememberDetailsKey(key) {
+  if (!key || usageState.detailsSeenKeys.has(key)) return;
+  usageState.detailsSeenKeys.add(key);
+  usageState.detailsSeenOrder.push(key);
+  while (usageState.detailsSeenOrder.length > DETAILS_SEEN_KEY_LIMIT) {
+    const old = usageState.detailsSeenOrder.shift();
+    usageState.detailsSeenKeys.delete(old);
+  }
+}
+
+function detailMatchesCurrentFilters(record) {
+  const filters = usageState.detailsFilters;
+  if (filters.provider && record.provider !== filters.provider) return false;
+  if (filters.startDate && (!record.timestamp || record.timestamp < filters.startDate)) return false;
+  if (filters.endDate && (!record.timestamp || record.timestamp > filters.endDate + 'T23:59:59Z')) return false;
+  return true;
+}
+
+function normalizeLiveDetail(record) {
+  if (!record) return null;
+  return {
+    timestamp: record.timestamp || new Date().toISOString(),
+    model: record.model || '',
+    provider: record.provider || '',
+    accountId: record.accountId || '',
+    accountName: record.accountName || '',
+    status: record.status || 'success',
+    error: record.error || '',
+    tokens: {
+      prompt_tokens: Number(record.inputTokens || 0),
+      completion_tokens: Number(record.outputTokens || 0),
+    },
+    latency: record.latency || {},
+  };
+}
+
+function applyDetailsRequestCompleted(record, eventId) {
+  const detail = normalizeLiveDetail(record);
+  if (!detail) return;
+
+  const numericEventId = Number(eventId || 0);
+  const recordKey = detailsRecordKey(detail);
+  const eventKey = numericEventId > 0 ? 'event:' + numericEventId : '';
+  if ((eventKey && usageState.detailsSeenKeys.has(eventKey)) ||
+      (recordKey && usageState.detailsSeenKeys.has(recordKey))) return;
+  if (eventKey) rememberDetailsKey(eventKey);
+  rememberDetailsKey(recordKey);
+  if (numericEventId > usageState.detailsLastEventId) {
+    usageState.detailsLastEventId = numericEventId;
+  }
+
+  if (usageState.detailsLoading) {
+    if (usageState.detailsPendingEvents.length < 100) {
+      usageState.detailsPendingEvents.push({ record: detail, eventId: numericEventId });
+    }
+    return;
+  }
+  if (usageState.activeTab !== 'details' || document.hidden || !detailMatchesCurrentFilters(detail)) return;
+
+  const page = usageState.detailsPagination;
+  page.totalItems = Number(page.totalItems || 0) + 1;
+  page.totalPages = Math.max(1, Math.ceil(page.totalItems / page.pageSize));
+  if (page.page !== 1) return;
+
+  usageState.detailsData = [detail, ...usageState.detailsData].slice(0, page.pageSize);
+  renderRequestDetailsTable();
+}
+
+function mergePendingDetailsEvents() {
+  const pending = usageState.detailsPendingEvents.splice(0);
+  if (pending.length === 0) return;
+
+  const page = usageState.detailsPagination;
+  let added = 0;
+  for (const item of pending) {
+    const detail = item && item.record;
+    if (!detail || !detailMatchesCurrentFilters(detail)) continue;
+
+    // The initial snapshot may already contain this request. In that case the
+    // event is acknowledged but must not increase the count or duplicate a row.
+    const key = detailsRecordKey(detail);
+    const alreadyLoaded = usageState.detailsData.some(row => detailsRecordKey(row) === key);
+    if (alreadyLoaded) continue;
+
+    page.totalItems = Number(page.totalItems || 0) + 1;
+    added++;
+    if (page.page === 1) {
+      usageState.detailsData.unshift(detail);
+    }
+  }
+
+  if (added > 0) {
+    page.totalPages = Math.max(1, Math.ceil(page.totalItems / page.pageSize));
+    if (page.page === 1) {
+      usageState.detailsData = usageState.detailsData.slice(0, page.pageSize);
+    }
+  }
+}
 
 function collapsibleSection(title, content, defaultOpen, icon) {
   const isOpen = defaultOpen !== false;

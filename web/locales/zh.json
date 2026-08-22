@@ -234,7 +234,7 @@
   "detail.saveFailed": "保存失败",
   "detail.generateFailed": "生成失败",
   "detail.weight": "请求权重",
-  "detail.weightHint": "0-1=普通, 2+=高优先级",
+  "detail.weightHint": "路由优先级倍数：0-1=普通，2+=被选中的概率成倍提高。适用于所有对话账号（Kiro、Codex、外部）。",
   "detail.overage": "超额调用（Overages）",
   "detail.overageHint": "点击开关将调用 AWS Q setUserPreference，立即在 Kiro 后台开/关 Overages",
   "detail.overageStatus": "当前状态",

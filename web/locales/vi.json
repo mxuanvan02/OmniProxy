@@ -234,7 +234,7 @@
   "detail.saveFailed": "Lưu thất bại",
   "detail.generateFailed": "Tạo thất bại",
   "detail.weight": "Trọng số yêu cầu",
-  "detail.weightHint": "0-1 = thường, 2+ = ưu tiên cao hơn",
+  "detail.weightHint": "Hệ số ưu tiên định tuyến: 0-1 = bình thường, 2+ = được chọn nhiều hơn tương ứng số lần. Áp dụng cho mọi tài khoản chat (Kiro, Codex, external).",
   "detail.overage": "Vượt hạn mức (Upstream)",
   "detail.overageHint": "Bật/tắt gọi AWS Q setUserPreference, chuyển đổi Overages trong tài khoản Kiro ngay lập tức",
   "detail.overageStatus": "Trạng thái hiện tại",

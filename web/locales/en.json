@@ -234,7 +234,7 @@
   "detail.saveFailed": "Save failed",
   "detail.generateFailed": "Generate failed",
   "detail.weight": "Request Weight",
-  "detail.weightHint": "0-1 = normal, 2+ = higher priority",
+  "detail.weightHint": "Routing priority multiplier: 0-1 = normal, 2+ = selected that many times more often. Applies to all chat accounts (Kiro, Codex, external).",
   "detail.overage": "Overages (Upstream)",
   "detail.overageHint": "Toggling calls AWS Q setUserPreference and flips Overages in your Kiro account immediately",
   "detail.overageStatus": "Current status",

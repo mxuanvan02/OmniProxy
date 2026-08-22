@@ -484,7 +484,10 @@ let testModalMode = 'chat';
       // Codex/external/service accounts have their own metadata and don't use
       // Kiro's overage/weight/machine-id system.
       const isKiroNative = !isCodex && !isExternal && !isService;
-      const weightBadge = isKiroNative && weight >= 2 ? '<span class="badge badge-warning">' + escapeHtml(t('accounts.weightShort')) + ':' + weight + '</span>' : '';
+      // Weight applies to the whole chat pool, not just Kiro: pool/account.go
+      // expands each candidate effectiveWeight(a.Weight) times regardless of
+      // authMethod. Only service accounts (search/image) ignore it.
+      const weightBadge = !isService && weight >= 2 ? '<span class="badge badge-warning">' + escapeHtml(t('accounts.weightShort')) + ':' + weight + '</span>' : '';
       const overageBadge = isKiroNative ? renderOverageBadge(a) : '';
       const reauthRequired = isCodex && a.banStatus === 'REAUTH_REQUIRED';
       const banned = a.banStatus && a.banStatus !== 'ACTIVE';
@@ -1117,8 +1120,12 @@ let testModalMode = 'chat';
         '<button class="btn btn-sm btn-primary" data-detail-action="saveMachineId" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
         '</div></div>' : '') +
 
-      // Weight — Kiro only (load balancing priority for Kiro pool)
-      (isKiroNative ?
+      // Weight — every chat-capable account. The pool selector applies
+      // effectiveWeight(a.Weight) to the whole chat pool (Kiro, Codex and
+      // external providers alike), so hiding this from non-Kiro accounts made
+      // a working backend feature unreachable. Service accounts (search/image)
+      // are appended directly by the selector and ignore weight.
+      (!isService ?
         '<div class="detail-section"><h4>' + escapeHtml(t('detail.weight')) + '</h4>' +
         '<div class="form-group">' +
         '<input type="number" id="weightInput" value="' + (a.weight || 0) + '" min="0" max="10" />' +

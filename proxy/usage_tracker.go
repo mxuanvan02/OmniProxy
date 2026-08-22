@@ -156,6 +156,7 @@ type UsageTracker struct {
 	dirty       bool
 	historyPath string
 	dailyPath   string
+	eventSeq    uint64 // monotonic process-local sequence for live request events
 }
 
 var globalTracker *UsageTracker
@@ -405,15 +406,24 @@ func (t *UsageTracker) Append(r RequestRecord) {
 		activeSnapshot = append(activeSnapshot, ar)
 	}
 	recentSnapshot := t.getRecentRequestsLocked(time.Now().Add(-5 * time.Minute))
-	go func(active []ActiveRequest, recent []RequestRecord) {
+	// A completed request is also a small live event for the Details tab. Keep
+	// the existing snapshots in the same payload so Overview clients remain
+	// backward-compatible; Details consumes only requestCompleted.
+	t.eventSeq++
+	eventID := t.eventSeq
+	completed := r
+	go func(active []ActiveRequest, recent []RequestRecord, request RequestRecord, id uint64) {
 		payload := map[string]interface{}{
-			"activeRequests": active,
-			"recentRequests": recent,
+			"type":             "request.completed",
+			"eventId":          id,
+			"requestCompleted": request,
+			"activeRequests":   active,
+			"recentRequests":   recent,
 		}
 		if data, err := json.Marshal(payload); err == nil {
 			broadcastSSEUnsafe(data)
 		}
-	}(activeSnapshot, recentSnapshot)
+	}(activeSnapshot, recentSnapshot, completed, eventID)
 }
 
 // TrackActive marks a request as in-flight. endpoint is the client-facing API
