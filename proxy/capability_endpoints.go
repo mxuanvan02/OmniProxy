@@ -359,19 +359,31 @@ func (h *Handler) apiGetCapabilities(w http.ResponseWriter, r *http.Request) {
 	enabledCounts := make(map[string]int)
 	verifiedCounts := make(map[string]int)
 	probeFailureCounts := make(map[string]int)
+	probeSkippedCounts := make(map[string]int)
 
 	for i := range accounts {
 		account := accounts[i]
 		effective := effectiveAccountCapabilities(&account)
 		verified := make([]string, 0, len(account.CapabilityProbes))
 		for capability, probe := range account.CapabilityProbes {
-			if probe.OK {
+			// Three states, kept apart on purpose. A skipped probe never left
+			// the process, so it is not evidence that the endpoint is broken.
+			// Counting it as a failure made "we could not pick a model" render
+			// identically to "upstream returned 404".
+			switch {
+			case probe.OK:
 				verified = append(verified, capability)
 				if account.Enabled {
 					verifiedCounts[capability]++
 				}
-			} else if account.Enabled {
-				probeFailureCounts[capability]++
+			case probe.Skipped:
+				if account.Enabled {
+					probeSkippedCounts[capability]++
+				}
+			default:
+				if account.Enabled {
+					probeFailureCounts[capability]++
+				}
 			}
 		}
 		sort.SliceStable(verified, func(a, b int) bool {
@@ -414,6 +426,10 @@ func (h *Handler) apiGetCapabilities(w http.ResponseWriter, r *http.Request) {
 		// ProbeFailures counts enabled accounts where a probe ran and failed,
 		// so an operator can tell "never probed" from "probed and broken".
 		ProbeFailures int `json:"probeFailures"`
+		// ProbeSkipped counts enabled accounts where a probe was attempted but
+		// no request was sent (no catalog model, non-JSON endpoint, ...). This
+		// is not evidence about the endpoint, so it is kept out of failures.
+		ProbeSkipped int `json:"probeSkipped"`
 		// Verified is true only when at least one enabled account passed a probe.
 		Verified bool `json:"verified"`
 	}
@@ -438,6 +454,7 @@ func (h *Handler) apiGetCapabilities(w http.ResponseWriter, r *http.Request) {
 			Available:        enabledCounts[capability] > 0,
 			VerifiedAccounts: verifiedCounts[capability],
 			ProbeFailures:    probeFailureCounts[capability],
+			ProbeSkipped:     probeSkippedCounts[capability],
 			Verified:         verifiedCounts[capability] > 0,
 		})
 	}

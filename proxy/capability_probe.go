@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"omniproxy/config"
 	"omniproxy/logger"
+	"sort"
 	"strings"
 	"time"
 )
@@ -102,22 +103,45 @@ func probeUpstreamPath(capability string) (string, bool) {
 }
 
 // pickProbeModel chooses a catalog model belonging to the capability's family.
-// It returns "" when the account has no cached catalog, which is itself a
-// meaningful result: nothing to probe against.
-func (h *Handler) pickProbeModel(account *config.Account, capability string) string {
+//
+// The pool cache is consulted first, but it is only populated for accounts that
+// are enabled: a disabled account has an empty cached catalog even though its
+// provider still lists models. Relying on the cache alone therefore produced a
+// false negative ("no model in cached catalog") that looked identical to a real
+// failure. When the cache misses, fetch the provider catalog directly so a probe
+// reports evidence about the endpoint rather than about pool bookkeeping.
+//
+// The second return value reports whether a live fetch was attempted, so callers
+// can distinguish "provider lists nothing for this capability" from "we could not
+// reach the catalog at all".
+func (h *Handler) pickProbeModel(account *config.Account, capability string) (string, string) {
 	if account == nil {
-		return ""
+		return "", "account not found"
 	}
-	models := h.pool.GetModelList(account.ID)
-	if len(models) == 0 {
-		return ""
+	if models := h.pool.GetModelList(account.ID); len(models) > 0 {
+		for _, id := range models {
+			if containsFold(classifyModelCapabilities(id), capability) {
+				return id, ""
+			}
+		}
+		// Cache is populated and holds nothing for this capability: that is a
+		// definitive answer, no live fetch needed.
+		return "", fmt.Sprintf("provider catalog lists no %s model", capability)
 	}
-	for _, id := range models {
-		if containsFold(classifyModelCapabilities(id), capability) {
-			return id
+
+	discovered, err := fetchExternalProviderModels(account)
+	if err != nil {
+		return "", fmt.Sprintf("could not fetch provider catalog: %v", err)
+	}
+	if len(discovered) == 0 {
+		return "", "provider catalog is empty"
+	}
+	for _, m := range discovered {
+		if containsFold(classifyModelCapabilities(m.ModelId), capability) {
+			return m.ModelId, ""
 		}
 	}
-	return ""
+	return "", fmt.Sprintf("provider catalog lists no %s model", capability)
 }
 
 // probeAccountCapability performs one probe and returns the recorded result. It
@@ -127,36 +151,48 @@ func (h *Handler) probeAccountCapability(account *config.Account, capability str
 	result := config.CapabilityProbeResult{CheckedAt: now}
 
 	if account == nil {
-		result.Detail = "account not found"
+		result.Skipped = true
+		result.SkippedReason = "account not found"
+		result.Detail = result.SkippedReason
 		return result
 	}
 	if !isExternalAccount(account) || strings.TrimSpace(account.BaseURL) == "" {
-		result.Detail = "capability probing applies to OpenAI-compatible providers only"
+		result.Skipped = true
+		result.SkippedReason = "capability probing applies to OpenAI-compatible providers only"
+		result.Detail = result.SkippedReason
 		return result
 	}
 	credential := strings.TrimSpace(account.AccessToken)
 	if credential == "" {
-		result.Detail = "account has no credential"
+		result.Skipped = true
+		result.SkippedReason = "account has no credential"
+		result.Detail = result.SkippedReason
 		return result
 	}
 
 	path, ok := probeUpstreamPath(capability)
 	if !ok {
-		result.Detail = fmt.Sprintf("%s has no probeable JSON endpoint", capability)
+		result.Skipped = true
+		result.SkippedReason = fmt.Sprintf("%s has no probeable JSON endpoint", capability)
+		result.Detail = result.SkippedReason
 		return result
 	}
 
-	model := h.pickProbeModel(account, capability)
+	model, pickReason := h.pickProbeModel(account, capability)
 	if model == "" && capability != capabilityModeration {
 		// Moderation accepts a bare input; everything else needs a model ID.
-		result.Detail = fmt.Sprintf("no %s model in cached catalog", capability)
+		result.Skipped = true
+		result.SkippedReason = pickReason
+		result.Detail = pickReason
 		return result
 	}
 	result.Model = model
 
 	body, ok := probeRequestBody(capability, model)
 	if !ok {
-		result.Detail = fmt.Sprintf("%s cannot be probed with a synthetic request", capability)
+		result.Skipped = true
+		result.SkippedReason = fmt.Sprintf("%s cannot be probed with a synthetic request", capability)
+		result.Detail = result.SkippedReason
 		return result
 	}
 
@@ -280,13 +316,34 @@ func (h *Handler) apiProbeAccountCapabilities(w http.ResponseWriter, r *http.Req
 		}
 	}
 
+	// Three outcomes, deliberately kept apart. Folding skipped into failed was
+	// the original defect: a probe that never left the process says nothing
+	// about the endpoint, yet it rendered identically to a 404 from upstream.
 	verified := make([]string, 0, len(results))
 	failed := make([]string, 0, len(results))
+	skipped := make([]string, 0, len(results))
 	for capability, result := range results {
-		if result.OK {
+		switch {
+		case result.OK:
 			verified = append(verified, capability)
-		} else {
+		case result.Skipped:
+			skipped = append(skipped, capability)
+		default:
 			failed = append(failed, capability)
+		}
+	}
+	sort.Strings(verified)
+	sort.Strings(failed)
+	sort.Strings(skipped)
+
+	// An empty result set is not a failure: it means the account advertises no
+	// capability that this run was willing to probe. Say so explicitly rather
+	// than returning a bare {} the caller has to interpret.
+	note := ""
+	if len(results) == 0 {
+		note = "no advertised capability was eligible for probing"
+		if !includeCostly {
+			note += " (retry with includeCostly=true to include audio and image)"
 		}
 	}
 
@@ -297,5 +354,7 @@ func (h *Handler) apiProbeAccountCapabilities(w http.ResponseWriter, r *http.Req
 		"probes":        results,
 		"verified":      verified,
 		"failed":        failed,
+		"skipped":       skipped,
+		"note":          note,
 	})
 }

@@ -237,9 +237,15 @@ func TestProbeAccountCapabilityRejectsNonProbeableAccounts(t *testing.T) {
 	if !strings.Contains(result.Detail, "OpenAI-compatible") {
 		t.Errorf("expected an explanation about provider kind, got %q", result.Detail)
 	}
+	if !result.Skipped {
+		t.Error("a probe that never left the process must be marked skipped")
+	}
 
-	// No cached catalog means there is nothing to probe against, and that is a
-	// distinct outcome from "probed and failed".
+	// An unreachable catalog is a skip, not a failure: it carries no evidence
+	// about whether the capability endpoint works. Note the probe no longer
+	// gives up when the pool cache is empty (that produced a false negative for
+	// disabled accounts) — it fetches the provider catalog live, so the reason
+	// now describes the fetch, not the cache.
 	external := &config.Account{
 		ID:                     "ext-no-catalog",
 		AuthMethod:             "external_openai",
@@ -250,13 +256,75 @@ func TestProbeAccountCapabilityRejectsNonProbeableAccounts(t *testing.T) {
 	}
 	result = handler.probeAccountCapability(external, capabilityEmbedding)
 	if result.OK {
-		t.Error("account without a catalog must not be verified")
+		t.Error("account without a reachable catalog must not be verified")
 	}
-	if !strings.Contains(result.Detail, "cached catalog") {
+	if !result.Skipped {
+		t.Error("an unreachable catalog must be recorded as skipped, not failed")
+	}
+	if !strings.Contains(result.Detail, "catalog") {
 		t.Errorf("expected a catalog-related detail, got %q", result.Detail)
+	}
+	if result.SkippedReason == "" {
+		t.Error("a skipped probe must explain why no request was sent")
 	}
 	if result.Status != 0 {
 		t.Errorf("no request was made so status should be 0, got %d", result.Status)
+	}
+}
+
+// A disabled account has an empty pool cache, yet its provider still lists
+// models. The original implementation reported "no model in cached catalog",
+// which was indistinguishable from a real endpoint failure. Verify the live
+// fetch closes that gap.
+func TestProbeAccountCapabilityFallsBackToLiveCatalog(t *testing.T) {
+	config.Init("")
+
+	var sawModelsFetch bool
+	var probedModel string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/models":
+			sawModelsFetch = true
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"data":[{"id":"text-embedding-3-small"}]}`))
+		case "/v1/embeddings":
+			var body map[string]interface{}
+			json.NewDecoder(r.Body).Decode(&body)
+			if m, ok := body["model"].(string); ok {
+				probedModel = m
+			}
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(`{"data":[{"embedding":[0.1]}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	handler := &Handler{pool: accountpool.GetPool()}
+	// Deliberately disabled: this is the case the pool cache cannot serve.
+	account := &config.Account{
+		ID:                     "ext-disabled",
+		AuthMethod:             "external_openai",
+		BaseURL:                server.URL,
+		AccessToken:            "token",
+		Enabled:                false,
+		DiscoveredCapabilities: []string{capabilityEmbedding},
+	}
+
+	result := handler.probeAccountCapability(account, capabilityEmbedding)
+	if !sawModelsFetch {
+		t.Error("expected a live catalog fetch when the pool cache is empty")
+	}
+	if !result.OK {
+		t.Errorf("probe should succeed against a working endpoint, got detail %q", result.Detail)
+	}
+	if result.Skipped {
+		t.Error("a probe that reached upstream must not be marked skipped")
+	}
+	if probedModel != "text-embedding-3-small" {
+		t.Errorf("probe should use the model found in the live catalog, got %q", probedModel)
 	}
 }
 

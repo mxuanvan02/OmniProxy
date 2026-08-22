@@ -58,6 +58,14 @@ type CapabilityProbeResult struct {
 	CheckedAt int64 `json:"checkedAt,omitempty"`
 	// LatencyMs is the observed round-trip time.
 	LatencyMs int64 `json:"latencyMs,omitempty"`
+	// Skipped is true when no request was ever sent upstream. This is a
+	// distinct outcome from OK=false: a skipped probe carries no evidence
+	// about the endpoint, while a failed probe does. Collapsing the two makes
+	// a missing catalog look identical to a dead endpoint.
+	Skipped bool `json:"skipped,omitempty"`
+	// SkippedReason explains why no request was sent (no catalog, no matching
+	// model, capability not probeable with a synthetic body, ...).
+	SkippedReason string `json:"skippedReason,omitempty"`
 }
 
 // Account represents a Kiro API account with authentication credentials and usage statistics.
