@@ -3021,6 +3021,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				model, attempt)
 			break
 		}
+		h.logCacheRouting("claude-stream", model, cacheKey, payload, account)
 		lastAccountID = account.ID
 		if err := h.ensureValidToken(account); err != nil {
 			lastErr = err
@@ -3693,7 +3694,108 @@ func payloadCacheKey(payload *KiroPayload) string {
 	if payload == nil {
 		return ""
 	}
-	return codexCacheKey(payloadCodexInstructions(payload))
+	if instr := payloadCodexInstructions(payload); instr != "" {
+		return codexCacheKey(instr)
+	}
+	// No system prompt: fall back to the conversation id instead of giving up on
+	// affinity entirely.
+	//
+	// The previous behaviour returned an empty key here, which switched routing
+	// back to plain rotation for the whole conversation. That was based on the
+	// belief that the upstream only caches the instructions field — but OpenAI's
+	// prompt-caching documentation states the rendered prefix includes system,
+	// developer, user and assistant messages, tool definitions and images, so a
+	// conversation with no system prompt still has a large cacheable prefix.
+	// Measured traffic showed this path was not hypothetical: the majority of
+	// gpt-5.6-sol requests arrived without a system message and therefore ran
+	// with no affinity at all, on the most expensive model in the pool.
+	return codexCacheKey(payloadConversationPrefix(payload))
+}
+
+// payloadConversationPrefix returns a stable identifier for a conversation,
+// used as a cache-routing key when there is no system prompt.
+//
+// It keys on ConversationID rather than on the first history turn. Keying on
+// history content looks equivalent but is not: truncatePayloadToLimit drops the
+// oldest turns once a payload outgrows the size limit, and with no system prompt
+// there is no priming pair to protect the head of the history — so the "first"
+// turn changes mid-conversation and the key drifts with it. That was observed in
+// live traffic, where a single conversation produced three different keys within
+// two minutes, repinning to a fresh account each time.
+//
+// ConversationID is computed by the translators before truncation and stays
+// fixed for the life of a conversation, which is exactly the property a routing
+// key needs. Returns empty when there is no history yet (a genuinely first
+// request, where rotation is correct) so that single-shot traffic does not
+// accumulate one sticky entry per request.
+func payloadConversationPrefix(payload *KiroPayload) string {
+	if payload == nil {
+		return ""
+	}
+	if len(payload.ConversationState.History) == 0 {
+		return ""
+	}
+	convID := strings.TrimSpace(payload.ConversationState.ConversationID)
+	if convID == "" {
+		return ""
+	}
+	return "conv-id:" + convID
+}
+
+// shortHash abbreviates an opaque routing hash for logs. Diagnostics only need
+// enough characters to tell two keys apart across consecutive turns, and a full
+// 32-char hash per line makes the log unreadable at request volume.
+func shortHash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	if len(s) <= 12 {
+		return s
+	}
+	return s[:12]
+}
+
+// logCacheRouting emits one line describing the prompt-cache routing decision
+// for a request, gated behind the cacheDiagnostics setting.
+//
+// The three fields together separate the two failure modes that the usage store
+// cannot distinguish. ckey is the prefix hash the pool pins on and the Codex
+// path sends as prompt_cache_key; conv is the hash driving the session-id /
+// thread-id headers that decide upstream machine affinity. A turn that keeps
+// the same ckey but changes conv lost machine affinity; a turn whose ckey
+// changes lost the pin itself. sticky reports whether the pin existed and was
+// honoured, which distinguishes "no pin yet" from "pin present but the account
+// was unavailable and rotation took over".
+//
+// Only hashes, ids and counters are logged — never instructions or message
+// content — so the line stays safe to keep in a shared log.
+func (h *Handler) logCacheRouting(tag, model, cacheKey string, payload *KiroPayload, account *config.Account) {
+	if !config.GetCacheDiagnostics() {
+		return
+	}
+	convID := ""
+	if payload != nil {
+		convID = strings.TrimSpace(payload.ConversationState.ConversationID)
+	}
+	sticky := "none"
+	if cacheKey != "" && h.pool != nil {
+		if pinned, live := h.pool.PeekCacheSticky(model, cacheKey); pinned != "" {
+			switch {
+			case !live:
+				sticky = "expired"
+			case account != nil && pinned == account.ID:
+				sticky = "hit"
+			default:
+				sticky = "diverted"
+			}
+		}
+	}
+	name := "-"
+	if account != nil {
+		name = account.Email
+	}
+	logger.Warnf("[CACHE-DIAG] %s model=%s ckey=%s conv=%s sticky=%s account=%s",
+		tag, model, shortHash(cacheKey), shortHash(convID), sticky, name)
 }
 
 // payloadCodexInstructions extracts the system prompt that the Codex
@@ -4169,6 +4271,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				model, attempt)
 			break
 		}
+		h.logCacheRouting("openai-stream", model, cacheKey, payload, account)
 		lastAccountID = account.ID
 		if err := h.ensureValidToken(account); err != nil {
 			lastErr = err
@@ -10139,10 +10242,11 @@ func (h *Handler) apiUpdatePromptFilter(w http.ResponseWriter, r *http.Request) 
 
 func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ApiKey         *string `json:"apiKey,omitempty"`
-		RequireApiKey  *bool   `json:"requireApiKey,omitempty"`
-		Password       string  `json:"password,omitempty"`
-		AllowOverUsage *bool   `json:"allowOverUsage,omitempty"`
+		ApiKey           *string `json:"apiKey,omitempty"`
+		RequireApiKey    *bool   `json:"requireApiKey,omitempty"`
+		Password         string  `json:"password,omitempty"`
+		AllowOverUsage   *bool   `json:"allowOverUsage,omitempty"`
+		CacheDiagnostics *bool   `json:"cacheDiagnostics,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -10165,6 +10269,18 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		}
 		// Rebuild the pool so over-quota accounts are re-included or dropped immediately.
 		h.pool.Reload()
+	}
+
+	// Prompt-cache routing diagnostics. Deliberately runtime-togglable and not
+	// pool-affecting: it only changes whether a log line is emitted, so it can
+	// be switched on for a measurement window and off again without touching
+	// routing behaviour or restarting the proxy.
+	if req.CacheDiagnostics != nil {
+		if err := config.UpdateCacheDiagnostics(*req.CacheDiagnostics); err != nil {
+			w.WriteHeader(500)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})

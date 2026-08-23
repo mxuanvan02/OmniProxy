@@ -670,3 +670,119 @@ func TestCacheStickinessIsModelScoped(t *testing.T) {
 		t.Fatalf("terra sticky account: got %#v", got)
 	}
 }
+
+// PeekCacheSticky backs the cache diagnostics: it must report the pin without
+// creating or refreshing one, otherwise observing the routing would change it.
+func TestPeekCacheStickyReportsPinWithoutCreatingOne(t *testing.T) {
+	p := newTestPool(config.Account{ID: "sol-account", Enabled: true})
+	p.cacheStickyTTL = 6 * time.Minute
+
+	if id, live := p.PeekCacheSticky("gpt-5.6-sol", "prefix"); id != "" || live {
+		t.Fatalf("unpinned key: got (%q, %v), want (\"\", false)", id, live)
+	}
+	// Peeking must not have created a pin as a side effect.
+	p.mu.RLock()
+	entries := len(p.cacheSticky)
+	p.mu.RUnlock()
+	if entries != 0 {
+		t.Fatalf("peek created %d sticky entries, want 0", entries)
+	}
+
+	p.RecordCacheStickiness("gpt-5.6-sol", "prefix", "sol-account")
+	if id, live := p.PeekCacheSticky("gpt-5.6-sol", "prefix"); id != "sol-account" || !live {
+		t.Fatalf("fresh pin: got (%q, %v), want (\"sol-account\", true)", id, live)
+	}
+
+	// An empty model or key is not a lookup — callers use that to mean "no
+	// cache routing applies", and it must not be reported as a pin.
+	if id, live := p.PeekCacheSticky("", "prefix"); id != "" || live {
+		t.Fatalf("empty model: got (%q, %v), want (\"\", false)", id, live)
+	}
+	if id, live := p.PeekCacheSticky("gpt-5.6-sol", ""); id != "" || live {
+		t.Fatalf("empty key: got (%q, %v), want (\"\", false)", id, live)
+	}
+}
+
+// An expired pin must be distinguishable from an absent one: the account id is
+// still reported so diagnostics can say "affinity lapsed" rather than "never
+// pinned", which are different causes of a cache miss.
+//
+// Uses an Anthropic model deliberately: OpenAI-family models resolve a much
+// longer per-model TTL, so backdating by minutes would not expire them.
+func TestPeekCacheStickyReportsExpiredPinAsNotLive(t *testing.T) {
+	p := newTestPool(config.Account{ID: "opus-account", Enabled: true})
+	p.cacheStickyTTL = time.Minute
+
+	p.RecordCacheStickiness("claude-opus-5", "prefix", "opus-account")
+	p.mu.Lock()
+	p.cacheStickyTS[cacheStickyKey("claude-opus-5", "prefix")] = time.Now().Add(-2 * time.Minute)
+	p.mu.Unlock()
+
+	id, live := p.PeekCacheSticky("claude-opus-5", "prefix")
+	if id != "opus-account" {
+		t.Fatalf("expired pin account: got %q, want \"opus-account\"", id)
+	}
+	if live {
+		t.Fatal("expired pin reported as live")
+	}
+}
+
+// Affinity windows are per-provider because documented cache lifetimes differ
+// five-fold. A single constant silently discards most of a GPT-5.6 cache entry.
+func TestStickyTTLForModelMatchesDocumentedCacheWindows(t *testing.T) {
+	fallback := 6 * time.Minute
+	cases := []struct {
+		model string
+		want  time.Duration
+	}{
+		// GPT-5.6+: documented 30-minute prompt cache.
+		{"gpt-5.6-sol", openAIModernCacheStickyTTL},
+		{"gpt-5-6-luna", openAIModernCacheStickyTTL},
+		{"GPT-5.6-TERRA", openAIModernCacheStickyTTL},
+		// Older OpenAI models: in-memory prefixes last ~5-10 minutes.
+		{"gpt-5.5", openAILegacyCacheStickyTTL},
+		{"gpt-4.1", openAILegacyCacheStickyTTL},
+		{"gpt-5-codex", openAILegacyCacheStickyTTL},
+		// Anthropic and unknown models keep the caller's default.
+		{"claude-opus-5", fallback},
+		{"claude-sonnet-5", fallback},
+		{"deepseek-v4-pro", fallback},
+		{"", fallback},
+	}
+	for _, tc := range cases {
+		if got := stickyTTLForModel(tc.model, fallback); got != tc.want {
+			t.Errorf("stickyTTLForModel(%q): got %s, want %s", tc.model, got, tc.want)
+		}
+	}
+}
+
+// PruneCacheSticky must respect the per-model TTL. Pruning against one global
+// cutoff would evict live long-TTL pins on the next refresh tick and silently
+// undo the longer affinity window.
+func TestPruneCacheStickyKeepsLiveLongTTLPins(t *testing.T) {
+	p := newTestPool(
+		config.Account{ID: "sol-account", Enabled: true},
+		config.Account{ID: "opus-account", Enabled: true},
+	)
+	p.cacheStickyTTL = 6 * time.Minute
+
+	p.RecordCacheStickiness("gpt-5.6-sol", "prefix", "sol-account")
+	p.RecordCacheStickiness("claude-opus-5", "prefix", "opus-account")
+
+	// Both pinned 10 minutes ago: past the 6-minute Anthropic window, still
+	// inside the 31-minute GPT-5.6 window.
+	stale := time.Now().Add(-10 * time.Minute)
+	p.mu.Lock()
+	p.cacheStickyTS[cacheStickyKey("gpt-5.6-sol", "prefix")] = stale
+	p.cacheStickyTS[cacheStickyKey("claude-opus-5", "prefix")] = stale
+	p.mu.Unlock()
+
+	p.PruneCacheSticky()
+
+	if id, live := p.PeekCacheSticky("gpt-5.6-sol", "prefix"); id != "sol-account" || !live {
+		t.Fatalf("gpt-5.6 pin was pruned while still live: got (%q, %v)", id, live)
+	}
+	if id, _ := p.PeekCacheSticky("claude-opus-5", "prefix"); id != "" {
+		t.Fatalf("expired anthropic pin survived pruning: got %q", id)
+	}
+}

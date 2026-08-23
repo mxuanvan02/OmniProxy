@@ -313,18 +313,20 @@ func CallExternalCodex(account *config.Account, payload *KiroPayload, callback *
 	// Always stream — the non-stream handler buffers via the callback.
 	body["stream"] = true
 
-	// prompt_cache_key: derived from the instructions (system prompt) so
-	// that all conversations using the same system prompt share a single
-	// cache entry per account. This is critical for multi-agent scenarios
-	// where many agents/conversations use the same instructions — they
-	// all benefit from the same warmed cache instead of each needing
+	// prompt_cache_key: derived from the system prompt when there is one, so
+	// that all conversations sharing the same instructions share a single cache
+	// entry per account. This matters for multi-agent use, where many
+	// conversations run identical instructions and would otherwise each need
 	// their own warmup.
 	//
-	// When instructions are empty (no system prompt), the backend won't
-	// cache anyway (it only caches the instructions field, not input
-	// content), so we skip setting the key.
-	if instr, ok := body["instructions"].(string); ok && instr != "" {
-		body["prompt_cache_key"] = codexCacheKey(instr)
+	// For GPT-5.6 and later the documented behaviour is that prompt_cache_key
+	// is required to get the reliable prefix matching: without it a request may
+	// still land an automatic hit, but only via the weaker path. The key is
+	// therefore always sent, falling back to the conversation prefix when there
+	// is no system prompt — previously the field was omitted entirely in that
+	// case, which was the weakest possible configuration on the priciest model.
+	if key := payloadCacheKey(payload); key != "" {
+		body["prompt_cache_key"] = key
 	}
 
 	reqBody, err := json.Marshal(body)

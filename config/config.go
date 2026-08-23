@@ -376,6 +376,18 @@ type Config struct {
 	// are unaffected (Kiro does not accept cache_control).
 	CacheControlPassthrough bool `json:"cacheControlPassthrough,omitempty"`
 
+	// CacheDiagnostics emits one structured log line per request describing the
+	// prompt-cache routing decision: the cache key, the conversation id, whether
+	// the sticky account was reused, and the upstream-reported cached-token
+	// count. Off by default because it logs on the hot path of every request.
+	//
+	// It exists because prompt-cache misses are otherwise invisible: the usage
+	// store records the resulting cachedTokens but not *why* a turn missed, so
+	// there is no way to distinguish "upstream does not cache" from "the routing
+	// key changed between turns and the affinity was lost". Only hashes and
+	// counters are logged, never prompt content.
+	CacheDiagnostics bool `json:"cacheDiagnostics,omitempty"`
+
 	// Proxy configuration: optional outbound proxy for Kiro API requests
 	// Format: "socks5://host:port", "socks5://user:pass@host:port",
 	//         "http://host:port",  "http://user:pass@host:port"
@@ -1754,6 +1766,31 @@ func GetCacheControlPassthrough() bool {
 		return false
 	}
 	return cfg.CacheControlPassthrough
+}
+
+// GetCacheDiagnostics returns whether per-request prompt-cache routing
+// diagnostics should be logged. Off by default: this logs on the hot path.
+func GetCacheDiagnostics() bool {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return false
+	}
+	return cfg.CacheDiagnostics
+}
+
+// UpdateCacheDiagnostics toggles per-request prompt-cache routing diagnostics
+// and persists the change. Kept runtime-togglable on purpose: the whole point
+// of the flag is to observe a live traffic pattern for a bounded window and
+// then go quiet again, without a rebuild or a restart of the proxy.
+func UpdateCacheDiagnostics(enabled bool) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return fmt.Errorf("config not loaded")
+	}
+	cfg.CacheDiagnostics = enabled
+	return saveLocked()
 }
 
 // UpdateAllowOverUsage sets the over-usage setting and persists the change.

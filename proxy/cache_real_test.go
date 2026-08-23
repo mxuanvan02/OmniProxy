@@ -274,3 +274,176 @@ func TestExternalRequestBodyHonoursPerAccountPassthrough(t *testing.T) {
 		}
 	})
 }
+
+// Minimum cacheable prefix length is per-model and does not follow model size or
+// recency: Opus 5 caches from 512 tokens while Opus 4.5/4.6 need 4096. The old
+// "opus means 2048" rule was wrong in both directions, and because an
+// under-length prefix is silently not cached (no error), only the reported
+// numbers revealed it.
+func TestMinCacheableTokensForModelFollowsDocumentedThresholds(t *testing.T) {
+	cases := []struct {
+		model string
+		want  int
+	}{
+		{"claude-opus-5", 512},
+		{"claude-fable-5", 512},
+		{"claude-mythos-5", 512},
+		{"claude-mythos-preview", 2048},
+		{"claude-opus-4.8", 1024},
+		{"claude-opus-4-8", 1024},
+		{"claude-opus-4.7", 2048},
+		{"claude-opus-4.6", 4096},
+		{"claude-opus-4.5", 4096},
+		{"claude-opus-4-5", 4096},
+		{"claude-haiku-4.5", 4096},
+		{"claude-haiku-3.5", 2048},
+		// Sonnet and anything unrecognised fall back to the documented 1024.
+		{"claude-sonnet-5", 1024},
+		{"claude-sonnet-4.6", 1024},
+		{"gpt-5.6-sol", 1024},
+		{"", 1024},
+	}
+	for _, tc := range cases {
+		if got := minCacheableTokensForModel(tc.model); got != tc.want {
+			t.Errorf("minCacheableTokensForModel(%q): got %d, want %d", tc.model, got, tc.want)
+		}
+	}
+}
+
+// primedPayload builds the shape the translators emit when the client sent a
+// system message: history[0]=user(system), history[1]=assistant("I will follow").
+func primedPayload(systemPrompt string, turns ...string) *KiroPayload {
+	p := &KiroPayload{}
+	history := []KiroHistoryMessage{
+		{UserInputMessage: &KiroUserInputMessage{Content: systemPrompt}},
+		{AssistantResponseMessage: &KiroAssistantResponseMessage{Content: "I will follow these instructions."}},
+	}
+	for i, turn := range turns {
+		if i%2 == 0 {
+			history = append(history, KiroHistoryMessage{
+				UserInputMessage: &KiroUserInputMessage{Content: turn},
+			})
+			continue
+		}
+		history = append(history, KiroHistoryMessage{
+			AssistantResponseMessage: &KiroAssistantResponseMessage{Content: turn},
+		})
+	}
+	p.ConversationState.History = history
+	return p
+}
+
+// unprimedPayload builds a conversation with no system prompt at all. The first
+// user turn deliberately avoids the "You are " prefix so it is not mistaken for
+// a leading user-only system prompt. convID mirrors what the translators set
+// before truncation runs.
+func unprimedPayload(convID string, turns ...string) *KiroPayload {
+	p := &KiroPayload{}
+	p.ConversationState.ConversationID = convID
+	history := make([]KiroHistoryMessage, 0, len(turns))
+	for i, turn := range turns {
+		if i%2 == 0 {
+			history = append(history, KiroHistoryMessage{
+				UserInputMessage: &KiroUserInputMessage{Content: turn},
+			})
+			continue
+		}
+		history = append(history, KiroHistoryMessage{
+			AssistantResponseMessage: &KiroAssistantResponseMessage{Content: turn},
+		})
+	}
+	p.ConversationState.History = history
+	return p
+}
+
+// A conversation without a system prompt must still get a routing key. Returning
+// an empty key dropped sticky affinity for the whole conversation and omitted
+// prompt_cache_key upstream — measured as the dominant behaviour on the most
+// expensive model in the pool.
+func TestPayloadCacheKeyFallsBackToConversationPrefix(t *testing.T) {
+	t.Run("system prompt present -> key from instructions", func(t *testing.T) {
+		key := payloadCacheKey(primedPayload("You are a helpful assistant.", "hello"))
+		if key == "" {
+			t.Fatal("primed payload produced no cache key")
+		}
+		want := codexCacheKey("You are a helpful assistant.")
+		if key != want {
+			t.Fatalf("key not derived from instructions: got %q, want %q", key, want)
+		}
+	})
+
+	t.Run("no system prompt -> key from conversation id", func(t *testing.T) {
+		key := payloadCacheKey(unprimedPayload("conv-a", "summarise this report", "sure"))
+		if key == "" {
+			t.Fatal("unprimed payload produced no cache key: affinity would be off")
+		}
+	})
+
+	t.Run("no history -> empty key", func(t *testing.T) {
+		if key := payloadCacheKey(unprimedPayload("conv-a")); key != "" {
+			t.Fatalf("empty history should not produce a key, got %q", key)
+		}
+		if key := payloadCacheKey(nil); key != "" {
+			t.Fatalf("nil payload should not produce a key, got %q", key)
+		}
+	})
+
+	// No conversation id means nothing stable to key on, so rotation is the
+	// honest answer rather than inventing an unstable key.
+	t.Run("no conversation id -> empty key", func(t *testing.T) {
+		if key := payloadCacheKey(unprimedPayload("", "summarise this report")); key != "" {
+			t.Fatalf("missing conversation id should not produce a key, got %q", key)
+		}
+	})
+
+	// The whole point of the fallback: the key must not change as the
+	// conversation grows, otherwise every turn repins to a fresh account and
+	// the fallback is worse than useless.
+	t.Run("key is stable as conversation grows", func(t *testing.T) {
+		first := payloadCacheKey(unprimedPayload("conv-a", "summarise this report"))
+		grown := payloadCacheKey(unprimedPayload(
+			"conv-a", "summarise this report", "sure", "now translate it", "done",
+		))
+		if first == "" {
+			t.Fatal("no key for first turn")
+		}
+		if first != grown {
+			t.Fatalf("key changed as conversation grew: %q -> %q", first, grown)
+		}
+	})
+
+	// Regression: keying on the first history turn drifted mid-conversation
+	// because truncatePayloadToLimit drops the oldest turns once a payload
+	// outgrows the size limit, and an unprimed payload has no priming pair
+	// protecting the head. Live traffic showed one conversation producing three
+	// different keys in two minutes. The id survives truncation, so the key must
+	// hold even when the opening turns are gone.
+	t.Run("key survives history truncation", func(t *testing.T) {
+		full := payloadCacheKey(unprimedPayload(
+			"conv-a", "opening turn", "reply", "second turn", "reply two",
+		))
+		truncated := payloadCacheKey(unprimedPayload(
+			"conv-a", "second turn", "reply two",
+		))
+		if full != truncated {
+			t.Fatalf("key drifted after truncation: %q -> %q", full, truncated)
+		}
+	})
+
+	t.Run("different conversations get different keys", func(t *testing.T) {
+		a := payloadCacheKey(unprimedPayload("conv-a", "summarise this report"))
+		b := payloadCacheKey(unprimedPayload("conv-b", "summarise this report"))
+		if a == b {
+			t.Fatalf("distinct conversations collided on key %q", a)
+		}
+	})
+
+	// The fallback key must never collide with an instructions key of the same
+	// text, or two different routing scopes would share one sticky entry.
+	t.Run("fallback key is namespaced away from instructions key", func(t *testing.T) {
+		id := "conv-a"
+		if payloadCacheKey(unprimedPayload(id, "hello")) == codexCacheKey(id) {
+			t.Fatal("conversation-id key collides with instructions key")
+		}
+	})
+}

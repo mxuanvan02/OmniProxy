@@ -17,8 +17,43 @@ const defaultPromptCacheTTL = 5 * time.Minute
 // caching takes effect. Breakpoints below this threshold are excluded from
 // matching and storage to avoid reporting unrealistic 100% cache hits on
 // short requests.
+//
+// The threshold is per-model and does NOT track model size or recency: per
+// Anthropic's prompt-caching documentation, Opus 5 caches from 512 tokens while
+// Opus 4.5/4.6 and Haiku 4.5 require 4096. A single "opus means 2048" rule is
+// therefore wrong in both directions — it suppressed real, billable cache hits
+// between 512 and 2048 tokens on Opus 5, and credited hits on Opus 4.5/4.6 that
+// the upstream never actually served. Requests below the real minimum are
+// processed without caching and no error is returned, so a wrong threshold is
+// silent either way; only the reported numbers drift.
 const defaultMinCacheableTokens = 1024
-const opusMinCacheableTokens = 2048
+
+// minCacheableTokensByModel maps a model-id fragment to its documented minimum
+// cacheable prefix length. Order matters: entries are matched top-down, so more
+// specific fragments ("opus-4.8") must precede broader ones ("opus-4").
+// Both dot and dash version spellings are accepted because gateways rewrite
+// model ids inconsistently (claude-opus-4.5 vs claude-opus-4-5).
+var minCacheableTokensByModel = []struct {
+	fragment string
+	minimum  int
+}{
+	{"opus-5", 512},
+	{"fable-5", 512},
+	{"mythos-preview", 2048},
+	{"mythos-5", 512},
+	{"opus-4.8", 1024},
+	{"opus-4-8", 1024},
+	{"opus-4.7", 2048},
+	{"opus-4-7", 2048},
+	{"opus-4.6", 4096},
+	{"opus-4-6", 4096},
+	{"opus-4.5", 4096},
+	{"opus-4-5", 4096},
+	{"haiku-4.5", 4096},
+	{"haiku-4-5", 4096},
+	{"haiku-3.5", 2048},
+	{"haiku-3-5", 2048},
+}
 
 type promptCacheUsage struct {
 	CacheCreationInputTokens   int
@@ -39,10 +74,15 @@ type promptCacheProfile struct {
 	Model            string
 }
 
+// minCacheableTokensForModel returns the documented minimum cacheable prefix
+// length for a model, falling back to 1024 for anything unrecognised (the value
+// documented for the Sonnet family and the most common case).
 func minCacheableTokensForModel(model string) int {
 	lower := strings.ToLower(model)
-	if strings.Contains(lower, "opus") {
-		return opusMinCacheableTokens
+	for _, entry := range minCacheableTokensByModel {
+		if strings.Contains(lower, entry.fragment) {
+			return entry.minimum
+		}
 	}
 	return defaultMinCacheableTokens
 }

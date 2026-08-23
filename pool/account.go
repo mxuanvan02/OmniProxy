@@ -12,15 +12,57 @@ import (
 
 const tokenRefreshSkewSeconds int64 = 120
 
-// Prompt caches are short lived upstream, but routing affinity must outlive the
-// cache window rather than expire inside it. Anthropic's ephemeral cache runs a
-// 5-minute TTL that is refreshed on every hit, so a 4-minute affinity window
-// dropped conversations in the 4-5 minute gap while the upstream entry was
-// still warm: the next turn rotated to a cold account and paid a full cache
-// create for a prefix that already existed elsewhere. One minute of headroom
-// past the 5-minute cache TTL keeps the hit recoverable; beyond that the entry
-// really is gone and holding affinity would only skew load balancing.
+// Routing affinity must outlive the upstream cache window rather than expire
+// inside it: while the upstream entry is still warm, rotating to a cold account
+// pays a full cache create for a prefix that already exists elsewhere. The
+// window is therefore per-provider, because the documented cache lifetimes
+// differ by an order of magnitude and a single constant is wrong for one of
+// them no matter which value is chosen.
+//
+// defaultCacheStickyTTL covers Anthropic-shaped upstreams: the ephemeral cache
+// runs a 5-minute TTL refreshed on every hit, so one minute of headroom keeps a
+// live entry recoverable while still releasing affinity once it is truly gone.
 const defaultCacheStickyTTL = 6 * time.Minute
+
+// openAIModernCacheStickyTTL covers GPT-5.6 and later, where the documented
+// prompt-cache lifetime is 30 minutes (the only supported value) and is
+// refreshed on reuse at no extra cost. Holding affinity for only 6 minutes threw
+// away the remaining 24 minutes of a paid-for cache entry.
+const openAIModernCacheStickyTTL = 31 * time.Minute
+
+// openAILegacyCacheStickyTTL covers pre-5.6 OpenAI models, where in-memory
+// prefixes are documented to survive roughly 5-10 minutes of inactivity rather
+// than a fixed 30. Extended retention exists but is opt-in per request, so the
+// conservative end of the documented range is the safe affinity window: holding
+// longer would skew load balancing with no cache left to recover.
+const openAILegacyCacheStickyTTL = 11 * time.Minute
+
+// stickyTTLForModel resolves how long routing affinity should be held for a
+// model, keyed on the upstream that actually owns the cache entry.
+//
+// Matching is on the model id rather than the account's auth method because the
+// same OpenAI-family model can be served through several account types, and it
+// is the model's upstream — not the credential — that determines the cache
+// lifetime.
+func stickyTTLForModel(model string, fallback time.Duration) time.Duration {
+	lower := strings.ToLower(strings.TrimSpace(model))
+	if lower == "" {
+		return fallback
+	}
+	isOpenAIFamily := strings.HasPrefix(lower, "gpt-") ||
+		strings.Contains(lower, "codex") ||
+		strings.HasPrefix(lower, "o1") ||
+		strings.HasPrefix(lower, "o3") ||
+		strings.HasPrefix(lower, "o4")
+	if !isOpenAIFamily {
+		return fallback
+	}
+	// Both spellings occur because gateways rewrite model ids inconsistently.
+	if strings.Contains(lower, "5.6") || strings.Contains(lower, "5-6") {
+		return openAIModernCacheStickyTTL
+	}
+	return openAILegacyCacheStickyTTL
+}
 
 // accountStats holds the cumulative runtime counters for a single account.
 // It lives in AccountPool.stats keyed by accountID, deliberately separate from
@@ -617,7 +659,7 @@ func (p *AccountPool) GetNextForModelWithCacheKey(model string, excluded map[str
 		p.mu.RLock()
 		stickyID, ok := p.cacheSticky[stickyKey]
 		stickyAt := p.cacheStickyTS[stickyKey]
-		stickyTTL := p.cacheStickyTTL
+		stickyTTL := stickyTTLForModel(model, p.cacheStickyTTL)
 		p.mu.RUnlock()
 		if ok && stickyID != "" && (stickyTTL <= 0 || time.Since(stickyAt) < stickyTTL) {
 			// Try the sticky account first — but only if it's not excluded,
@@ -662,6 +704,31 @@ func (p *AccountPool) getAccountIfAvailable(accountID, model string) *config.Acc
 	return nil
 }
 
+// PeekCacheSticky reports which account is currently pinned for model+cacheKey
+// and whether that pin is still inside the TTL. Read-only: it neither creates
+// nor refreshes a pin, so callers can use it purely for observability without
+// perturbing the routing they are trying to measure.
+func (p *AccountPool) PeekCacheSticky(model, cacheKey string) (string, bool) {
+	if model == "" || cacheKey == "" {
+		return "", false
+	}
+	key := cacheStickyKey(model, cacheKey)
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	id, ok := p.cacheSticky[key]
+	if !ok || id == "" {
+		return "", false
+	}
+	// Must resolve the same per-model TTL the selection path uses, otherwise a
+	// live 31-minute GPT-5.6 pin would be reported as expired against the
+	// 6-minute default and the diagnostics would blame the wrong cause.
+	ttl := stickyTTLForModel(model, p.cacheStickyTTL)
+	if ttl > 0 && time.Since(p.cacheStickyTS[key]) >= ttl {
+		return id, false
+	}
+	return id, true
+}
+
 // RecordCacheStickiness pins model + cacheKey → accountID so subsequent requests
 // with the same model and prefix prefer this account. Called after a successful
 // upstream response.
@@ -688,9 +755,21 @@ func (p *AccountPool) PruneCacheSticky() {
 	if p.cacheStickyTTL <= 0 {
 		return
 	}
-	cutoff := time.Now().Add(-p.cacheStickyTTL)
+	// Prune per-key, not against one global cutoff: the sticky key embeds the
+	// model, and TTLs now differ five-fold between providers. A single
+	// 6-minute cutoff would evict live 31-minute GPT-5.6 pins on the next
+	// refresh tick and silently undo the longer affinity window.
+	now := time.Now()
 	for key, ts := range p.cacheStickyTS {
-		if ts.Before(cutoff) {
+		model := key
+		if idx := strings.IndexByte(key, 0); idx >= 0 {
+			model = key[:idx]
+		}
+		ttl := stickyTTLForModel(model, p.cacheStickyTTL)
+		if ttl <= 0 {
+			continue
+		}
+		if now.Sub(ts) >= ttl {
 			delete(p.cacheSticky, key)
 			delete(p.cacheStickyTS, key)
 		}

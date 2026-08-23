@@ -163,6 +163,7 @@ func (h *Handler) handleResponsesNonStream(
 		if account == nil {
 			break
 		}
+		h.logCacheRouting("responses-nonstream", model, cacheKey, payload, account)
 		lastAccountID = account.ID
 		if err := h.ensureValidToken(account); err != nil {
 			lastErr = err
@@ -426,6 +427,7 @@ func (h *Handler) handleResponsesStream(
 		if account == nil {
 			break
 		}
+		h.logCacheRouting("responses-stream", model, cacheKey, payload, account)
 		lastAccountID = account.ID
 		if err := h.ensureValidToken(account); err != nil {
 			lastErr = err
