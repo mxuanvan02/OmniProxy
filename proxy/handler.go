@@ -3947,6 +3947,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		if account == nil {
 			break
 		}
+		h.logCacheRouting("claude-nonstream", model, cacheKey, payload, account)
 		lastAccountID = account.ID
 		if err := h.ensureValidToken(account); err != nil {
 			lastErr = err
@@ -4737,6 +4738,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		if account == nil {
 			break
 		}
+		h.logCacheRouting("openai-nonstream", model, cacheKey, payload, account)
 		lastAccountID = account.ID
 		if err := h.ensureValidToken(account); err != nil {
 			lastErr = err
