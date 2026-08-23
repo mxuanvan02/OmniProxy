@@ -166,3 +166,111 @@ func TestGetCacheControlPassthroughDefault(t *testing.T) {
 		t.Fatal("CacheControlPassthrough should default to false")
 	}
 }
+
+// TestCacheControlPassthroughPerAccountOverride verifies the tri-state
+// per-account override: nil inherits the global switch, while an explicit
+// true/false wins over it. This is what makes a single-account canary possible
+// instead of betting every external gateway on one global flag.
+func TestCacheControlPassthroughPerAccountOverride(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	// Global is false by default (asserted by the test above).
+	enabled := true
+	disabled := false
+
+	t.Run("nil override inherits global false", func(t *testing.T) {
+		acc := &config.Account{ID: "a"}
+		if cacheControlPassthroughEnabled(acc) {
+			t.Fatal("nil override should inherit the global false setting")
+		}
+	})
+
+	t.Run("explicit true overrides global false", func(t *testing.T) {
+		acc := &config.Account{ID: "a", CacheControlPassthrough: &enabled}
+		if !cacheControlPassthroughEnabled(acc) {
+			t.Fatal("explicit true should enable passthrough for this account")
+		}
+	})
+
+	t.Run("explicit false stays off", func(t *testing.T) {
+		acc := &config.Account{ID: "a", CacheControlPassthrough: &disabled}
+		if cacheControlPassthroughEnabled(acc) {
+			t.Fatal("explicit false should keep passthrough off")
+		}
+	})
+
+	t.Run("nil account falls back to global", func(t *testing.T) {
+		if cacheControlPassthroughEnabled(nil) {
+			t.Fatal("nil account should fall back to the global false setting")
+		}
+	})
+}
+
+// TestExternalRequestBodyHonoursPerAccountPassthrough verifies the override is
+// actually wired into the outbound request body, not just readable in
+// isolation. Without the wiring, a canary account would silently keep sending
+// uncached prompts.
+func TestExternalRequestBodyHonoursPerAccountPassthrough(t *testing.T) {
+	cfgFile := t.TempDir() + "/config.json"
+	if err := config.Init(cfgFile); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+
+	// Build the payload through the real translator so the shape matches
+	// production exactly (including the system-priming pair it injects).
+	newPayload := func() *KiroPayload {
+		req := &OpenAIRequest{
+			Model: "gpt-4o",
+			Messages: []OpenAIMessage{
+				{Role: "system", Content: "You are a helpful assistant."},
+				{Role: "user", Content: "first turn"},
+				{Role: "assistant", Content: "first reply"},
+				{Role: "user", Content: "second turn"},
+			},
+		}
+		payload := OpenAIToKiro(req, false)
+		payload.OriginalModel = "gpt-4o"
+		return payload
+	}
+
+	countCacheControl := func(t *testing.T, body map[string]interface{}) int {
+		t.Helper()
+		msgs, ok := body["messages"].([]map[string]interface{})
+		if !ok {
+			t.Fatalf("messages missing or wrong type: %T", body["messages"])
+		}
+		n := 0
+		for _, m := range msgs {
+			if _, has := m["cache_control"]; has {
+				n++
+			}
+		}
+		return n
+	}
+
+	enabled := true
+
+	t.Run("override off -> no cache_control", func(t *testing.T) {
+		acc := &config.Account{ID: "off", AuthMethod: "external_openai"}
+		body, err := kiroPayloadToOpenAIRequest(newPayload(), acc)
+		if err != nil {
+			t.Fatalf("kiroPayloadToOpenAIRequest: %v", err)
+		}
+		if n := countCacheControl(t, body); n != 0 {
+			t.Fatalf("expected 0 cache_control breakpoints with override off, got %d", n)
+		}
+	})
+
+	t.Run("override on -> breakpoints attached", func(t *testing.T) {
+		acc := &config.Account{ID: "on", AuthMethod: "external_openai", CacheControlPassthrough: &enabled}
+		body, err := kiroPayloadToOpenAIRequest(newPayload(), acc)
+		if err != nil {
+			t.Fatalf("kiroPayloadToOpenAIRequest: %v", err)
+		}
+		if n := countCacheControl(t, body); n == 0 {
+			t.Fatal("expected cache_control breakpoints with per-account override on, got none")
+		}
+	})
+}

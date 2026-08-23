@@ -12,10 +12,15 @@ import (
 
 const tokenRefreshSkewSeconds int64 = 120
 
-// Prompt caches are short lived upstream. Keeping routing affinity beyond this
-// window only harms load balancing because there is no longer a cache hit to
-// recover.
-const defaultCacheStickyTTL = 4 * time.Minute
+// Prompt caches are short lived upstream, but routing affinity must outlive the
+// cache window rather than expire inside it. Anthropic's ephemeral cache runs a
+// 5-minute TTL that is refreshed on every hit, so a 4-minute affinity window
+// dropped conversations in the 4-5 minute gap while the upstream entry was
+// still warm: the next turn rotated to a cold account and paid a full cache
+// create for a prefix that already existed elsewhere. One minute of headroom
+// past the 5-minute cache TTL keeps the hit recoverable; beyond that the entry
+// really is gone and holding affinity would only skew load balancing.
+const defaultCacheStickyTTL = 6 * time.Minute
 
 // accountStats holds the cumulative runtime counters for a single account.
 // It lives in AccountPool.stats keyed by accountID, deliberately separate from

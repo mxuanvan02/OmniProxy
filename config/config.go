@@ -136,6 +136,20 @@ type Account struct {
 	// outbound external-provider request is rewritten.
 	ModelMappings map[string]string `json:"modelMappings,omitempty"`
 
+	// CacheControlPassthrough overrides the global
+	// Settings.CacheControlPassthrough switch for this account only.
+	// Tri-state: nil = inherit the global setting, true = always attach
+	// Anthropic-style cache_control breakpoints, false = never attach them.
+	//
+	// Per-account granularity exists because the external pool spans many
+	// unrelated gateways (gorouter, tabitoken, sotamodel, ...). Some honour
+	// cache_control and reward it with real cache hits; others ignore it, and
+	// a strict one may reject the unknown field outright. A single global flag
+	// forces an all-or-nothing bet across every gateway at once, so this
+	// override allows enabling one account, measuring real cachedTokens, and
+	// only then widening the rollout.
+	CacheControlPassthrough *bool `json:"cacheControlPassthrough,omitempty"`
+
 	// ChatGPTAccountID is the chatgpt_account_id extracted from the Codex
 	// OAuth access token's JWT payload. Required for AuthMethod == "codex":
 	// OpenAI's /v1/responses endpoint routes by this header

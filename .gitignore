@@ -27,3 +27,6 @@ omniproxy-linux-*
 
 # Personal ops scripts (not published to public repo)
 scripts/sync-*.sh
+
+# Local rollback snapshots (contain data/config.json with live credentials)
+.rollback/

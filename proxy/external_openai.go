@@ -268,7 +268,7 @@ func kiroPayloadToOpenAIRequest(payload *KiroPayload, account *config.Account) (
 	// compatible gateways) can cache the durable system prompt and conversation
 	// history. The current user turn is deliberately excluded: it changes on the
 	// next request and otherwise creates cache-write churn with little reuse.
-	if config.GetCacheControlPassthrough() && len(msgs) > 0 {
+	if cacheControlPassthroughEnabled(account) && len(msgs) > 0 {
 		applyExternalCacheControl(msgs)
 	}
 
@@ -431,6 +431,21 @@ func cloneToolChoice(value interface{}) interface{} {
 		return value
 	}
 	return clone
+}
+
+// cacheControlPassthroughEnabled resolves whether cache_control breakpoints
+// should be attached for one account. The per-account override wins when set;
+// otherwise the global Settings switch applies.
+//
+// Rollout safety is the whole point of the override: the external pool spans
+// many independent gateways, and enabling the global flag would bet every one
+// of them at once on honouring an Anthropic-only field. Canarying a single
+// account keeps a rejection blast radius of one.
+func cacheControlPassthroughEnabled(account *config.Account) bool {
+	if account != nil && account.CacheControlPassthrough != nil {
+		return *account.CacheControlPassthrough
+	}
+	return config.GetCacheControlPassthrough()
 }
 
 // applyExternalCacheControl attaches Anthropic-style cache_control breakpoints

@@ -7030,6 +7030,20 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	if v, ok := updates["imageModel"].(string); ok {
 		existing.ImageModel = strings.TrimSpace(v)
 	}
+	// Per-account cache_control passthrough override. Tri-state on the wire:
+	// a bool sets an explicit override, JSON null clears it back to
+	// "inherit the global setting". Distinguishing null from absent matters —
+	// an absent key must leave the current override untouched, otherwise every
+	// unrelated account edit from the UI would silently reset the canary.
+	if raw, present := updates["cacheControlPassthrough"]; present {
+		switch v := raw.(type) {
+		case bool:
+			flag := v
+			existing.CacheControlPassthrough = &flag
+		case nil:
+			existing.CacheControlPassthrough = nil
+		}
+	}
 
 	_, changesCredentials := updates["accessToken"]
 	var persistErr error
