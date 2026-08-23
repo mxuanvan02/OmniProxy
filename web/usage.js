@@ -40,6 +40,10 @@ let usageState = {
 let cacheState = {
   loading: false,
   data: null,
+  // Usage stats for the same period, kept alongside the cache stats so the
+  // hit ratio can be split by whether a model has known pricing. Null when
+  // the usage fetch failed — the tab then falls back to the unsplit view.
+  usage: null,
   period: '24h',
 };
 
@@ -1429,9 +1433,18 @@ async function fetchCacheStats() {
   if (!container) return;
   container.innerHTML = '<div class="usage-loading">Loading cache stats...</div>';
   try {
-    const res = await api('/cache/stats?period=' + encodeURIComponent(cacheState.period));
+    // /cache/stats carries token counts only. The paid/unpriced split needs
+    // realCost per model, which lives in /usage/stats — both accept the same
+    // period vocabulary, so they are fetched together and joined by model name.
+    // The usage fetch is allowed to fail without failing the tab.
+    const period = encodeURIComponent(cacheState.period);
+    const [res, usageRes] = await Promise.all([
+      api('/cache/stats?period=' + period),
+      api('/usage/stats?period=' + period).catch(() => null),
+    ]);
     if (!res.ok) throw new Error('HTTP ' + res.status);
     cacheState.data = await res.json();
+    cacheState.usage = usageRes && usageRes.ok ? await usageRes.json().catch(() => null) : null;
     renderCacheTab();
   } catch (e) {
     container.innerHTML = '<div class="usage-error">Failed to load cache stats: ' + escapeHtml(String(e)) + '</div>';
@@ -1453,26 +1466,91 @@ function renderCacheTab() {
   const cacheHits = Number.isFinite(c.cacheHits) ? c.cacheHits : Math.max(cacheRead, cachedTokens);
   const uncached = c.uncached || 0;
 
+  // Paid vs unpriced split.
+  //
+  // The headline ratio pools every model into one denominator, so traffic that
+  // costs nothing dilutes it: a model carrying most of the input tokens but no
+  // billed cost drags the number down even when the models that do cost money
+  // are caching well. That single figure is what an operator reads to decide
+  // whether caching needs work, so it is the wrong number to lead with.
+  //
+  // "Paid" here means realCost > 0 for that model over the same period, taken
+  // from /usage/stats. Note what that does NOT mean: a model can report zero
+  // cost simply because it has no entry in the server pricing table, in which
+  // case its spend is unknown rather than zero. The second group is therefore
+  // labelled "unpriced", not "free" — see LookupPricing in proxy/pricing.go.
+  const usageByModel = (cacheState.usage && cacheState.usage.byModel) || null;
+  let paidSplit = null;
+  if (usageByModel) {
+    const acc = {
+      paidInput: 0, paidHits: 0, paidCost: 0,
+      unpricedInput: 0, unpricedHits: 0,
+      paidModels: [], unpricedModels: [],
+    };
+    Object.entries(c.byModel || {}).forEach(([model, s]) => {
+      const input = s.promptTokens || 0;
+      if (input <= 0) return;
+      const hits = Number.isFinite(s.cacheHits) ? s.cacheHits : Math.max(s.cacheRead || 0, s.cachedTokens || 0);
+      const cost = (usageByModel[model] && usageByModel[model].realCost) || 0;
+      if (cost > 0) {
+        acc.paidInput += input;
+        acc.paidHits += hits;
+        acc.paidCost += cost;
+        acc.paidModels.push(model);
+      } else {
+        acc.unpricedInput += input;
+        acc.unpricedHits += hits;
+        acc.unpricedModels.push(model);
+      }
+    });
+    // Only meaningful when both sides carry traffic; otherwise the split says
+    // nothing the headline ratio does not already say.
+    if (acc.paidInput > 0) paidSplit = acc;
+  }
+
   // Period selector
   const periods = ['24h', '7d', '30d', 'all'];
   const periodBar = '<div class="usage-period-bar" style="margin-bottom:16px">' +
     periods.map(p => `<button class="usage-period-btn${cacheState.period === p ? ' active' : ''}" data-period="${p}">${p}</button>`).join('') +
     '</div>';
 
-  // Summary cards
-  const cards = [
-    { label: 'Cache Hit Ratio', value: fmtPct(hitRatio), color: '#22c55e' },
+  // Summary cards. The paid-only ratio leads, because it is the one an
+  // operator can act on; the pooled ratio stays for continuity but is no
+  // longer the first number read.
+  const cards = [];
+  if (paidSplit) {
+    const paidRatio = paidSplit.paidInput > 0 ? (paidSplit.paidHits / paidSplit.paidInput * 100) : 0;
+    const unpricedRatio = paidSplit.unpricedInput > 0 ? (paidSplit.unpricedHits / paidSplit.unpricedInput * 100) : 0;
+    cards.push({
+      label: 'Hit Ratio (paid only)',
+      value: fmtPct(paidRatio),
+      color: '#22c55e',
+      title: paidSplit.paidModels.join(', ') + ' — ' + fmtTokens(paidSplit.paidInput) +
+        ' input, ' + fmtCost(paidSplit.paidCost),
+    });
+    if (paidSplit.unpricedInput > 0) {
+      cards.push({
+        label: 'Hit Ratio (unpriced)',
+        value: fmtPct(unpricedRatio),
+        color: '#6b7280',
+        title: 'No pricing entry, so billed cost is unknown rather than zero: ' +
+          paidSplit.unpricedModels.join(', ') + ' — ' + fmtTokens(paidSplit.unpricedInput) + ' input',
+      });
+    }
+  }
+  cards.push(
+    { label: 'Cache Hit Ratio (all)', value: fmtPct(hitRatio), color: '#22c55e' },
     { label: 'Token Savings', value: fmtPct(savingsPct), color: '#3b82f6' },
     { label: 'Tokens Saved', value: fmtTokens(tokensSaved), color: '#22c55e' },
     { label: 'Total Input', value: fmtTokens(totalInput), color: '' },
     { label: 'Cache Read (Claude)', value: fmtTokens(cacheRead), color: '#22c55e' },
     { label: 'Cache Create (Claude)', value: fmtTokens(cacheCreate), color: '#f59e0b' },
     { label: 'Cached (OpenAI)', value: fmtTokens(cachedTokens), color: '#22c55e' },
-    { label: 'Uncached', value: fmtTokens(uncached), color: '#6b7280' },
-  ];
+    { label: 'Uncached', value: fmtTokens(uncached), color: '#6b7280' }
+  );
 
   const cardsHtml = '<div class="usage-overview-grid">' + cards.map(card => `
-    <div class="usage-overview-card">
+    <div class="usage-overview-card"${card.title ? ' title="' + escapeHtml(card.title) + '"' : ''}>
       <div class="usage-overview-card-value" style="${card.color ? 'color:' + card.color : ''}">${card.value}</div>
       <div class="usage-overview-card-label">${card.label}</div>
     </div>`).join('') + '</div>';

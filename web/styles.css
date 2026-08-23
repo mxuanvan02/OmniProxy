@@ -466,6 +466,13 @@ select.custom-select-native {
 .custom-select-filter {
   width: 8rem;
 }
+/* Without an explicit width the wrapper falls back to .custom-select's
+   width:100%, which stretched the category filter across the whole toolbar
+   and pushed the status filter onto its own row. 9rem matches the w-36 the
+   native select declares. */
+#filterCategorySelect.custom-select-native + .custom-select {
+  width: 9rem;
+}
 .custom-select-trigger {
   display: inline-flex;
   align-items: center;

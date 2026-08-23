@@ -965,6 +965,12 @@ let customSelectRefreshQueued = false;
     // the select is a discrete choice and renders immediately.
     $('filterSearch').addEventListener('input', () => onFilterChange({ debounce: true }));
     $('filterStatusSelect').addEventListener('change', () => onFilterChange());
+    // The category select was rendered and kept in visual sync by the custom
+    // select layer, but never wired to the filter: onFilterChange reads its
+    // value, so nothing re-read it after a choice and the list stayed
+    // unfiltered. Same discrete-choice contract as the status select.
+    const filterCategoryEl = $('filterCategorySelect');
+    if (filterCategoryEl) filterCategoryEl.addEventListener('change', () => onFilterChange());
 
     $('accountsList').addEventListener('click', e => {
       const cb = e.target.closest('.account-checkbox');
