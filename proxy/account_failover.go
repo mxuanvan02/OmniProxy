@@ -71,7 +71,7 @@ func isEndpointGlobalError(msg string) bool {
 
 // isTransientNetworkError reports whether an error is a per-request transport
 // blip that may succeed on retry with the SAME account (same endpoint still alive).
-// Examples: connection reset, broken pipe, EOF, timeout.
+// Examples: connection reset, broken pipe, EOF, timeout, HTTP/2 stream reset.
 func isTransientNetworkError(msg string) bool {
 	lower := strings.ToLower(msg)
 	return strings.Contains(lower, "connection reset") ||
@@ -81,7 +81,16 @@ func isTransientNetworkError(msg string) bool {
 		strings.Contains(lower, "timeout exceeded") || // Go http.Client.Timeout
 		strings.Contains(lower, "client.timeout") || // Go http.Client error prefix
 		strings.Contains(lower, "context deadline exceeded") || // Request context timeout
-		strings.Contains(lower, "stream idle timeout") // idleTimeoutReader
+		strings.Contains(lower, "stream idle timeout") || // idleTimeoutReader
+		isTransientHTTP2StreamReset(lower)
+}
+
+func isTransientHTTP2StreamReset(lower string) bool {
+	if !strings.Contains(lower, "stream error:") {
+		return false
+	}
+	return strings.Contains(lower, "internal_error") ||
+		strings.Contains(lower, "refused_stream")
 }
 
 // isNetworkError reports whether an error string indicates any transport-level

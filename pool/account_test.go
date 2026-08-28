@@ -194,6 +194,8 @@ func TestIsTransientErrorDetectsKnownMessages(t *testing.T) {
 		"service unavailable",
 		"EOF",
 		"no such host",
+		"external SSE read: stream error: stream ID 57; INTERNAL_ERROR; received from peer",
+		"external SSE read: stream error: stream ID 19; REFUSED_STREAM; received from peer",
 	}
 	for _, msg := range positives {
 		if !IsTransientError(errors.New(msg)) {
@@ -212,6 +214,8 @@ func TestIsTransientErrorIgnoresNonTransient(t *testing.T) {
 		"net/http: timeout awaiting response headers",
 		"invalid_grant",
 		"some unrelated error",
+		"external SSE read: stream error: malformed event payload",
+		"upstream returned INTERNAL_ERROR without an HTTP/2 stream reset",
 		"model_not_found",
 		"HTTP 503 model gpt-5.6-sol is not available on any configured provider right now",
 		"model claude-opus-5 unavailable on this provider",

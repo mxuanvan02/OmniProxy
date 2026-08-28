@@ -1142,6 +1142,7 @@ func IsProviderModelUnavailableError(err error) bool {
 //   - "overloaded" / "rate_limit" / "rate limit" / "too many requests"
 //   - "timeout" / "deadline exceeded" / "context deadline exceeded"
 //   - "connection reset" / "EOF" / "broken pipe"
+//   - HTTP/2 stream resets with INTERNAL_ERROR / REFUSED_STREAM
 //   - "temporarily unavailable" / "service unavailable"
 //
 // NOTE: hard quota/credit exhaustion (IsQuotaExhaustionError) is NOT transient
@@ -1199,11 +1200,20 @@ func IsTransientError(err error) bool {
 		strings.Contains(lower, "connection reset") ||
 		strings.Contains(lower, "broken pipe") ||
 		strings.Contains(lower, "eof") ||
-		strings.Contains(lower, "no such host") {
+		strings.Contains(lower, "no such host") ||
+		isTransientHTTP2StreamReset(lower) {
 		return true
 	}
 
 	return false
+}
+
+func isTransientHTTP2StreamReset(lower string) bool {
+	if !strings.Contains(lower, "stream error:") {
+		return false
+	}
+	return strings.Contains(lower, "internal_error") ||
+		strings.Contains(lower, "refused_stream")
 }
 
 // IsContentBlockedError reports whether err indicates the upstream refused

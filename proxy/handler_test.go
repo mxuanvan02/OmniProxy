@@ -40,6 +40,73 @@ func parseClaudeSSEEvents(t *testing.T, body string) []claudeSSEEvent {
 	return events
 }
 
+func TestTransientRetryReplaysHTTP2StreamResetThroughExternalOpenAI(t *testing.T) {
+	initConfigForTests(t)
+
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.URL.Path != "/v1/chat/completions" {
+			t.Errorf("upstream path = %q, want /v1/chat/completions", r.URL.Path)
+		}
+		if got := r.Header.Get("Authorization"); got != "Bearer test-key" {
+			t.Errorf("Authorization = %q, want Bearer test-key", got)
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(strings.Join([]string{
+			`data: {"choices":[{"delta":{"content":"retry succeeded"}}]}`,
+			``,
+			`data: {"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":3}}`,
+			``,
+			`data: [DONE]`,
+			``,
+		}, "\n")))
+	}))
+	defer server.Close()
+
+	account := &config.Account{
+		ID:          "http2-reset-retry",
+		Email:       "http2-reset-retry",
+		AuthMethod:  externalAuthMethod,
+		AccessToken: "test-key",
+		BaseURL:     server.URL,
+	}
+	payload := &KiroPayload{OriginalModel: "gpt-test"}
+	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
+		Content: "retry this request",
+		ModelID: "gpt-test",
+		Origin:  "AI_EDITOR",
+	}
+
+	var text string
+	resets := 0
+	inputTokens, outputTokens := 0, 0
+	callback := &KiroStreamCallback{
+		OnReset: func() { resets++ },
+		OnText:  func(chunk string, _ bool) { text += chunk },
+		OnComplete: func(input, output int) {
+			inputTokens, outputTokens = input, output
+		},
+	}
+	initialErr := errors.New("external SSE read: stream error: stream ID 57; INTERNAL_ERROR; received from peer")
+
+	if ok := (&Handler{}).tryTransientRetry(account, payload, callback, initialErr); !ok {
+		t.Fatal("HTTP/2 stream reset was not recovered by the external-provider retry")
+	}
+	if requests != 1 {
+		t.Fatalf("retry requests = %d, want 1", requests)
+	}
+	if resets != 1 {
+		t.Fatalf("callback resets = %d, want 1", resets)
+	}
+	if text != "retry succeeded" {
+		t.Fatalf("retry text = %q, want retry succeeded", text)
+	}
+	if inputTokens != 11 || outputTokens != 3 {
+		t.Fatalf("retry usage = (%d, %d), want (11, 3)", inputTokens, outputTokens)
+	}
+}
+
 func TestThinkingSourceReasoningFirst(t *testing.T) {
 	var source thinkingStreamSource
 

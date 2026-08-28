@@ -774,10 +774,6 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 		if !strings.HasPrefix(line, "data:") {
 			continue
 		}
-		// Real data line — reset the SSE idle watchdog timer.
-		if watchdog != nil {
-			watchdog.DataReceived()
-		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 		if data == "[DONE]" {
 			terminal = true
@@ -804,6 +800,12 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 		if result.err != nil {
 			return result.err
 		}
+		// Metadata-only chunks such as {"delta":{"role":"assistant"}}
+		// do not prove that generation is making progress. Keep the shorter
+		// initial-data deadline until text, reasoning, or a tool call arrives;
+		// otherwise one empty chunk can leave the request idle for the full
+		// stream timeout.
+		recordExternalSSEProgress(watchdog, result)
 		sawDataEvent = sawDataEvent || result.recognized
 		sawAssistantOutput = sawAssistantOutput || result.recognizedOutput
 		terminal = terminal || result.terminal
@@ -829,6 +831,12 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 		callback.OnComplete(inputTokens, outputTokens)
 	}
 	return nil
+}
+
+func recordExternalSSEProgress(watchdog *sseIdleWatchdog, result externalSSELineResult) {
+	if watchdog != nil && result.recognizedOutput {
+		watchdog.DataReceived()
+	}
 }
 
 // processExternalSSELine handles a single non-empty SSE data line, including

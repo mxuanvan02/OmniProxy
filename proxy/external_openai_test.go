@@ -3,12 +3,14 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"omniproxy/config"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // initConfigForTests initialises the global config singleton so code paths
@@ -480,6 +482,112 @@ func TestParseExternalOpenAISSEAcceptsToolDeltaWithoutContent(t *testing.T) {
 	}
 	if completeCalls != 1 {
 		t.Fatalf("OnComplete calls = %d, want 1", completeCalls)
+	}
+}
+
+func TestExternalSSEMetadataDoesNotExtendInitialDataDeadline(t *testing.T) {
+	body := &keepaliveOnlyReader{interval: 10 * time.Millisecond}
+	watchdog := &sseIdleWatchdog{
+		body:        body,
+		idle:        time.Second,
+		initialIdle: 60 * time.Millisecond,
+		doneCh:      make(chan struct{}),
+	}
+	watchdog.Start()
+	defer watchdog.Stop()
+
+	result := processExternalSSEData(
+		`{"choices":[{"delta":{"role":"assistant"}}]}`,
+		&KiroStreamCallback{},
+		map[int]*externalToolAccum{},
+		&[]int{},
+		new(int),
+		new(int),
+	)
+	if result.err != nil {
+		t.Fatalf("process metadata chunk: %v", result.err)
+	}
+	if result.recognizedOutput {
+		t.Fatal("metadata-only chunk was classified as assistant output")
+	}
+	recordExternalSSEProgress(watchdog, result)
+
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for !watchdog.TimedOut() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !watchdog.TimedOut() {
+		t.Fatal("metadata-only chunk extended the initial-data deadline")
+	}
+}
+
+func TestParseExternalOpenAISSEMetadataOnlyStreamTimesOut(t *testing.T) {
+	t.Setenv("STREAM_IDLE_TIMEOUT_SECONDS", "1")
+
+	reader, writer := io.Pipe()
+	defer writer.Close()
+
+	go func() {
+		ticker := time.NewTicker(100 * time.Millisecond)
+		defer ticker.Stop()
+		for range ticker.C {
+			if _, err := io.WriteString(writer, "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n"); err != nil {
+				return
+			}
+		}
+	}()
+
+	resultCh := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		resultCh <- parseExternalOpenAISSE(reader, &KiroStreamCallback{})
+	}()
+
+	select {
+	case err := <-resultCh:
+		if err != ErrStreamIdleTimeout {
+			t.Fatalf("parseExternalOpenAISSE error = %v, want %v", err, ErrStreamIdleTimeout)
+		}
+		if elapsed := time.Since(start); elapsed < 900*time.Millisecond || elapsed > 1500*time.Millisecond {
+			t.Fatalf("metadata-only stream timeout = %v, want about 1s", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		_ = reader.CloseWithError(io.ErrClosedPipe)
+		<-resultCh
+		t.Fatal("metadata-only chunks kept the stream alive past its initial-data deadline")
+	}
+}
+
+func TestExternalSSEOutputExtendsInitialDataDeadline(t *testing.T) {
+	body := io.NopCloser(strings.NewReader(""))
+	watchdog := &sseIdleWatchdog{
+		body:        body,
+		idle:        250 * time.Millisecond,
+		initialIdle: 60 * time.Millisecond,
+		doneCh:      make(chan struct{}),
+	}
+	watchdog.Start()
+	defer watchdog.Stop()
+
+	result := processExternalSSEData(
+		`{"choices":[{"delta":{"content":"hello"}}]}`,
+		&KiroStreamCallback{},
+		map[int]*externalToolAccum{},
+		&[]int{},
+		new(int),
+		new(int),
+	)
+	if result.err != nil {
+		t.Fatalf("process output chunk: %v", result.err)
+	}
+	if !result.recognizedOutput {
+		t.Fatal("content chunk was not classified as assistant output")
+	}
+	recordExternalSSEProgress(watchdog, result)
+
+	time.Sleep(100 * time.Millisecond)
+	if watchdog.TimedOut() {
+		t.Fatal("assistant output did not extend the initial-data deadline")
 	}
 }
 
