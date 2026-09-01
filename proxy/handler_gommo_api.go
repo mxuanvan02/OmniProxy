@@ -10,7 +10,9 @@
 package proxy
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"omniproxy/config"
 	"omniproxy/logger"
@@ -279,4 +281,151 @@ func (h *Handler) apiGommoVideoStatus(w http.ResponseWriter, r *http.Request, jo
 		return
 	}
 	h.sendOpenAIError(w, serviceErrorStatus(lastErr), "server_error", lastErr.Error())
+}
+
+// ==================== Admin media playground ====================
+
+// The playground targets one named account instead of the pool: an operator
+// testing the credential they just added needs that account exercised, not
+// whichever one happens to be next in rotation.
+type gommoPlaygroundRequest struct {
+	AccountID  string `json:"accountId"`
+	Kind       string `json:"kind"`
+	Prompt     string `json:"prompt"`
+	Model      string `json:"model"`
+	Size       string `json:"size"`
+	Ratio      string `json:"ratio"`
+	Resolution string `json:"resolution"`
+	Duration   string `json:"duration"`
+	Voice      string `json:"voice"`
+	JobID      string `json:"jobId"`
+	N          int    `json:"n"`
+}
+
+func (h *Handler) gommoPlaygroundAccount(id string) (*config.Account, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, fmt.Errorf("accountId is required")
+	}
+	account := h.pool.GetByID(id)
+	if account == nil {
+		return nil, fmt.Errorf("account not found")
+	}
+	if !isGommoAccount(account) {
+		return nil, fmt.Errorf("account %s is not a Gommo account", account.Email)
+	}
+	return account, nil
+}
+
+// apiGommoModels groups the provider's catalog by media type so the playground
+// can offer only the models each field can actually accept.
+func (h *Handler) apiGommoModels(w http.ResponseWriter, r *http.Request, id string) {
+	account, err := h.gommoPlaygroundAccount(id)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	models, err := fetchGommoModels(account)
+	if err != nil {
+		writeJSON(w, serviceErrorStatus(err), map[string]string{"error": err.Error()})
+		return
+	}
+	grouped := map[string][]map[string]string{}
+	for _, model := range models {
+		kind := "image"
+		if len(model.OutputTypes) > 0 {
+			kind = model.OutputTypes[0]
+		}
+		grouped[kind] = append(grouped[kind], map[string]string{"id": model.ModelId, "name": model.ModelName})
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success":  true,
+		"models":   grouped,
+		"voiceId":  account.GommoVoiceID,
+		"ttsModel": account.GommoTTSModel,
+	})
+}
+
+// apiGommoPlaygroundRun runs one generation against one account and returns the
+// artifact as a URL (image, video) or an inline data URL (speech), so the admin
+// page can render the result without a second credentialed fetch.
+func (h *Handler) apiGommoPlaygroundRun(w http.ResponseWriter, r *http.Request) {
+	var in gommoPlaygroundRequest
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Invalid JSON"})
+		return
+	}
+	account, err := h.gommoPlaygroundAccount(in.AccountID)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	started := time.Now()
+
+	switch strings.ToLower(strings.TrimSpace(in.Kind)) {
+	case "image":
+		result, err := callGommoImage(r, account, imageGenerationRequest{
+			Prompt: in.Prompt, Model: in.Model, Size: in.Size, N: in.N,
+		})
+		if err != nil {
+			writeJSON(w, serviceErrorStatus(err), map[string]string{"error": err.Error()})
+			return
+		}
+		urls := make([]string, 0, len(result.Data))
+		for _, item := range result.Data {
+			urls = append(urls, item.URL)
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true, "kind": "image", "urls": urls,
+			"elapsedMs": time.Since(started).Milliseconds(),
+		})
+
+	case "video":
+		// A render that outlives the poll ceiling still returns its job id, so
+		// the caller can collect it later instead of paying for it twice.
+		job, err := callGommoVideo(r, account, gommoVideoRequest{
+			Prompt: in.Prompt, Model: in.Model, Ratio: in.Ratio,
+			Resolution: in.Resolution, Duration: in.Duration,
+		})
+		if err != nil {
+			writeJSON(w, serviceErrorStatus(err), map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true, "kind": "video", "id": job.ID, "status": job.Status,
+			"urls": []string{job.URL}, "elapsedMs": time.Since(started).Milliseconds(),
+		})
+
+	case "video-status":
+		job, err := gommoVideoStatus(r, account, in.JobID)
+		if err != nil {
+			writeJSON(w, serviceErrorStatus(err), map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true, "kind": "video", "id": job.ID, "status": job.Status,
+			"urls": []string{job.URL},
+		})
+
+	case "tts":
+		audio, mime, err := callGommoTTS(r, account, gommoTTSRequest{
+			Input: in.Prompt, Model: in.Model, Voice: in.Voice,
+		})
+		if err != nil {
+			writeJSON(w, serviceErrorStatus(err), map[string]string{"error": err.Error()})
+			return
+		}
+		if mime == "" {
+			mime = "audio/mpeg"
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true, "kind": "audio",
+			"dataUrl":   "data:" + mime + ";base64," + base64.StdEncoding.EncodeToString(audio),
+			"bytes":     len(audio),
+			"elapsedMs": time.Since(started).Milliseconds(),
+		})
+
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind must be image, video, video-status or tts"})
+	}
 }

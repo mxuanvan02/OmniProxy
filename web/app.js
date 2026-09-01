@@ -996,6 +996,7 @@ let customSelectRefreshQueued = false;
       else if (action === 'probeCapabilities') probeAccountCapabilities(id, btn);
       else if (action === 'loginAgain') loginCodexAgain(id);
       else if (action === 'changeCodexPassword') changeCodexPassword(id);
+      else if (action === 'gommoPlayground') gommoPlayground(id);
     });
   }
 
@@ -1038,12 +1039,14 @@ let customSelectRefreshQueued = false;
     $('detailModalClose').addEventListener('click', closeDetailModal);
     $('exportModalClose').addEventListener('click', closeExportModal);
     $('testModalClose').addEventListener('click', closeTestModal);
+    $('gommoModalClose').addEventListener('click', closeGommoModal);
     $('updateModalClose').addEventListener('click', closeUpdateModal);
     [
       ['addModal', closeModal],
       ['detailModal', closeDetailModal],
       ['exportModal', closeExportModal],
       ['testModal', closeTestModal],
+      ['gommoModal', closeGommoModal],
       ['updateModal', closeUpdateModal],
       ['confirmModal', () => closeConfirm(false)],
     ].forEach(([id, fn]) => bindDialogBackdropClose(id, fn));

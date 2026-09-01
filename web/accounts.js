@@ -22,6 +22,12 @@ let testModalImageSupported = true;
 let testModalImageReason = '';
 let testModalRunning = false;
 let testModalMode = 'chat';
+let gommoPlaygroundId = '';
+let gommoPlaygroundModels = { image: [], video: [], audio: [] };
+let gommoPlaygroundKind = 'image';
+let gommoPlaygroundRunning = false;
+let gommoPlaygroundResult = null;
+let gommoPlaygroundVoice = '';
 
   async function loadAccounts() {
     const res = await api('/accounts');
@@ -481,6 +487,7 @@ let testModalMode = 'chat';
       const isSearch = hasCapability(a, 'search');
       const isImage = hasCapability(a, 'image');
       const isService = isSearch || isImage;
+      const isGommo = String(a.authMethod || '').toLowerCase() === 'gommo';
       const extLimit = a.extCreditLimit || 0;
       const extUsed = a.extCreditsUsed || 0;
       const extRemaining = a.extCreditsRemaining || 0;
@@ -557,6 +564,9 @@ let testModalMode = 'chat';
         // speak proprietary protocols, so an /v1/embeddings shaped request would
         // fail for reasons unrelated to capability.
         (isExternal ? '<button class="btn btn-xs btn-outline" data-action="probeCapabilities" data-id="' + idAttr + '" title="' + escapeAttr(t('capability.notProbed')) + '">' + escapeHtml(t('accounts.probeCapabilities')) + '</button>' : '') +
+        // The generic "test" button only checks the credential. Media output has
+        // to be seen to be verified, so Gommo gets its own run-a-prompt view.
+        (isGommo ? '<button class="btn btn-xs btn-outline" data-action="gommoPlayground" data-id="' + idAttr + '">' + escapeHtml(t('gommo.playground') || 'Playground') + '</button>' : '') +
         (reauthRequired ? '<button class="btn btn-sm btn-danger" data-action="loginAgain" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.reauthRequiredHint')) + '">' + escapeHtml(t('accounts.loginAgain')) + '</button>' : '') +
         (banned ? '' :
           '<button class="btn btn-sm ' + (a.enabled ? 'btn-outline' : 'btn-primary') + '" data-action="toggle" data-id="' + idAttr + '" data-enabled="' + (!a.enabled) + '">' +
@@ -1645,6 +1655,160 @@ let testModalMode = 'chat';
     closeAllCustomSelects();
     closeDialog('testModal');
   }
+
+  // ==================== Gommo playground ====================
+
+  // The playground targets one named account rather than the pool: an operator
+  // verifying the credential they just added needs that account exercised, not
+  // whichever one rotation happens to pick.
+  async function gommoPlayground(id) {
+    gommoPlaygroundId = id;
+    gommoPlaygroundKind = 'image';
+    gommoPlaygroundModels = { image: [], video: [], audio: [] };
+    gommoPlaygroundResult = null;
+    gommoPlaygroundRunning = false;
+    gommoPlaygroundVoice = '';
+    renderGommoModal();
+    openDialog('gommoModal');
+    try {
+      const res = await api('/accounts/' + encodeURIComponent(id) + '/gommo-models');
+      const d = await res.json();
+      if (d.success) {
+        gommoPlaygroundModels = {
+          image: d.models.image || [],
+          video: d.models.video || [],
+          audio: d.models.audio || [],
+        };
+        gommoPlaygroundVoice = d.voiceId || '';
+      } else {
+        gommoPlaygroundResult = { error: d.error || t('common.failed') };
+      }
+    } catch (e) {
+      gommoPlaygroundResult = { error: e.message || String(e) };
+    }
+    renderGommoModal();
+  }
+
+  function closeGommoModal() { closeDialog('gommoModal'); }
+
+  function gommoModelOptions(kind) {
+    const list = gommoPlaygroundModels[kind === 'tts' ? 'audio' : kind] || [];
+    return list.map(m =>
+      '<option value="' + escapeAttr(m.id) + '">' + escapeHtml(m.name || m.id) + '</option>'
+    ).join('');
+  }
+
+  function renderGommoModal() {
+    const body = $('gommoBody');
+    if (!body) return;
+    const kind = gommoPlaygroundKind;
+    const acc = accountsData.find(a => a.id === gommoPlaygroundId);
+    const label = acc ? (acc.nickname || acc.email || acc.id) : gommoPlaygroundId;
+    const tab = (value, text) =>
+      '<button type="button" class="btn btn-sm ' + (kind === value ? 'btn-primary' : 'btn-outline') +
+      '" data-gommo-kind="' + value + '">' + escapeHtml(text) + '</button>';
+
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(label) + '</p>' +
+      '<div class="flex gap-2 flex-wrap mb-3">' +
+      tab('image', t('category.image')) +
+      tab('video', t('category.video')) +
+      tab('tts', t('category.audioTts')) +
+      tab('video-status', t('gommo.jobLookup') || 'Job lookup') +
+      '</div>' +
+      (kind === 'video-status'
+        ? '<div class="form-group"><label>' + escapeHtml(t('gommo.jobIdLabel') || 'Job ID') + '</label>' +
+          '<input type="text" id="gommoJobId" class="font-mono" /></div>'
+        : '<div class="form-group"><label>' + escapeHtml(t('gommo.promptLabel') || 'Prompt') + '</label>' +
+          '<textarea id="gommoPrompt" rows="3">' + escapeHtml(gommoDefaultPrompt(kind)) + '</textarea></div>' +
+          '<div class="form-group"><label>' + escapeHtml(t('gommo.modelLabel') || 'Model') + '</label>' +
+          '<select id="gommoModel">' + gommoModelOptions(kind) + '</select></div>' +
+          (kind === 'image'
+            ? '<div class="form-group"><label>' + escapeHtml(t('gommo.sizeLabel') || 'Ratio') + '</label>' +
+              '<select id="gommoSize"><option value="1:1">1:1</option><option value="16:9">16:9</option><option value="9:16">9:16</option></select></div>'
+            : '') +
+          (kind === 'video'
+            ? '<div class="form-group"><label>' + escapeHtml(t('gommo.sizeLabel') || 'Ratio') + '</label>' +
+              '<select id="gommoRatio"><option value="16_9">16:9</option><option value="9_16">9:16</option><option value="1_1">1:1</option></select></div>'
+            : '') +
+          // Speech needs a voice id: the upstream rejects a synthesis request
+          // without one, so it is asked for here rather than failing later.
+          (kind === 'tts'
+            ? '<div class="form-group"><label>' + escapeHtml(t('gommo.voiceLabel') || 'Voice ID') + '</label>' +
+              '<input type="text" id="gommoVoice" class="font-mono" value="' + escapeAttr(gommoPlaygroundVoice) + '" /></div>'
+            : '')) +
+      '<div id="gommoResult" class="mt-2">' + renderGommoResult() + '</div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" id="gommoCancelBtn" type="button">' + escapeHtml(t('common.close')) + '</button>' +
+      '<button class="btn btn-primary" id="gommoRunBtn" type="button" ' + (gommoPlaygroundRunning ? 'disabled' : '') + '>' +
+      escapeHtml(gommoPlaygroundRunning ? (t('common.loading') || '...') : (t('gommo.run') || 'Generate')) + '</button>' +
+      '</div>';
+
+    $('gommoCancelBtn').addEventListener('click', closeGommoModal);
+    $('gommoRunBtn').addEventListener('click', runGommoPlayground);
+    qsa('[data-gommo-kind]', body).forEach(btn => btn.addEventListener('click', () => {
+      gommoPlaygroundKind = btn.dataset.gommoKind;
+      gommoPlaygroundResult = null;
+      renderGommoModal();
+    }));
+  }
+
+  function gommoDefaultPrompt(kind) {
+    if (kind === 'tts') return t('gommo.samplePromptTts') || 'Xin chào, đây là bản thử giọng đọc.';
+    if (kind === 'video') return t('gommo.samplePromptVideo') || 'A red fox running through falling snow, cinematic';
+    return t('gommo.samplePromptImage') || 'A red fox in deep snow at golden hour, cinematic, sharp detail';
+  }
+
+  // Video renders can outlive the poll ceiling, in which case the job id is all
+  // that comes back — it is shown so the operator can look the render up later
+  // rather than paying for it again.
+  function renderGommoResult() {
+    const r = gommoPlaygroundResult;
+    if (!r) return '';
+    if (r.error) return '<p class="text-sm" style="color:var(--danger)">' + escapeHtml(r.error) + '</p>';
+    let html = '';
+    if (r.elapsedMs) html += '<p class="text-sm muted-text">' + Math.round(r.elapsedMs / 1000) + 's</p>';
+    if (r.id) html += '<p class="text-sm font-mono">' + escapeHtml(r.id) + ' · ' + escapeHtml(r.status || '') + '</p>';
+    for (const url of (r.urls || [])) {
+      if (!url) continue;
+      html += r.kind === 'video'
+        ? '<video src="' + escapeAttr(url) + '" controls class="w-full mt-2"></video>'
+        : '<img src="' + escapeAttr(url) + '" class="w-full mt-2" alt="" />';
+      html += '<p class="text-sm"><a href="' + escapeAttr(url) + '" target="_blank" rel="noopener">' + escapeHtml(url) + '</a></p>';
+    }
+    if (r.dataUrl) html += '<audio src="' + escapeAttr(r.dataUrl) + '" controls class="w-full mt-2"></audio>';
+    return html || '<p class="text-sm muted-text">' + escapeHtml(t('gommo.noArtifact') || 'No artifact returned') + '</p>';
+  }
+
+  async function runGommoPlayground() {
+    if (gommoPlaygroundRunning) return;
+    gommoPlaygroundRunning = true;
+    gommoPlaygroundResult = null;
+    const kind = gommoPlaygroundKind;
+    const payload = {
+      accountId: gommoPlaygroundId,
+      kind,
+      prompt: $('gommoPrompt') ? $('gommoPrompt').value.trim() : '',
+      model: $('gommoModel') ? $('gommoModel').value : '',
+      size: $('gommoSize') ? $('gommoSize').value : '',
+      ratio: $('gommoRatio') ? $('gommoRatio').value : '',
+      voice: $('gommoVoice') ? $('gommoVoice').value.trim() : '',
+      jobId: $('gommoJobId') ? $('gommoJobId').value.trim() : '',
+      n: 1,
+    };
+    renderGommoModal();
+    try {
+      const res = await api('/gommo/playground', { method: 'POST', body: JSON.stringify(payload) });
+      const d = await res.json();
+      gommoPlaygroundResult = d.success ? d : { error: d.error || t('common.failed') };
+    } catch (e) {
+      gommoPlaygroundResult = { error: e.message || String(e) };
+    } finally {
+      gommoPlaygroundRunning = false;
+      renderGommoModal();
+    }
+  }
+
   async function runTestAccount(id, request) {
     if (testModalRunning) return;
     testModalRunning = true;
@@ -2780,7 +2944,7 @@ let testModalMode = 'chat';
       '<div class="form-group"><label>' + escapeHtml(t('gommo.tokenLabel') || 'Access token') + '</label>' +
       '<input type="password" id="gommoToken" class="font-mono" autocomplete="off" placeholder="' + escapeAttr(t('gommo.tokenPlaceholder') || '') + '" /></div>' +
       '<div class="form-group"><label>' + escapeHtml(t('gommo.domainLabel') || 'Domain') + '</label>' +
-      '<input type="text" id="gommoDomain" class="font-mono" placeholder="79ai.net" /></div>' +
+      '<input type="text" id="gommoDomain" class="font-mono" value="79ai.net" /></div>' +
       '<div class="form-group"><label>' + escapeHtml(t('gommo.capabilitiesLabel') || 'Capabilities') + '</label>' +
       '<div class="flex gap-3 flex-wrap">' +
       '<label class="flex items-center gap-1 text-sm"><input type="checkbox" class="gommoCap" value="image" checked /> ' + escapeHtml(t('category.image')) + '</label>' +

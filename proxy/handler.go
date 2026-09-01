@@ -5330,6 +5330,13 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/gommo-balance") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/gommo-balance")
 		h.apiRefreshGommoBalance(w, r, id)
+	// Suffix is "-models", not "/models": the generic account-models case below
+	// must not swallow this one.
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/gommo-models") && r.Method == "GET":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/gommo-models")
+		h.apiGommoModels(w, r, id)
+	case path == "/gommo/playground" && r.Method == "POST":
+		h.apiGommoPlaygroundRun(w, r)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/refresh-token") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/refresh-token")
 		h.apiRefreshAccountToken(w, r, id)
