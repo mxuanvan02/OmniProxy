@@ -182,6 +182,8 @@ let testModalMode = 'chat';
     if (normalized === 'external_openai') return t('auth.externalOpenai');
     if (normalized === 'agentrouter' || normalized === 'external_agentrouter') return t('auth.agentrouter');
     if (normalized === 'codex') return t('auth.codex');
+    if (normalized === 'antigravity') return t('auth.antigravity');
+    if (normalized === 'gommo') return t('auth.gommo');
     if (normalized === 'builderid') return 'BuilderID';
     if (normalized === 'github') return t('local.providerGithub');
     if (normalized === 'google') return t('local.providerGoogle');
@@ -284,10 +286,15 @@ let testModalMode = 'chat';
   // accounts are identified by their explicit capability metadata, not by
   // authMethod (all 9router service accounts use an API key).
   function accountCategory(a) {
+    // Gommo is checked before the capability buckets: it carries the "image"
+    // capability, so a capability-first test would file a media provider under
+    // the search/image service bucket and hide it from its own group.
+    if (String((a && a.authMethod) || '').toLowerCase() === 'gommo') return 'media';
     if (hasCapability(a, 'search')) return 'search';
     if (hasCapability(a, 'image')) return 'image';
     const m = String(a.authMethod || '').toLowerCase();
     if (m === 'codex') return 'codex';
+    if (m === 'antigravity') return 'external';
     if (m === 'external_openai' || m === 'agentrouter' || m === 'external_agentrouter') return 'external';
     if (m === 'social' || m === 'idc' || m === 'external_idp' ||
         m === 'builderid' || m === 'api_key' || m === '' ) return 'kiro';
@@ -299,6 +306,7 @@ let testModalMode = 'chat';
     if (cat === 'search') return t('category.search');
     if (cat === 'image') return t('category.image');
     if (cat === 'external') return t('category.external');
+    if (cat === 'media') return t('category.media');
     return t('category.other');
   }
   function categoryIcon(cat) {
@@ -1698,7 +1706,11 @@ let testModalMode = 'chat';
     credentials: 'fa-solid fa-code',
     cookie: 'fa-solid fa-cookie-bite',
     codex: 'fa-solid fa-robot',
-    ninerouter: 'fa-solid fa-arrow-right-to-bracket'
+    ninerouter: 'fa-solid fa-arrow-right-to-bracket',
+    antigravity: 'fa-solid fa-rocket',
+    antigravityLogin: 'fa-brands fa-google',
+    antigravityImport: 'fa-solid fa-file-import',
+    gommo: 'fa-solid fa-photo-film'
   };
   function methodCard(type, title, desc) {
     var icon = METHOD_ICONS[type] || 'fa-solid fa-circle-plus';
@@ -1716,6 +1728,7 @@ let testModalMode = 'chat';
     const title = $('modalTitle');
     const body = $('modalBody');
     if (type !== 'codexLogin') stopCodexLoginPolling();
+    if (type !== 'antigravityLogin') stopAntigravityLoginPolling();
     if (type === 'add') modalAdd(title, body);
     else if (type === 'builderid') modalBuilderId(title, body);
     else if (type === 'iam') modalIam(title, body);
@@ -1735,11 +1748,16 @@ let testModalMode = 'chat';
     else if (type === 'codex') modalCodex(title, body);
     else if (type === 'codexLogin') modalCodexLogin(title, body);
     else if (type === 'ninerouter') modalNineRouter(title, body);
+    else if (type === 'antigravity') modalAntigravity(title, body);
+    else if (type === 'antigravityLogin') modalAntigravityLogin(title, body);
+    else if (type === 'antigravityImport') modalAntigravityImport(title, body);
+    else if (type === 'gommo') modalGommo(title, body);
     if (!modal.classList.contains('active')) openDialog('addModal');
     enhanceCustomSelects(body);
   }
   function closeModal() {
     stopCodexLoginPolling();
+    stopAntigravityLoginPolling();
     closeDialog('addModal');
     iamSession = '';
     if (builderIdPollTimer) { clearTimeout(builderIdPollTimer); builderIdPollTimer = null; }
@@ -1772,6 +1790,18 @@ let testModalMode = 'chat';
       '<div class="method-list">' +
       methodCard('external', t('modal.externalTitle'), t('modal.externalDesc')) +
       methodCard('agentrouter', t('modal.agentrouterTitle'), t('modal.agentrouterDesc')) +
+      methodCard('antigravity', t('modal.antigravityTitle'), t('modal.antigravityDesc')) +
+      '</div>' +
+      '</div>' +
+      // ── Media category (image / video / speech generation) ──
+      '<div class="add-category-section" data-cat="media">' +
+      '<div class="add-category-header">' +
+      '<span class="add-category-icon"><i class="fa-solid fa-photo-film" aria-hidden="true"></i></span>' +
+      '<span class="add-category-title">' + escapeHtml(t('category.media')) + '</span>' +
+      '<span class="add-category-desc">' + escapeHtml(t('modal.mediaCategoryDesc')) + '</span>' +
+      '</div>' +
+      '<div class="method-list">' +
+      methodCard('gommo', t('modal.gommoTitle'), t('modal.gommoDesc')) +
       '</div>' +
       '</div>' +
       // ── Kiro category (Collapsible with primary methods + show more) ──
@@ -2513,6 +2543,310 @@ let testModalMode = 'chat';
         toastPrimary(t('codex.importSuccess') + ': ' + formatCodexAccountLabel(d.account));
         autoRefreshNewAccount(d.account?.id);
       } else toastError(d.error || t('common.failed'));
+    } catch (e) {
+      toastError(t('common.failed') + ': ' + (e.message || e));
+    } finally {
+      btn.disabled = false; btn.textContent = t('common.add');
+    }
+  }
+
+  // ==================== Antigravity (Google Cloud Code Assist) ====================
+
+  // modalAntigravity — hub. Offers the OAuth login and, when this machine
+  // already has credentials from an installed Antigravity / Gemini CLI, the
+  // import path. The import is probed first because re-granting OAuth for an
+  // account that is already authorised locally invalidates the IDE's session.
+  function modalAntigravity(title, body) {
+    title.textContent = t('antigravity.title') || 'Google Antigravity';
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('antigravity.desc') || '') + '</p>' +
+      '<div class="message message-warning"><p>' + escapeHtml(t('antigravity.tosWarning') || '') + '</p></div>' +
+      '<div class="method-list">' +
+      methodCard('antigravityLogin', t('antigravity.loginTitle') || 'Sign in with Google', t('antigravity.loginDesc') || '') +
+      methodCard('antigravityImport', t('antigravity.importTitle') || 'Import local credentials', t('antigravity.importDesc') || '') +
+      '</div>' +
+      '<div class="modal-footer"><button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button></div>';
+    qsa('.method-card', body).forEach(card => {
+      card.addEventListener('click', () => {
+        const m = card.dataset.method;
+        if (m === 'antigravityLogin') modalAntigravityLogin(title, body);
+        else if (m === 'antigravityImport') modalAntigravityImport(title, body);
+      });
+    });
+  }
+
+  // modalAntigravityLogin — PKCE browser flow. The authorize URL is shown for
+  // the operator to open; unlike Codex there is no isolated browser profile to
+  // launch, so no server-side browser is started.
+  var antigravityPollTimer = null;
+  var antigravityLoginGeneration = 0;
+  function stopAntigravityLoginPolling() {
+    antigravityLoginGeneration++;
+    if (antigravityPollTimer) {
+      clearTimeout(antigravityPollTimer);
+      antigravityPollTimer = null;
+    }
+  }
+  function modalAntigravityLogin(title, body) {
+    title.textContent = t('antigravity.loginTitle') || 'Sign in with Google';
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('antigravity.loginDesc') || '') + '</p>' +
+      '<div id="agStep1">' +
+      '<div class="form-group"><label>' + escapeHtml(t('detail.nickname')) + '</label>' +
+      '<input type="text" id="agLoginNickname" placeholder="' + escapeAttr(t('antigravity.nicknamePlaceholder') || '') + '" /></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="antigravity" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="agStartLoginBtn" type="button">' + escapeHtml(t('antigravity.startLogin') || t('codex.startLogin')) + '</button>' +
+      '</div>' +
+      '</div>' +
+      '<div id="agStep2" class="hidden">' +
+      '<div class="form-group"><label>' + escapeHtml(t('antigravity.authUrl') || t('codex.authUrl')) + '</label>' +
+      '<div class="endpoint"><span id="agAuthUrl" class="font-mono text-xs"></span></div>' +
+      '<div class="flex gap-2 mt-2">' +
+      '<button class="btn btn-sm btn-outline flex-1" id="agOpenBtn" type="button">' + escapeHtml(t('builderid.open')) + '</button>' +
+      '<button class="btn btn-sm btn-outline flex-1" id="agCopyBtn" type="button">' + escapeHtml(t('common.copy')) + '</button>' +
+      '</div>' +
+      '</div>' +
+      '<p id="agStatus" class="text-center text-sm mt-4 muted-text">' + escapeHtml(t('builderid.waiting')) + '</p>' +
+      '<div class="modal-footer"><button class="btn btn-secondary" id="agCancelBtn" type="button">' + escapeHtml(t('common.cancel')) + '</button></div>' +
+      '</div>';
+    $('agStartLoginBtn').addEventListener('click', startAntigravityLogin);
+  }
+
+  async function startAntigravityLogin() {
+    const btn = $('agStartLoginBtn');
+    const nicknameInput = $('agLoginNickname');
+    if (!btn || !nicknameInput) return;
+    const nickname = nicknameInput.value.trim();
+    stopAntigravityLoginPolling();
+    const generation = antigravityLoginGeneration;
+    btn.disabled = true; btn.textContent = t('common.loading') || '...';
+    try {
+      const res = await api('/auth/antigravity/login', { method: 'POST' });
+      const d = await res.json();
+      if (generation !== antigravityLoginGeneration) return;
+      if (d.error) { toastError(d.error); return; }
+      const step1 = $('agStep1'), step2 = $('agStep2'), authURL = $('agAuthUrl');
+      const openBtn = $('agOpenBtn'), copyBtn = $('agCopyBtn'), cancelBtn = $('agCancelBtn');
+      if (!step1 || !step2 || !authURL || !openBtn || !copyBtn || !cancelBtn) return;
+      step1.classList.add('hidden');
+      step2.classList.remove('hidden');
+      authURL.textContent = d.authUrl;
+      openBtn.addEventListener('click', () => { window.open(d.authUrl, '_blank', 'noopener'); });
+      copyBtn.addEventListener('click', async () => {
+        await copyText(d.authUrl);
+        toastPrimary(t('common.copied'));
+      });
+      cancelBtn.addEventListener('click', cancelAntigravityLogin);
+      pollAntigravityLogin(nickname, generation);
+    } catch (e) {
+      toastError(t('common.failed') + ': ' + (e.message || e));
+    } finally {
+      btn.disabled = false;
+      btn.textContent = t('antigravity.startLogin') || t('codex.startLogin');
+    }
+  }
+  async function cancelAntigravityLogin() {
+    stopAntigravityLoginPolling();
+    try { await api('/auth/antigravity/cancel', { method: 'POST' }); } catch {}
+    showModal('antigravity');
+  }
+  function pollAntigravityLogin(nickname, generation) {
+    if (antigravityPollTimer) clearTimeout(antigravityPollTimer);
+    antigravityPollTimer = setTimeout(async () => {
+      if (generation !== antigravityLoginGeneration) return;
+      try {
+        const res = await api('/auth/antigravity/poll', { method: 'POST', body: JSON.stringify({ nickname }) });
+        const d = await res.json();
+        if (generation !== antigravityLoginGeneration) return;
+        if (d.pending) {
+          const status = $('antigravityStatus');
+          if (!status) return;
+          status.textContent = t('builderid.waiting');
+          pollAntigravityLogin(nickname, generation);
+          return;
+        }
+        if (d.error) { toastError(d.error); return; }
+        if (d.success) {
+          closeModal();
+          loadAccounts(); loadStats();
+          finishAntigravityAdd(d);
+        }
+      } catch (e) {
+        toastError(t('common.failed') + ': ' + (e.message || e));
+      }
+    }, 2000);
+  }
+
+  // finishAntigravityAdd reports the outcome of a login or import. A project
+  // failure is surfaced as a warning rather than swallowed: without a
+  // cloudaicompanion project the account is saved but cannot serve a request,
+  // and the reason is what tells the operator whether retrying will help.
+  function finishAntigravityAdd(d) {
+    const account = d.account || {};
+    const label = account.email || account.nickname || account.id || '';
+    toastPrimary((t('antigravity.addSuccess') || t('codex.importSuccess')) + ': ' + label, { duration: 5000 });
+    if (account.projectError) {
+      toastWarning((t('antigravity.projectFailed') || 'Project discovery failed') + ': ' + account.projectError, { duration: 8000 });
+    }
+    autoRefreshNewAccount(account.id);
+  }
+
+  // modalAntigravityImport reuses credentials an installed Antigravity or
+  // Gemini CLI already wrote on this machine. The local file is probed first so
+  // the common case is a single click with no token handling by the operator.
+  function modalAntigravityImport(title, body) {
+    title.textContent = t('antigravity.importTitle') || 'Import local credentials';
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('antigravity.importDesc') || '') + '</p>' +
+      '<div id="antigravityLocalBox"><p class="text-center muted-text">' + escapeHtml(t('common.loading') || '...') + '</p></div>' +
+      '<details class="mt-3"><summary class="text-sm muted-text cursor-pointer">' + escapeHtml(t('antigravity.manualToggle') || 'Paste tokens manually') + '</summary>' +
+      '<div class="form-group mt-2"><label>' + escapeHtml(t('codex.refreshTokenLabel')) + '</label>' +
+      '<textarea id="antigravityRefreshToken" class="font-mono" rows="2" placeholder="1//0g..."></textarea></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('antigravity.projectLabel') || 'Project ID') + ' <span class="muted-text">(' + escapeHtml(t('common.optional') || 'optional') + ')</span></label>' +
+      '<input type="text" id="antigravityProjectId" class="font-mono" placeholder="' + escapeAttr(t('antigravity.projectPlaceholder') || 'resolved automatically') + '" /></div>' +
+      '</details>' +
+      '<div class="form-group mt-3"><label>' + escapeHtml(t('detail.nickname')) + '</label>' +
+      '<input type="text" id="antigravityNickname" placeholder="' + escapeAttr(t('codex.nicknamePlaceholder')) + '" /></div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="antigravity" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="importAntigravityBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
+      '</div>';
+    $('importAntigravityBtn').addEventListener('click', importAntigravityCreds);
+    loadAntigravityLocalCreds();
+  }
+  async function loadAntigravityLocalCreds() {
+    const box = $('antigravityLocalBox');
+    if (!box) return;
+    try {
+      const res = await api('/auth/antigravity/local', { method: 'GET' });
+      const d = await res.json();
+      if (!box.isConnected) return;
+      if (!d.found) {
+        box.innerHTML = '<div class="message message-info"><p>' + escapeHtml(d.error || t('antigravity.noLocalCreds') || '') + '</p></div>';
+        return;
+      }
+      box.innerHTML = '<div class="message message-success">' +
+        '<p><strong>' + escapeHtml(d.email || d.name || '') + '</strong></p>' +
+        '<p class="text-xs muted-text">' + escapeHtml(t('ninerouter.pathLabel')) + ': <code>' + escapeHtml(d.path) + '</code></p>' +
+        (d.projectId ? '<p class="text-xs muted-text">' + escapeHtml(t('antigravity.projectLabel') || 'Project ID') + ': <code>' + escapeHtml(d.projectId) + '</code></p>' : '') +
+        '</div>';
+    } catch (e) {
+      box.innerHTML = '<div class="message message-error"><p>' + escapeHtml(e.message || String(e)) + '</p></div>';
+    }
+  }
+  async function importAntigravityCreds() {
+    const refreshToken = ($('antigravityRefreshToken') || {}).value || '';
+    const projectId = ($('antigravityProjectId') || {}).value || '';
+    const nickname = ($('antigravityNickname') || {}).value || '';
+    const btn = $('importAntigravityBtn');
+    btn.disabled = true; btn.textContent = t('common.loading') || '...';
+    try {
+      const res = await api('/auth/antigravity-import', {
+        method: 'POST',
+        body: JSON.stringify({
+          refreshToken: refreshToken.trim(),
+          projectId: projectId.trim(),
+          nickname: nickname.trim(),
+        }),
+      });
+      const d = await res.json();
+      if (d.success) {
+        closeModal(); loadAccounts(); loadStats();
+        finishAntigravityAdd(d);
+      } else {
+        toastError(d.error || t('common.failed'));
+      }
+    } catch (e) {
+      toastError(t('common.failed') + ': ' + (e.message || e));
+    } finally {
+      btn.disabled = false; btn.textContent = t('common.add');
+    }
+  }
+
+  // ==================== Gommo AutoAI (media generation) ====================
+
+  // modalGommo — Gommo / 79AI media provider. Both the token and the domain are
+  // required: the API sends `domain` on every call and rejects a request that
+  // omits it, so a saved account without one could never serve traffic.
+  //
+  // Capabilities are explicit checkboxes rather than inferred, because this
+  // account must never enter the chat pool: it generates media and cannot answer
+  // a completion, so a wrong capability would route chat traffic into a dead end.
+  function modalGommo(title, body) {
+    title.textContent = t('gommo.title') || 'Gommo AutoAI';
+    body.innerHTML =
+      '<p class="help-block">' + escapeHtml(t('gommo.desc') || '') + '</p>' +
+      '<div class="form-group"><label>' + escapeHtml(t('gommo.tokenLabel') || 'Access token') + '</label>' +
+      '<input type="password" id="gommoToken" class="font-mono" autocomplete="off" placeholder="' + escapeAttr(t('gommo.tokenPlaceholder') || '') + '" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('gommo.domainLabel') || 'Domain') + '</label>' +
+      '<input type="text" id="gommoDomain" class="font-mono" placeholder="79ai.net" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('gommo.capabilitiesLabel') || 'Capabilities') + '</label>' +
+      '<div class="flex gap-3 flex-wrap">' +
+      '<label class="flex items-center gap-1 text-sm"><input type="checkbox" class="gommoCap" value="image" checked /> ' + escapeHtml(t('category.image')) + '</label>' +
+      '<label class="flex items-center gap-1 text-sm"><input type="checkbox" class="gommoCap" value="video" checked /> ' + escapeHtml(t('category.video')) + '</label>' +
+      '<label class="flex items-center gap-1 text-sm"><input type="checkbox" class="gommoCap" value="audio-tts" checked /> ' + escapeHtml(t('category.audioTts')) + '</label>' +
+      '</div></div>' +
+      '<details class="mt-1"><summary class="text-sm muted-text cursor-pointer">' + escapeHtml(t('gommo.advancedToggle') || 'Advanced') + '</summary>' +
+      '<div class="form-group mt-2"><label>' + escapeHtml(t('external.baseUrlLabel')) + ' <span class="muted-text">(' + escapeHtml(t('common.optional') || 'optional') + ')</span></label>' +
+      '<input type="text" id="gommoBaseUrl" class="font-mono" placeholder="https://api.gommo.net" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('gommo.projectLabel') || 'Project ID') + '</label>' +
+      '<input type="text" id="gommoProjectId" class="font-mono" placeholder="default" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('gommo.imageModelLabel') || 'Default image model') + '</label>' +
+      '<input type="text" id="gommoImageModel" class="font-mono" placeholder="' + escapeAttr(t('gommo.imageModelPlaceholder') || '') + '" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('gommo.ttsModelLabel') || 'Default speech model') + '</label>' +
+      '<input type="text" id="gommoTtsModel" class="font-mono" placeholder="eleven_flash_v2_5" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('gommo.voiceLabel') || 'Default voice ID') + '</label>' +
+      '<input type="text" id="gommoVoiceId" class="font-mono" placeholder="' + escapeAttr(t('gommo.voicePlaceholder') || '') + '" /></div>' +
+      '</details>' +
+      '<div class="form-group mt-3"><label>' + escapeHtml(t('detail.nickname')) + '</label>' +
+      '<input type="text" id="gommoNickname" /></div>' +
+      '<label class="flex items-center gap-2 text-sm"><input type="checkbox" id="gommoTest" checked /> ' + escapeHtml(t('gommo.testLabel') || 'Verify the credential now') + '</label>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<button class="btn btn-primary" id="importGommoBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
+      '</div>';
+    $('importGommoBtn').addEventListener('click', importGommoProvider);
+  }
+
+  async function importGommoProvider() {
+    const accessToken = $('gommoToken').value.trim();
+    const domain = $('gommoDomain').value.trim();
+    if (!accessToken) return toastWarning((t('gommo.tokenLabel') || 'Access token') + ' is required');
+    // The API rejects any call without a domain, so an account saved without
+    // one could never serve a request. Refuse it here instead.
+    if (!domain) return toastWarning((t('gommo.domainLabel') || 'Domain') + ' is required');
+    const capabilities = qsa('.gommoCap').filter(cb => cb.checked).map(cb => cb.value);
+    if (capabilities.length === 0) return toastWarning(t('gommo.capabilitiesRequired') || 'Select at least one capability');
+
+    const payload = {
+      accessToken,
+      domain,
+      capabilities,
+      baseUrl: ($('gommoBaseUrl') || {}).value ? $('gommoBaseUrl').value.trim() : '',
+      projectId: ($('gommoProjectId') || {}).value ? $('gommoProjectId').value.trim() : '',
+      imageModel: ($('gommoImageModel') || {}).value ? $('gommoImageModel').value.trim() : '',
+      ttsModel: ($('gommoTtsModel') || {}).value ? $('gommoTtsModel').value.trim() : '',
+      voiceId: ($('gommoVoiceId') || {}).value ? $('gommoVoiceId').value.trim() : '',
+      nickname: $('gommoNickname').value.trim(),
+      test: $('gommoTest').checked,
+    };
+
+    const btn = $('importGommoBtn');
+    btn.disabled = true; btn.textContent = t('common.loading') || '...';
+    try {
+      const res = await api('/auth/gommo', { method: 'POST', body: JSON.stringify(payload) });
+      const d = await res.json();
+      if (!d.success) {
+        toastError(d.error || t('common.failed'));
+        return;
+      }
+      closeModal(); loadAccounts(); loadStats();
+      const label = d.account?.nickname || d.account?.email || d.account?.id;
+      toastPrimary((t('gommo.importSuccess') || t('external.importSuccess')) + ': ' + label, { duration: 5000 });
+      // The verification result is reported separately: the account is saved
+      // either way so the operator can correct a bad token by editing it.
+      if (d.test && d.test.error) toastWarning(t('gommo.verifyFailed') + ': ' + d.test.error, { duration: 8000 });
     } catch (e) {
       toastError(t('common.failed') + ': ' + (e.message || e));
     } finally {
