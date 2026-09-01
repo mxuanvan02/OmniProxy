@@ -943,13 +943,21 @@ func (p *AccountPool) CountAccountsForModel(model string) int {
 	return count
 }
 
-// GetByID returns an account by ID
+// GetByID returns an account by ID.
+// Service-only accounts (image/video/tts providers with no "chat" capability)
+// never enter p.accounts, so the serviceAccounts list must be searched too —
+// otherwise a media account is invisible to every caller that resolves an ID.
 func (p *AccountPool) GetByID(id string) *config.Account {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	for i := range p.accounts {
 		if p.accounts[i].ID == id {
 			return &p.accounts[i]
+		}
+	}
+	for i := range p.serviceAccounts {
+		if p.serviceAccounts[i].ID == id {
+			return &p.serviceAccounts[i]
 		}
 	}
 	return nil

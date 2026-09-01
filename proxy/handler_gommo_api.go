@@ -297,9 +297,14 @@ type gommoPlaygroundRequest struct {
 	Ratio      string `json:"ratio"`
 	Resolution string `json:"resolution"`
 	Duration   string `json:"duration"`
+	Mode       string `json:"mode"`
 	Voice      string `json:"voice"`
 	JobID      string `json:"jobId"`
 	N          int    `json:"n"`
+	// Images seeds image-to-video: several video models reject a text-only
+	// prompt and demand a first frame, so the playground has to be able to
+	// supply one.
+	Images []string `json:"images"`
 }
 
 func (h *Handler) gommoPlaygroundAccount(id string) (*config.Account, error) {
@@ -386,6 +391,7 @@ func (h *Handler) apiGommoPlaygroundRun(w http.ResponseWriter, r *http.Request) 
 		job, err := callGommoVideo(r, account, gommoVideoRequest{
 			Prompt: in.Prompt, Model: in.Model, Ratio: in.Ratio,
 			Resolution: in.Resolution, Duration: in.Duration,
+			Mode: in.Mode, Images: in.Images,
 		})
 		if err != nil {
 			writeJSON(w, serviceErrorStatus(err), map[string]string{"error": err.Error()})

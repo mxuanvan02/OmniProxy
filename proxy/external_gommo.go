@@ -378,6 +378,187 @@ func gommoPollJob(parent *http.Request, account *config.Account, path string,
 	}
 }
 
+// ==================== Per-model options ====================
+
+// gommoModelOptions is the option vocabulary one catalog entry declares. Gommo
+// validates these per model, not globally: Midjourney takes mode=relaxed|fast
+// with resolution=1k|2k, Nano Banana takes mode=vip and spells its ratios
+// "16_9" where Midjourney spells them "16:9". Several fields are mandatory, so
+// they can be neither omitted nor guessed — the catalog is the only source.
+type gommoModelOptions struct {
+	Modes       []string
+	Resolutions []string
+	Durations   []string
+	Ratios      []string
+	Prices      []gommoPriceCombo
+}
+
+// gommoPriceCombo is one row of a model's price table, which doubles as the
+// enumeration of combinations the model accepts.
+type gommoPriceCombo struct {
+	Mode       string      `json:"mode"`
+	Resolution string      `json:"resolution"`
+	Duration   gommoScalar `json:"duration"`
+	Price      float64     `json:"price"`
+}
+
+// gommoScalar is a field the catalog spells inconsistently: the same duration
+// arrives as "5" on one model and 5 on another. A plain string would fail the
+// whole envelope, and one failed row silently emptied every option — which the
+// upstream then rejects as a missing mandatory field.
+type gommoScalar string
+
+func (s *gommoScalar) UnmarshalJSON(data []byte) error {
+	*s = gommoScalar(strings.Trim(string(data), `"`))
+	if *s == "null" {
+		*s = ""
+	}
+	return nil
+}
+
+type gommoOptionItem struct {
+	Type string `json:"type"`
+}
+
+// gommoFetchModelOptions reads what one model declares. A miss returns zero
+// options rather than an error: the request can still proceed with whatever the
+// caller passed explicitly.
+func gommoFetchModelOptions(parent *http.Request, account *config.Account, mediaType, model string) gommoModelOptions {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return gommoModelOptions{}
+	}
+	raw, err := gommoPost(parent, account, gommoPathModels, map[string]interface{}{"type": mediaType})
+	if err != nil {
+		logger.Warnf("[Gommo] option lookup for %s/%s failed: %v", mediaType, model, err)
+		return gommoModelOptions{}
+	}
+	var envelope struct {
+		Data []struct {
+			Model       string            `json:"model"`
+			IDBase      string            `json:"id_base"`
+			Modes       []gommoOptionItem `json:"modes"`
+			Resolutions []gommoOptionItem `json:"resolutions"`
+			Durations   []gommoOptionItem `json:"durations"`
+			Ratios      []gommoOptionItem `json:"ratios"`
+			Prices      []gommoPriceCombo `json:"prices"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(raw, &envelope) != nil {
+		return gommoModelOptions{}
+	}
+	for _, entry := range envelope.Data {
+		if entry.Model != model && entry.IDBase != model {
+			continue
+		}
+		return gommoModelOptions{
+			Modes:       gommoOptionTypes(entry.Modes),
+			Resolutions: gommoOptionTypes(entry.Resolutions),
+			Durations:   gommoOptionTypes(entry.Durations),
+			Ratios:      gommoOptionTypes(entry.Ratios),
+			Prices:      entry.Prices,
+		}
+	}
+	return gommoModelOptions{}
+}
+
+func gommoOptionTypes(items []gommoOptionItem) []string {
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		if value := strings.TrimSpace(item.Type); value != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+// gommoResolveOptions fills in the mandatory mode/resolution/duration fields.
+// prices[] enumerates exactly the combinations the model accepts, so the
+// cheapest row compatible with what the caller asked for wins: an operator who
+// names no tier should not silently be charged the premium one.
+func gommoResolveOptions(opts gommoModelOptions, mode, resolution, duration string) (string, string, string) {
+	// An unsupported request value is dropped rather than forwarded: OpenAI's
+	// quality="hd" is not a Gommo mode, and sending it fails the whole call.
+	mode = gommoAllowed(mode, opts.Modes)
+	resolution = gommoAllowed(resolution, opts.Resolutions)
+	duration = gommoAllowed(duration, opts.Durations)
+
+	var best *gommoPriceCombo
+	for i := range opts.Prices {
+		combo := &opts.Prices[i]
+		if !gommoOptionMatches(mode, combo.Mode) ||
+			!gommoOptionMatches(resolution, combo.Resolution) ||
+			!gommoOptionMatches(duration, string(combo.Duration)) {
+			continue
+		}
+		if best == nil || combo.Price < best.Price {
+			best = combo
+		}
+	}
+	if best != nil {
+		mode = firstNonEmpty(mode, gommoAllowed(best.Mode, opts.Modes))
+		resolution = firstNonEmpty(resolution, gommoAllowed(best.Resolution, opts.Resolutions))
+		duration = firstNonEmpty(duration, gommoAllowed(string(best.Duration), opts.Durations))
+	}
+	return firstNonEmpty(mode, gommoFirst(opts.Modes)),
+		firstNonEmpty(resolution, gommoFirst(opts.Resolutions)),
+		firstNonEmpty(duration, gommoFirst(opts.Durations))
+}
+
+// gommoOptionMatches reports whether a requested value is compatible with a
+// price row. An unset request matches anything, and so does a row that omits
+// the field — image rows carry no duration.
+func gommoOptionMatches(requested, offered string) bool {
+	if requested == "" || strings.TrimSpace(offered) == "" {
+		return true
+	}
+	return strings.EqualFold(requested, offered)
+}
+
+// gommoAllowed returns value only when the model declares it. The price table
+// and the option lists disagree upstream on some entries (a row priced at
+// "380p" for a model that offers "360p"), and the declared list is what the
+// validator actually checks.
+func gommoAllowed(value string, declared []string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(declared) == 0 {
+		return value
+	}
+	for _, candidate := range declared {
+		if strings.EqualFold(value, candidate) {
+			return value
+		}
+	}
+	return ""
+}
+
+func gommoFirst(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
+}
+
+// gommoMatchRatio adapts a ratio to the spelling one model uses; a ratio the
+// model does not offer is dropped so the upstream applies its own default
+// instead of rejecting the call.
+func gommoMatchRatio(requested string, declared []string) string {
+	requested = strings.TrimSpace(requested)
+	if requested == "" || len(declared) == 0 {
+		return requested
+	}
+	normalize := func(s string) string {
+		return strings.NewReplacer(":", "_", "-", "_", " ", "").Replace(strings.ToLower(s))
+	}
+	wanted := normalize(requested)
+	for _, candidate := range declared {
+		if normalize(candidate) == wanted {
+			return candidate
+		}
+	}
+	return ""
+}
+
 // ==================== Image generation ====================
 
 // gommoProjectID resolves the project a generated artifact is filed under.
@@ -492,6 +673,12 @@ func callGommoImage(parent *http.Request, account *config.Account, in imageGener
 		return imageGenerationResponse{}, fmt.Errorf("gommo image: no model configured for account %s", account.Email)
 	}
 
+	// Most image models require mode and resolution and reject the call without
+	// them, so the catalog is consulted once for the whole fan-out. Quality maps
+	// onto mode when the model happens to declare that value.
+	opts := gommoFetchModelOptions(parent, account, "image", model)
+	mode, resolution, _ := gommoResolveOptions(opts, in.Quality, "", "")
+
 	result := imageGenerationResponse{Created: time.Now().Unix()}
 	for i := 0; i < count; i++ {
 		params := map[string]interface{}{
@@ -499,8 +686,10 @@ func callGommoImage(parent *http.Request, account *config.Account, in imageGener
 			"model":       model,
 			"prompt":      in.Prompt,
 			"project_id":  gommoProjectID(account),
+			"mode":        mode,
+			"resolution":  resolution,
 		}
-		if ratio := gommoImageRatio(in.Size); ratio != "" {
+		if ratio := gommoMatchRatio(gommoImageRatio(in.Size), opts.Ratios); ratio != "" {
 			params["ratio"] = ratio
 		}
 
@@ -706,6 +895,25 @@ const gommoDefaultVideoModel = "veo_3_fast"
 // endpointVideo is the usage/telemetry label for video generation.
 const endpointVideo = "video"
 
+// gommoVideoStatusBody is the /ai/video reply. Everything is nested under
+// videoInfo, so reading these fields at the top level silently yields an empty
+// status and no download url.
+type gommoVideoStatusBody struct {
+	VideoInfo struct {
+		IDBase      string `json:"id_base"`
+		Status      string `json:"status"`
+		DownloadURL string `json:"download_url"`
+	} `json:"videoInfo"`
+}
+
+func (b gommoVideoStatusBody) job(jobID string) gommoJob {
+	return gommoJob{
+		ID:     firstNonEmpty(strings.TrimSpace(b.VideoInfo.IDBase), jobID),
+		Status: b.VideoInfo.Status,
+		URL:    strings.TrimSpace(b.VideoInfo.DownloadURL),
+	}
+}
+
 // gommoVideoStatus reads one job's current state without waiting. It exists so a
 // caller whose create call outlived the poll ceiling can retrieve the result
 // later instead of paying for the render twice.
@@ -718,20 +926,11 @@ func gommoVideoStatus(parent *http.Request, account *config.Account, jobID strin
 	if err != nil {
 		return gommoJob{}, err
 	}
-	var status struct {
-		IDBase       string `json:"id_base"`
-		Status       string `json:"status"`
-		DownloadURL  string `json:"download_url"`
-		ThumbnailURL string `json:"thumbnail_url"`
-	}
+	var status gommoVideoStatusBody
 	if err := json.Unmarshal(raw, &status); err != nil {
 		return gommoJob{}, fmt.Errorf("gommo video status parse: %w", err)
 	}
-	return gommoJob{
-		ID:     firstNonEmpty(strings.TrimSpace(status.IDBase), jobID),
-		Status: status.Status,
-		URL:    strings.TrimSpace(status.DownloadURL),
-	}, nil
+	return status.job(jobID), nil
 }
 
 // callGommoVideo creates a video job and waits for its download URL.
@@ -755,19 +954,33 @@ func callGommoVideo(parent *http.Request, account *config.Account, in gommoVideo
 		translate = *in.TranslateToEn
 	}
 
+	// mode is mandatory on every video model and its vocabulary differs per
+	// model (trial|vip, cheap|vip, flash), so it comes from the catalog rather
+	// than a constant.
+	opts := gommoFetchModelOptions(parent, account, "video", model)
+	mode, resolution, duration := gommoResolveOptions(opts, in.Mode, in.Resolution, in.Duration)
+
 	params := map[string]interface{}{
 		"model":           model,
 		"privacy":         privacy,
 		"prompt":          prompt,
 		"translate_to_en": translate,
 		"project_id":      gommoProjectID(account),
-		"ratio":           in.Ratio,
-		"resolution":      in.Resolution,
-		"duration":        in.Duration,
-		"mode":            in.Mode,
+		"ratio":           gommoMatchRatio(in.Ratio, opts.Ratios),
+		"resolution":      resolution,
+		"duration":        duration,
+		"mode":            mode,
 	}
+	// images is a list of objects keyed by "url"; a bare list of URL strings is
+	// rejected as "Ảnh đính kèm không hợp lệ".
 	if len(in.Images) > 0 {
-		params["images"] = in.Images
+		refs := make([]map[string]string, 0, len(in.Images))
+		for _, image := range in.Images {
+			if image = strings.TrimSpace(image); image != "" {
+				refs = append(refs, map[string]string{"url": image})
+			}
+		}
+		params["images"] = refs
 	}
 
 	raw, err := gommoPost(parent, account, gommoPathCreateVideo, params)
@@ -793,19 +1006,11 @@ func callGommoVideo(parent *http.Request, account *config.Account, in gommoVideo
 	return gommoPollJob(parent, account, gommoPathVideo,
 		map[string]interface{}{"videoId": jobID},
 		func(body []byte) gommoJob {
-			var status struct {
-				IDBase      string `json:"id_base"`
-				Status      string `json:"status"`
-				DownloadURL string `json:"download_url"`
-			}
+			var status gommoVideoStatusBody
 			if json.Unmarshal(body, &status) != nil {
 				return gommoJob{ID: jobID}
 			}
-			return gommoJob{
-				ID:     firstNonEmpty(strings.TrimSpace(status.IDBase), jobID),
-				Status: status.Status,
-				URL:    strings.TrimSpace(status.DownloadURL),
-			}
+			return status.job(jobID)
 		})
 }
 

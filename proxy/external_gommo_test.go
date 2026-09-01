@@ -246,6 +246,10 @@ func TestCallGommoImagePollsUntilURLAppears(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case gommoPathModels:
+			// The image path now reads the model catalog for its mandatory
+			// per-model options; an empty catalog leaves them unset.
+			w.Write([]byte(`{"data":[]}`))
 		case gommoPathCreateImage:
 			w.Write([]byte(`{"imageInfo":{"id_base":"img-42","status":"PENDING"},"success":true}`))
 		case gommoPathImage:
@@ -471,7 +475,7 @@ func TestGommoVideoDefaultsToPrivateAndTranslated(t *testing.T) {
 			w.Write([]byte(`{"videoInfo":{"id_base":"vid-1","status":"PENDING"}}`))
 			return
 		}
-		w.Write([]byte(`{"id_base":"vid-1","status":"SUCCESS","download_url":"https://cdn.example.test/v.mp4"}`))
+		w.Write([]byte(`{"videoInfo":{"id_base":"vid-1","status":"SUCCESS","download_url":"https://cdn.example.test/v.mp4"}}`))
 	}))
 	defer server.Close()
 	restore := gommoPollIntervalForTest(1)
@@ -573,6 +577,10 @@ func TestCallGommoImageIssuesOneCreateCallPerImage(t *testing.T) {
 			w.Write([]byte(`{"imageInfo":{"id_base":"i","status":"SUCCESS","url":"https://cdn.example.test/i.png"}}`))
 			return
 		}
+		if r.URL.Path == gommoPathModels {
+			w.Write([]byte(`{"data":[]}`))
+			return
+		}
 		t.Errorf("unexpected path %s: a create that already carries a url must not be polled", r.URL.Path)
 	}))
 	defer server.Close()
@@ -591,8 +599,12 @@ func TestCallGommoImageIssuesOneCreateCallPerImage(t *testing.T) {
 func TestCallGommoImageCapsFanOut(t *testing.T) {
 	creates := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		creates++
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == gommoPathModels {
+			w.Write([]byte(`{"data":[]}`))
+			return
+		}
+		creates++
 		w.Write([]byte(`{"imageInfo":{"status":"SUCCESS","url":"https://cdn.example.test/i.png"}}`))
 	}))
 	defer server.Close()
@@ -613,6 +625,10 @@ func TestCallGommoImageKeepsImagesAlreadyPaidFor(t *testing.T) {
 	creates := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == gommoPathModels {
+			w.Write([]byte(`{"data":[]}`))
+			return
+		}
 		creates++
 		if creates == 1 {
 			w.Write([]byte(`{"imageInfo":{"status":"SUCCESS","url":"https://cdn.example.test/first.png"}}`))
@@ -786,6 +802,8 @@ func TestCallGommoVideoPollsUntilDownloadURL(t *testing.T) {
 		form, _ := url.ParseQuery(string(body))
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
+		case gommoPathModels:
+			w.Write([]byte(`{"data":[]}`))
 		case gommoPathCreateVideo:
 			createdForm = form
 			w.Write([]byte(`{"videoInfo":{"id_base":"vid-7","status":"PENDING","credit_fee":30}}`))
@@ -795,10 +813,10 @@ func TestCallGommoVideoPollsUntilDownloadURL(t *testing.T) {
 				t.Errorf("status poll videoId = %q, want vid-7", form.Get("videoId"))
 			}
 			if polls < 2 {
-				w.Write([]byte(`{"id_base":"vid-7","status":"PROCESSING"}`))
+				w.Write([]byte(`{"videoInfo":{"id_base":"vid-7","status":"PROCESSING"}}`))
 				return
 			}
-			w.Write([]byte(`{"id_base":"vid-7","status":"SUCCESS","download_url":"https://cdn.example.test/vid-7.mp4"}`))
+			w.Write([]byte(`{"videoInfo":{"id_base":"vid-7","status":"SUCCESS","download_url":"https://cdn.example.test/vid-7.mp4"}}`))
 		default:
 			t.Errorf("unexpected path %s", r.URL.Path)
 		}
@@ -849,7 +867,7 @@ func TestCallGommoVideoFailsWhenCreateReturnsNoJobID(t *testing.T) {
 func TestGommoVideoStatusReadsJob(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"id_base":"vid-9","status":"SUCCESS","download_url":"https://cdn.example.test/vid-9.mp4"}`))
+		w.Write([]byte(`{"videoInfo":{"id_base":"vid-9","status":"SUCCESS","download_url":"https://cdn.example.test/vid-9.mp4"}}`))
 	}))
 	defer server.Close()
 
