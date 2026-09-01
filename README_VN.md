@@ -1,6 +1,6 @@
 # OmniProxy
 
-Proxy và bộ định tuyến API cho mô hình ngôn ngữ lớn, viết bằng Go. OmniProxy cung cấp các endpoint tương thích OpenAI và Anthropic cho các công cụ CLI cục bộ, rồi định tuyến yêu cầu tới nhiều nhà cung cấp phía trên (OpenAI Codex, AWS IAM SSO / Builder ID, các cổng tương thích OpenAI, AgentRouter và dịch vụ tìm kiếm web).
+Proxy và bộ định tuyến API cho mô hình ngôn ngữ lớn, viết bằng Go. OmniProxy cung cấp các endpoint tương thích OpenAI và Anthropic cho các công cụ CLI cục bộ, rồi định tuyến yêu cầu tới nhiều nhà cung cấp phía trên (OpenAI Codex, Google Antigravity, AWS IAM SSO / Builder ID, các cổng tương thích OpenAI, AgentRouter, dịch vụ tìm kiếm web và API media Gommo AutoAI).
 
 OmniProxy được phát triển từ dự án **SuperKiro**, bổ sung danh mục mô hình phân nhóm theo họ, chuyển đổi giao thức AgentRouter hai chiều, xoay vòng nhóm tài khoản với cách ly lỗi theo từng mô hình, và giao diện quản trị cục bộ.
 
@@ -15,10 +15,13 @@ OmniProxy được phát triển từ dự án **SuperKiro**, bổ sung danh m�
 * **Chuyển đổi giao thức:** Phục vụ `/v1/chat/completions`, `/v1/messages` (Anthropic), `/v1/responses` và `/v1/models`.
 * **Các phương thức xác thực:**
   * **OpenAI Codex OAuth** — luồng PKCE qua trình duyệt, tự động làm mới token, theo dõi chu kỳ hạn mức.
+  * **Google Antigravity OAuth** — luồng PKCE qua trình duyệt tới Cloud Code Assist, tự khám phá project theo từng tài khoản, và nhập credential mà Antigravity / Gemini CLI đã cài sẵn ghi ra máy. Đọc lưu ý ở [§7](#7-điều-khoản-dịch-vụ-của-google-antigravity) trước khi dùng.
   * **AgentRouter** — chuyển đổi định dạng payload tác vụ, ánh xạ sự kiện stream `agent_thought` sang `reasoning_content`, duy trì `X-Agent-Session-ID` giữa các lượt.
   * **Cổng tương thích OpenAI** — bất kỳ endpoint bên ngoài, tự khám phá danh mục mô hình từ `/v1/models`.
   * **AWS IAM SSO / Builder ID** — đăng nhập và làm mới token nền cho CodeWhisperer/Kiro.
   * **Service API key** — tìm kiếm web qua Firecrawl, Tavily, Exa, Jina Reader.
+  * **Gommo AutoAI** — token dài hạn cho API media sau `api.gommo.net` (cũng là backend của front end 79AI).
+* **Sinh media:** Ảnh (`/v1/images/generations`), giọng nói (`/v1/audio/speech`) và video (`/v1/videos/generations`, kèm `/v1/videos/{id}` cho bản render vượt quá thời gian chờ của request) được phục vụ từ những nhà cung cấp có khả năng đó. Các job bất đồng bộ phía trên được poll nội bộ, nên client nhận kết quả hoàn chỉnh thay vì một job id.
 * **Danh mục theo họ mô hình:** Nhóm các mô hình đã khám phá thành các họ (`gpt`, `claude`, `qwen`, `deepseek`, `glm`, `grok`, `llama`, `kimi`, `minimax`) kèm giới hạn context và output token.
 * **Nhóm tài khoản:**
   * Chiến lược chọn tài khoản: round-robin có trọng số, tối ưu chi phí, nhận biết chu kỳ reset.
@@ -50,17 +53,18 @@ OmniProxy được phát triển từ dự án **SuperKiro**, bổ sung danh m�
 │  │  - Định tuyến cố định tận dụng prompt cache                      │  │
 │  └──────────────────────────────────┬───────────────────────────────┘  │
 │                                     │                                  │
-│             ┌───────────────────────┼───────────────────────┐          │
-│             ▼                       ▼                       ▼          │
-│  ┌─────────────────────┐ ┌─────────────────────┐ ┌──────────────────┐  │
-│  │  Codex OAuth Client │ │ Adapter AgentRouter │ │ External Adapter │  │
-│  │  (PKCE / SSE Stream)│ │ (Chuyển đổi giao   │ │ (OpenAI / Search)│  │
-│  │                     │ │  thức hai chiều)    │ │                  │  │
-│  └──────────┬──────────┘ └──────────┬──────────┘ └──────────┬───────┘  │
-└─────────────┼───────────────────────┼───────────────────────┼──────────┘
-              │                       │                       │
-              ▼                       ▼                       ▼
-      [OpenAI Codex]            [AgentRouter]       [Nhà cung cấp ngoài]
+│        ┌──────────────┬───────────┼───────────┬──────────────┐         │
+│        ▼              ▼           ▼           ▼              ▼         │
+│  ┌───────────┐ ┌────────────┐ ┌───────────┐ ┌──────────┐ ┌──────────┐  │
+│  │   Codex   │ │Antigravity │ │AgentRouter│ │ External │ │  Gommo   │  │
+│  │   OAuth   │ │ (dạng      │ │ (Chuyển   │ │ Adapters │ │ (media   │  │
+│  │  (PKCE)   │ │  Gemini)   │ │ đổi g.thức)│ │ (OpenAI) │ │ bất đ.bộ)│  │
+│  └─────┬─────┘ └─────┬──────┘ └─────┬─────┘ └────┬─────┘ └────┬─────┘  │
+└────────┼─────────────┼──────────────┼────────────┼────────────┼────────┘
+         │             │              │            │            │
+         ▼             ▼              ▼            ▼            ▼
+  [OpenAI Codex] [Cloud Code    [AgentRouter]  [Nhà c.cấp  [api.gommo.net]
+                   Assist]                       ngoài]
 ```
 
 ---
@@ -119,10 +123,30 @@ docker compose up -d
       "enabled": true,
       "weight": 1,
       "region": "external"
+    },
+    {
+      "id": "00000000-0000-0000-0000-000000000003",
+      "nickname": "Gommo Media",
+      "authMethod": "gommo",
+      "provider": "Gommo AutoAI",
+      "accessToken": "<gommo-access-token>",
+      "gommoDomain": "79ai.net",
+      "gommoProjectId": "default",
+      "imageModel": "<image-model-id>",
+      "gommoTtsModel": "eleven_flash_v2_5",
+      "gommoVoiceId": "<voice-id>",
+      "capabilities": ["image", "video", "audio-tts"],
+      "enabled": true,
+      "weight": 1,
+      "region": "external"
     }
   ]
 }
 ```
+
+`gommoDomain` là một phần của credential Gommo, không phải tùy chọn: phía trên nhận nó như một field trong body của mọi request và từ chối request thiếu nó. Tài khoản Gommo không được mang capability `chat` — nó sinh media và không trả lời được completion, nên nhóm chat sẽ định tuyến một request mà nó không bao giờ phục vụ được.
+
+Tài khoản Antigravity do luồng đăng nhập/import ghi ra chứ không nên viết tay; `googleProjectId` được khám phá riêng cho từng tài khoản và không được sao chép giữa các tài khoản.
 
 Tài khoản cũng có thể thêm từ giao diện quản trị (`/admin` → Add Account), nơi xử lý sẵn các luồng OAuth và import.
 
@@ -190,6 +214,35 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 curl http://127.0.0.1:8080/v1/models
 ```
 
+### Tạo media
+
+Các route này cần một tài khoản có khai báo capability tương ứng (xem mục Gommo
+trong [§4](#4-cấu-hình-dataconfigjson)).
+
+```bash
+# Ảnh — trả về một URL cho mỗi ảnh
+curl http://127.0.0.1:8080/v1/images/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OMNIPROXY_API_KEY" \
+  -d '{"prompt":"chiếc thuyền giấy trên mặt nước tĩnh","size":"1024x1024","n":1}'
+
+# Giọng nói — trả về dữ liệu âm thanh, giống route của OpenAI
+curl http://127.0.0.1:8080/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OMNIPROXY_API_KEY" \
+  -d '{"input":"Xin chào","voice":"<voice-id>"}' \
+  --output speech.mp3
+
+# Video — proxy tự poll tiến trình render; `id` dùng để lấy lại bản render chậm
+curl http://127.0.0.1:8080/v1/videos/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OMNIPROXY_API_KEY" \
+  -d '{"prompt":"chiếc thuyền giấy trôi theo dòng","ratio":"16_9"}'
+
+curl http://127.0.0.1:8080/v1/videos/<id> \
+  -H "Authorization: Bearer $OMNIPROXY_API_KEY"
+```
+
 ---
 
 ## 6. Kiểm thử
@@ -200,6 +253,30 @@ go test -count=1 ./...
 
 ---
 
-## 7. Giấy phép
+## 7. Điều khoản dịch vụ của Google Antigravity
+
+Điều khoản Antigravity của Google chỉ cho phép truy cập qua client của chính
+Google. Một tài khoản dùng qua proxy này có thể bị Google vô hiệu hóa bất cứ lúc
+nào, và điều đó đã xảy ra với nhiều người trong thực tế. Hãy coi đó là kết quả
+dự kiến khi bật provider này, không phải trường hợp biên.
+
+OmniProxy xử lý điều đó như sau:
+
+* Gửi đúng những field giao thức mà Cloud Code Assist API yêu cầu — OAuth token,
+  descriptor `Client-Metadata`, và project của chính tài khoản đó — không gì thêm.
+* Không luân phiên fingerprint client, không tạo giá trị platform hay api-client
+  giả, không gửi project id hardcode thuộc về người khác. Vài client bên thứ ba
+  làm điều cuối; khi đó request bị tính vào một project mà người gọi không có
+  quyền, và đó chính là dấu hiệu mà cơ chế thực thi của Google tìm kiếm.
+* Khi Google thực sự vô hiệu hóa một tài khoản, `classifyAntigravityFailure`
+  nhận ra phản hồi đó và đánh dấu tài khoản là `BANNED`, để pool ngừng chọn nó
+  thay vì thử lại một credential đã chết ở mỗi request.
+
+Không có cấu hình nào làm điều này tuân thủ điều khoản đó. Hãy cân nhắc khi quyết
+định dùng; các provider khác trong dự án không bị ảnh hưởng theo cách nào.
+
+---
+
+## 8. Giấy phép
 
 Phát hành theo giấy phép [MIT](LICENSE). Phát triển từ dự án SuperKiro.

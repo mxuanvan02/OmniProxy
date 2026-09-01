@@ -5,6 +5,11 @@ All notable changes to OmniProxy are documented here. The format follows [Keep a
 ## [Unreleased]
 
 ### Added
+- **Google Antigravity backend** (`AuthMethod: "antigravity"`) — OAuth PKCE loopback login, import of local `~/.gemini` / `~/.antigravity` credentials, per-account `cloudaicompanionProject` discovery (`loadCodeAssist` / `onboardUser`, cached 24h), streaming and non-streaming chat over `cloudcode-pa.googleapis.com`, live model catalog. A 403 without an auth phrase marks the account `BANNED` so the pool stops selecting it. **Google's Antigravity Terms of Service prohibit third-party clients and accounts have been disabled for using them** — see §7 of the README before enabling.
+- **Gommo AutoAI backend** (`AuthMethod: "gommo"`) — form-urlencoded provider (also fronted by 79AI) for image, video, TTS and music generation, with async job polling, credit/balance tracking and per-image billing that keeps already-paid-for results when a later image fails. The provider cannot answer chat completions, so the `chat` capability is rejected at import.
+- **Video generation endpoints** — `POST /v1/videos/generations` and `GET /v1/videos/{id}`, plus admin routes for creating and polling Gommo video jobs.
+- **Native capability hook** — `tryNativeCapability` runs before the OpenAI-compatible passthrough, letting non-OpenAI-shaped providers serve `/v1/audio/speech` and `/v1/images/generations` directly.
+- **Admin UI** — Antigravity (OAuth / import / local-credential detection / project refresh) and Gommo (import, capability picker, balance refresh) cards in the add-account flow, with EN / VN / ZH strings.
 - **Pool routing strategies** — `cost-optimized` and `reset-aware` opt-in strategies for pools with 20+ accounts. Configurable via admin panel (Usage → Pool tab) or `PATCH /admin/api/pool/strategy`. Round-robin remains the default with zero overhead.
 - **Admin API** — `GET /admin/api/pool/strategy` and `PATCH /admin/api/pool/strategy` for reading and updating the pool routing strategy at runtime.
 - **Web UI** — new "Pool" tab in the Usage page with radio-card strategy selector and per-strategy descriptions.
@@ -12,6 +17,11 @@ All notable changes to OmniProxy are documented here. The format follows [Keep a
 ### Changed
 - `GetNextForModelExcluding` now collects filter-passing candidates and picks by strategy score when a non-default strategy is active. Round-robin keeps the original early-return path for zero overhead.
 - `GetBoolSetting` / `GetStringSetting` / `SetBoolSetting` / `SetStringSetting` in `config/config.go` now nil-guard `cfg` so unit tests that bypass `config.Init` no longer panic.
+
+### Fixed
+- `accountSupportsServiceCapability` now accepts `audio-tts` and `video`. An account configured with only those capabilities previously entered no pool at all and was never selected.
+- `handleImageGeneration` no longer hardcodes Codex account selection; it picks an image-capable account and dispatches through `callImageGeneration`.
+- Four "non-Kiro" guards in `account_failover.go` and `handler.go` now recognise Antigravity accounts, which would otherwise be refreshed against the AWS Kiro endpoint with a Google token.
 
 ## [0.2.0] — 2026-07-18
 
