@@ -923,6 +923,7 @@
   "common.loading": "Loading...",
   "common.optional": "optional",
   "category.media": "Media Generation",
+  "accounts.noBaseUrl": "(no base URL)",
   "auth.antigravity": "Google Antigravity",
   "auth.gommo": "Gommo AutoAI",
   "modal.antigravityTitle": "Google Antigravity",

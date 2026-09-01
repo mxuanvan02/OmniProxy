@@ -922,6 +922,7 @@
   "common.loading": "加载中...",
   "common.optional": "可选",
   "category.media": "媒体生成",
+  "accounts.noBaseUrl": "（无 base URL）",
   "auth.antigravity": "Google Antigravity",
   "auth.gommo": "Gommo AutoAI",
   "modal.antigravityTitle": "Google Antigravity",

@@ -28,6 +28,7 @@ let gommoPlaygroundKind = 'image';
 let gommoPlaygroundRunning = false;
 let gommoPlaygroundResult = null;
 let gommoPlaygroundVoice = '';
+let collapsedGroups = loadCollapsedGroups();
 
   async function loadAccounts() {
     const res = await api('/accounts');
@@ -53,21 +54,76 @@ let gommoPlaygroundVoice = '';
   }
   // getFilteredAccountsGrouped returns the filtered accounts grouped by
   // category for the grouped list view. Returns an array of
-  // { category, label, icon, accounts } in display order.
+  // { category, label, icon, accounts, subgroups } in display order.
   function getFilteredAccountsGrouped() {
     const filtered = getFilteredAccounts();
-    const groups = { kiro: [], codex: [], search: [], image: [], external: [], other: [] };
+    const order = ['kiro', 'codex', 'search', 'image', 'media', 'external', 'other'];
+    const groups = {};
+    for (const cat of order) groups[cat] = [];
     for (const a of filtered) {
-      groups[accountCategory(a)].push(a);
+      // A category this list does not name (a provider bucket added later) is
+      // filed under "other" rather than throwing on a missing key.
+      const cat = accountCategory(a);
+      (groups[cat] || groups.other).push(a);
     }
-    const order = ['kiro', 'codex', 'search', 'image', 'external', 'other'];
     const out = [];
     for (const cat of order) {
-      if (groups[cat].length > 0) {
-        out.push({ category: cat, label: categoryLabel(cat), icon: categoryIcon(cat), accounts: groups[cat] });
-      }
+      if (groups[cat].length === 0) continue;
+      out.push({
+        category: cat,
+        label: categoryLabel(cat),
+        icon: categoryIcon(cat),
+        accounts: groups[cat],
+        subgroups: cat === 'external' ? externalSubgroups(groups[cat]) : null,
+      });
     }
     return out;
+  }
+
+  // externalSubgroups splits the external bucket by upstream. Accounts sharing a
+  // base URL share a gateway, a quota and a failure mode, so grouping by it is
+  // what keeps the section readable once several gateways are configured. One
+  // upstream needs no extra header level, so a single group returns null.
+  function externalSubgroups(accounts) {
+    const byUpstream = new Map();
+    for (const a of accounts) {
+      const key = externalGroupKey(a);
+      if (!byUpstream.has(key)) byUpstream.set(key, []);
+      byUpstream.get(key).push(a);
+    }
+    if (byUpstream.size < 2) return null;
+    return Array.from(byUpstream.entries())
+      .sort((x, y) => x[0].localeCompare(y[0]))
+      .map(([label, list]) => ({ key: label, label, accounts: list }));
+  }
+
+  // externalGroupKey normalizes a base URL into a group label. The path is kept:
+  // two providers often share a host and differ only by prefix
+  // (/v1 vs /openai/v1), and collapsing those into one group would hide it.
+  function externalGroupKey(a) {
+    const raw = String((a && a.baseUrl) || '').trim();
+    if (!raw) return t('accounts.noBaseUrl') || '(no base URL)';
+    return raw.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+  }
+
+  // Collapsed groups persist per browser: an operator who keeps one provider
+  // collapsed wants it collapsed on the next visit too, not reset by a reload.
+  function loadCollapsedGroups() {
+    try {
+      const stored = JSON.parse(localStorage.getItem('kiro_collapsedGroups') || '[]');
+      return new Set(Array.isArray(stored) ? stored : []);
+    } catch (e) {
+      return new Set();
+    }
+  }
+  function isGroupCollapsed(key) { return collapsedGroups.has(key); }
+  function toggleGroupCollapsed(key) {
+    if (collapsedGroups.has(key)) collapsedGroups.delete(key);
+    else collapsedGroups.add(key);
+    try {
+      localStorage.setItem('kiro_collapsedGroups', JSON.stringify(Array.from(collapsedGroups)));
+    } catch (e) { /* storage full or blocked: collapse still works for this session */ }
+    renderAccounts();
   }
   // onFilterChange is wired to both the keyword input (one event per keystroke)
   // and the status/category selects (one event per choice). renderAccounts()
@@ -321,6 +377,7 @@ let gommoPlaygroundVoice = '';
     if (cat === 'search') return 'fa-solid fa-magnifying-glass';
     if (cat === 'image') return 'fa-solid fa-image';
     if (cat === 'external') return 'fa-solid fa-plug';
+    if (cat === 'media') return 'fa-solid fa-photo-film';
     return 'fa-solid fa-circle-question';
   }
   function getStatusBadge(a) {
@@ -446,6 +503,19 @@ let gommoPlaygroundVoice = '';
     });
   }
 
+  // groupHeader renders one collapsible section header. The whole header is the
+  // toggle, so the click target matches what the operator sees; the icon slot is
+  // omitted for subgroups, which sit under a category that already carries one.
+  function groupHeader(key, label, count, collapsed, icon, cls) {
+    return '<div class="' + cls + '" role="button" tabindex="0" data-group-toggle="' + escapeAttr(key) + '"' +
+      ' aria-expanded="' + (!collapsed) + '">' +
+      '<span class="account-category-chevron"><i class="fa-solid fa-chevron-' + (collapsed ? 'right' : 'down') + '" aria-hidden="true"></i></span>' +
+      (icon ? '<span class="account-category-icon"><i class="' + icon + '" aria-hidden="true"></i></span>' : '') +
+      '<span class="account-category-title">' + escapeHtml(label) + '</span>' +
+      '<span class="account-category-count">' + count + '</span>' +
+      '</div>';
+  }
+
   function renderAccounts() {
     const container = $('accountsList');
     if (!container) return;
@@ -460,13 +530,25 @@ let gommoPlaygroundVoice = '';
     const groups = getFilteredAccountsGrouped();
     let html = '';
     for (const g of groups) {
+      const collapsed = isGroupCollapsed(g.category);
+      let inner = '';
+      if (!collapsed) {
+        if (g.subgroups) {
+          for (const sub of g.subgroups) {
+            const subKey = g.category + ':' + sub.key;
+            const subCollapsed = isGroupCollapsed(subKey);
+            inner += '<div class="account-subgroup">' +
+              groupHeader(subKey, sub.label, sub.accounts.length, subCollapsed, null, 'account-subgroup-header') +
+              (subCollapsed ? '' : sub.accounts.map(renderAccountCard).join('')) +
+              '</div>';
+          }
+        } else {
+          inner = g.accounts.map(renderAccountCard).join('');
+        }
+      }
       html += '<div class="account-category-group" data-category="' + escapeAttr(g.category) + '">' +
-        '<div class="account-category-header">' +
-        '<span class="account-category-icon"><i class="' + g.icon + '" aria-hidden="true"></i></span>' +
-        '<span class="account-category-title">' + escapeHtml(g.label) + '</span>' +
-        '<span class="account-category-count">' + g.accounts.length + '</span>' +
-        '</div>' +
-        g.accounts.map(renderAccountCard).join('') +
+        groupHeader(g.category, g.label, g.accounts.length, collapsed, g.icon, 'account-category-header') +
+        inner +
         '</div>';
     }
     container.innerHTML = html;

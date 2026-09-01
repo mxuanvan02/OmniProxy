@@ -923,6 +923,7 @@
   "common.loading": "Đang tải...",
   "common.optional": "tùy chọn",
   "category.media": "Tạo media",
+  "accounts.noBaseUrl": "(không có base URL)",
   "auth.antigravity": "Google Antigravity",
   "auth.gommo": "Gommo AutoAI",
   "modal.antigravityTitle": "Google Antigravity",

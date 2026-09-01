@@ -973,6 +973,11 @@ let customSelectRefreshQueued = false;
     if (filterCategoryEl) filterCategoryEl.addEventListener('change', () => onFilterChange());
 
     $('accountsList').addEventListener('click', e => {
+      // Section headers are checked before the card controls: a header contains
+      // no card, but a click inside a collapsed/expanded section must not be
+      // read as a header toggle either.
+      const header = e.target.closest('[data-group-toggle]');
+      if (header) { toggleGroupCollapsed(header.dataset.groupToggle); return; }
       const cb = e.target.closest('.account-checkbox');
       if (cb) {
         toggleSelectAccount(cb.dataset.id);
@@ -997,6 +1002,16 @@ let customSelectRefreshQueued = false;
       else if (action === 'loginAgain') loginCodexAgain(id);
       else if (action === 'changeCodexPassword') changeCodexPassword(id);
       else if (action === 'gommoPlayground') gommoPlayground(id);
+    });
+
+    // Section headers are focusable, so they must answer the keyboard too:
+    // reaching one by Tab and pressing Enter should collapse it.
+    $('accountsList').addEventListener('keydown', e => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const header = e.target.closest('[data-group-toggle]');
+      if (!header) return;
+      e.preventDefault();
+      toggleGroupCollapsed(header.dataset.groupToggle);
     });
   }
 
