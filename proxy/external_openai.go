@@ -678,6 +678,10 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 	if callback == nil {
 		callback = &KiroStreamCallback{}
 	}
+	// Withhold whitespace-only text so a turn that never produces real content
+	// stays retryable instead of reaching the client as a finished, empty answer.
+	gate := newBlankOutputGate(callback)
+	callback = gate.callback()
 	br := bufio.NewReaderSize(body, 16*1024)
 
 	// SSE idle watchdog — same rationale as parseCodexResponsesSSE.
@@ -824,6 +828,12 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 	if stopReason == "" {
 		stopReason = "end_turn"
 	}
+	// A stream can be well-formed and still carry nothing renderable (a lone
+	// space with finish_reason "length"). Report it so the caller can rotate
+	// accounts rather than closing the turn on an empty answer.
+	if !gate.meaningful {
+		return blankTurnError(stopReason)
+	}
 	if callback.OnStopReason != nil {
 		callback.OnStopReason(stopReason)
 	}
@@ -837,6 +847,117 @@ func recordExternalSSEProgress(watchdog *sseIdleWatchdog, result externalSSELine
 	if watchdog != nil && result.recognizedOutput {
 		watchdog.DataReceived()
 	}
+}
+
+// blankOutputGate withholds assistant text until the turn proves it carries
+// real content. Some upstreams answer a long agentic turn with a single space
+// and finish_reason "length": a technically well-formed stream that a client
+// renders as a finished, empty turn. Forwarding that space immediately would
+// mark the attempt as "already produced output", which costs the proxy its
+// ability to rotate to another account. Holding whitespace back keeps the
+// attempt retryable while preserving byte-exact output when content does
+// arrive: the pending prefix is flushed in order ahead of the first real text.
+type blankOutputGate struct {
+	target     *KiroStreamCallback
+	pending    []pendingText
+	meaningful bool
+	announced  bool
+}
+
+type pendingText struct {
+	text       string
+	isThinking bool
+}
+
+func newBlankOutputGate(target *KiroStreamCallback) *blankOutputGate {
+	return &blankOutputGate{target: target}
+}
+
+// callback returns a view of the target with text and tool events gated.
+// Every other callback is passed through untouched.
+func (g *blankOutputGate) callback() *KiroStreamCallback {
+	if g.target == nil {
+		return &KiroStreamCallback{}
+	}
+	gated := *g.target
+	gated.OnText = g.onText
+	if g.target.OnToolUse != nil {
+		gated.OnToolUse = func(toolUse KiroToolUse) {
+			// A tool call is real work even with no text alongside it.
+			// Tool calls are accumulated during the stream and emitted once the
+			// terminal event arrives, so the parser's own OnOutput signal for
+			// the tool delta was suppressed while the turn still looked blank.
+			// Announce it here instead, or a tool-only turn would reach the
+			// caller with no record that the upstream produced anything.
+			g.meaningful = true
+			g.announceOutput()
+			g.flush()
+			g.target.OnToolUse(toolUse)
+		}
+	}
+	// OnOutput would otherwise announce whitespace as produced output.
+	gated.OnOutput = func() {
+		if g.meaningful {
+			g.announceOutput()
+		}
+	}
+	return &gated
+}
+
+// announceOutput forwards the "upstream produced output" signal at most once,
+// so a turn carrying both text and tool calls does not report it twice.
+func (g *blankOutputGate) announceOutput() {
+	if g.announced {
+		return
+	}
+	g.announced = true
+	if g.target.OnOutput != nil {
+		g.target.OnOutput()
+	}
+}
+
+func (g *blankOutputGate) onText(text string, isThinking bool) {
+	if text == "" {
+		return
+	}
+	if !g.meaningful && strings.TrimSpace(text) == "" {
+		g.pending = append(g.pending, pendingText{text: text, isThinking: isThinking})
+		return
+	}
+	g.meaningful = true
+	g.announceOutput()
+	g.flush()
+	if g.target.OnText != nil {
+		g.target.OnText(text, isThinking)
+	}
+}
+
+// flush releases withheld whitespace once the turn is known to be real.
+func (g *blankOutputGate) flush() {
+	if len(g.pending) == 0 {
+		return
+	}
+	if g.target.OnText != nil {
+		for _, p := range g.pending {
+			g.target.OnText(p.text, p.isThinking)
+		}
+	}
+	g.pending = nil
+}
+
+// blankTurnError reports a turn that terminated without any renderable
+// assistant content. Returning an error lets the caller rotate accounts
+// instead of handing the client a finished, empty answer.
+//
+// The message deliberately carries no digits: error classification elsewhere
+// matches bare status tokens such as 401/403/503 anywhere in the string, so an
+// embedded token count could be misread as an upstream status code and trigger
+// an unrelated auth refresh or cooldown.
+func blankTurnError(stopReason string) error {
+	if stopReason == "max_tokens" {
+		return fmt.Errorf("external upstream stopped at its output limit before producing any content (stop_reason=%s)", stopReason)
+	}
+	return fmt.Errorf("external upstream ended with blank assistant output (stop_reason=%s)", stopReason)
 }
 
 // processExternalSSELine handles a single non-empty SSE data line, including
@@ -977,6 +1098,10 @@ func parseExternalOpenAIJSON(body io.Reader, callback *KiroStreamCallback) error
 	if callback == nil {
 		callback = &KiroStreamCallback{}
 	}
+	// Same blank-turn protection as the SSE path: a provider that ignores
+	// stream=true can still answer with whitespace only.
+	gate := newBlankOutputGate(callback)
+	callback = gate.callback()
 	data, err := io.ReadAll(body)
 	if err != nil {
 		return fmt.Errorf("external json read: %w", err)
@@ -1083,6 +1208,9 @@ func parseExternalOpenAIJSON(body io.Reader, callback *KiroStreamCallback) error
 			stopReason = normalizeUpstreamStopReason(ch.FinishReason)
 			break
 		}
+	}
+	if !gate.meaningful {
+		return blankTurnError(stopReason)
 	}
 	if callback.OnStopReason != nil {
 		callback.OnStopReason(stopReason)

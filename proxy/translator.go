@@ -185,6 +185,10 @@ type ClaudeThinkingConfig struct {
 	Type         string `json:"type,omitempty"`
 	BudgetTokens int    `json:"budget_tokens,omitempty"`
 	Display      string `json:"display,omitempty"`
+	// Effort carries the explicit reasoning level some clients send alongside
+	// an adaptive thinking request (Claude Desktop's --effort flag). It is
+	// authoritative when present; budget_tokens is only a fallback.
+	Effort string `json:"effort,omitempty"`
 }
 
 type ClaudeMessage struct {
@@ -396,25 +400,54 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 			Temperature: req.Temperature,
 			TopP:        req.TopP,
 		}
-		if req.Thinking != nil && req.Thinking.Type == "enabled" {
+		if effort, ok := claudeReasoningEffort(req.Thinking); ok {
 			payload.InferenceConfig.Thinking = req.Thinking
-			budget := req.Thinking.BudgetTokens
-			switch {
-			case budget >= 50000:
-				payload.InferenceConfig.ReasoningEffort = "max"
-			case budget >= 10000:
-				payload.InferenceConfig.ReasoningEffort = "high"
-			case budget >= 3000:
-				payload.InferenceConfig.ReasoningEffort = "medium"
-			default:
-				payload.InferenceConfig.ReasoningEffort = "low"
-			}
+			payload.InferenceConfig.ReasoningEffort = effort
 		}
 	}
 
 	truncatePayloadToLimit(payload, systemPrompt != "")
 
 	return payload
+}
+
+// claudeReasoningEffort derives the upstream reasoning level from an Anthropic
+// thinking config. Both "enabled" (explicit budget) and "adaptive" (model picks
+// its own budget) request reasoning, so both must forward an effort downstream:
+// external OpenAI-compatible providers only allocate a reasoning budget when
+// reasoning_effort is present, and Claude Desktop sends adaptive rather than
+// enabled. Treating adaptive as "no reasoning" silently downgraded every
+// Desktop turn to a non-reasoning request.
+func claudeReasoningEffort(thinking *ClaudeThinkingConfig) (string, bool) {
+	if thinking == nil {
+		return "", false
+	}
+	switch strings.ToLower(strings.TrimSpace(thinking.Type)) {
+	case "enabled", "adaptive":
+	default:
+		return "", false
+	}
+	// An explicit effort from the client wins: it is the level the user chose in
+	// the UI, whereas budget_tokens is absent for adaptive requests.
+	switch effort := strings.ToLower(strings.TrimSpace(thinking.Effort)); effort {
+	case "none", "minimal", "low", "medium", "high", "max", "xhigh":
+		return effort, true
+	}
+	switch budget := thinking.BudgetTokens; {
+	case budget >= 50000:
+		return "max", true
+	case budget >= 10000:
+		return "high", true
+	case budget >= 3000:
+		return "medium", true
+	case budget > 0:
+		return "low", true
+	default:
+		// Adaptive carries no budget. "high" matches the effort Claude Desktop
+		// requests for its thinking-capable models and keeps deep reasoning on
+		// for long agentic turns instead of leaving the upstream to guess.
+		return "high", true
+	}
 }
 
 func appendPromptGuidance(prompt, guidance string) string {
