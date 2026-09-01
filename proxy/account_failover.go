@@ -151,7 +151,7 @@ func (h *Handler) disableAccountOverage(account *config.Account) {
 	// accounts. FetchOverageStatus would hit q.external.amazonaws.com and
 	// fail with a DNS error. Skip the refresh for non-Kiro accounts; the
 	// overage-like error is logged upstream and treated as a soft cooldown.
-	if isExternalAccount(account) || isCodexAccount(account) {
+	if isExternalAccount(account) || isCodexAccount(account) || isAntigravityAccount(account) {
 		logger.Warnf("[AccountFailover] Skipping overage refresh for non-Kiro account %s (overage-like error: soft cooldown only)", account.Email)
 		return
 	}
@@ -189,7 +189,7 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error, model
 		// happen to contain "suspended" without meaning the account is banned
 		// — never auto-disable non-Kiro accounts on this pattern; treat as a
 		// soft cooldown so operators can investigate.
-		if isExternalAccount(account) || isCodexAccount(account) {
+		if isExternalAccount(account) || isCodexAccount(account) || isAntigravityAccount(account) {
 			logger.Warnf("[AccountFailover] Non-Kiro account %s returned suspension-like error (not auto-banning): %v", account.Email, err)
 			h.pool.RecordError(account.ID, false, model)
 		} else {

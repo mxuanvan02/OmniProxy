@@ -206,6 +206,15 @@ func (h *Handler) handleCapabilityPassthrough(w http.ResponseWriter, r *http.Req
 		model = modelFromPassthroughBody(raw)
 	}
 
+	// Providers that are not OpenAI-compatible cannot be served by the generic
+	// forward below: Gommo answers /v1/audio/speech from a form-encoded call
+	// whose result is a URL, not audio bytes. Give it a chance before the
+	// passthrough loop, which would otherwise report "no accounts" for an
+	// account that can in fact serve the request.
+	if h.tryNativeCapability(w, r, route, body) {
+		return
+	}
+
 	candidates := h.selectCapabilityAccounts(route.capability, model, 8)
 	if len(candidates) == 0 {
 		h.sendOpenAIError(w, http.StatusServiceUnavailable, "server_error",
@@ -300,6 +309,72 @@ func forwardCapabilityRequest(parent *http.Request, account *config.Account, rou
 		return 0, nil, nil, readErr
 	}
 	return resp.StatusCode, resp.Header, payload, nil
+}
+
+// tryNativeCapability serves a capability route from a provider that speaks its
+// own protocol rather than OpenAI's. It reports whether it answered the request.
+//
+// A false return means "no native provider handled this", not "the request
+// failed": the caller then continues to the OpenAI-compatible passthrough. An
+// upstream error from a native provider is answered here, because falling
+// through would report "no accounts" for a provider that did serve the request.
+func (h *Handler) tryNativeCapability(w http.ResponseWriter, r *http.Request, route capabilityEndpoint, body []byte) bool {
+	if route.capability != capabilityAudioTTS || route.multipartRequest {
+		return false
+	}
+
+	var in gommoTTSRequest
+	if err := json.Unmarshal(body, &in); err != nil {
+		return false
+	}
+	if strings.TrimSpace(in.Input) == "" {
+		return false
+	}
+
+	apiKeyID := apiKeyIDFromContext(r.Context())
+	excluded := make(map[string]bool)
+	var lastErr error
+	var lastAccountID string
+
+	for {
+		account := h.pool.GetNextForCapability(capabilityAudioTTS, "", excluded)
+		if account == nil {
+			break
+		}
+		if !isGommoAccount(account) {
+			excluded[account.ID] = true
+			continue
+		}
+		excluded[account.ID] = true
+		lastAccountID = account.ID
+
+		audio, contentType, err := callGommoTTS(r, account, in)
+		if err != nil {
+			lastErr = err
+			h.pool.RecordError(account.ID, serviceErrorIsQuota(err), capabilityAudioTTS)
+			logger.Infof("[Capability] audio-tts via %s failed: %v", account.Email, err)
+			continue
+		}
+
+		h.pool.RecordSuccess(account.ID, capabilityAudioTTS)
+		h.recordUsage(apiKeyID, account.ID, in.Model, route.usageEndpoint, 0, 0, 0, 0, 0, 0)
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.WriteHeader(http.StatusOK)
+		w.Write(audio)
+		return true
+	}
+
+	if lastErr == nil {
+		// No native provider is configured for this capability; let the
+		// OpenAI-compatible path report on its own candidates.
+		return false
+	}
+	h.recordError(apiKeyID, lastAccountID, in.Model, route.usageEndpoint, lastErr.Error())
+	h.sendOpenAIError(w, serviceErrorStatus(lastErr), "server_error", lastErr.Error())
+	return true
 }
 
 // passthroughUsage extracts token counts when the upstream reports them. Binary

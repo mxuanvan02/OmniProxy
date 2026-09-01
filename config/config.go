@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -162,6 +163,53 @@ type Account struct {
 	// stored beside config.json rather than inside this credential record.
 	CodexBrowserProfileVerified  bool   `json:"codexBrowserProfileVerified,omitempty"`
 	CodexBrowserProfileAccountID string `json:"codexBrowserProfileAccountId,omitempty"`
+
+	// ---- Antigravity (Google Cloud Code Assist) ----
+	// AuthMethod == "antigravity" only.
+	//
+	// GoogleProjectID is the cloudaicompanion project the Antigravity backend
+	// bills a request against. It is resolved per account via
+	// loadCodeAssist/onboardUser and must never be shared between accounts: a
+	// project id belonging to another account is exactly the pattern Google's
+	// enforcement treats as abuse.
+	GoogleProjectID string `json:"googleProjectId,omitempty"`
+	// GoogleSubject is the "sub" claim of the Google ID token. It is the only
+	// stable per-account identifier (email can change) and is used to dedupe
+	// repeated logins of the same Google account.
+	GoogleSubject string `json:"googleSubject,omitempty"`
+	// AntigravityTier is the Code Assist tier id reported by loadCodeAssist
+	// (for example "FREE"), shown in the admin UI.
+	AntigravityTier string `json:"antigravityTier,omitempty"`
+	// AntigravityProjectCheckedAt records the last successful project
+	// resolution (Unix seconds), so a restart does not re-run onboarding.
+	AntigravityProjectCheckedAt int64 `json:"antigravityProjectCheckedAt,omitempty"`
+
+	// ---- Gommo AutoAI (media generation) ----
+	// AuthMethod == "gommo" only.
+	//
+	// GommoDomain is the registered site the API keys a request to. Gommo sends
+	// it as a body field on every call alongside access_token, and rejects the
+	// request when it is missing, so it is part of the credential rather than an
+	// optional setting.
+	GommoDomain string `json:"gommoDomain,omitempty"`
+	// GommoProjectID scopes generated media to a Gommo project. Empty means the
+	// account's "default" project.
+	GommoProjectID string `json:"gommoProjectId,omitempty"`
+	// GommoCreditsAI mirrors balancesInfo.credits_ai from the account endpoint,
+	// which is the balance the generative endpoints actually draw down.
+	GommoCreditsAI float64 `json:"gommoCreditsAi,omitempty"`
+	// GommoBalance and GommoCurrency mirror the cash balance shown in the UI.
+	GommoBalance  float64 `json:"gommoBalance,omitempty"`
+	GommoCurrency string  `json:"gommoCurrency,omitempty"`
+	// GommoTTSModel and GommoVoiceID are the defaults used when an OpenAI-style
+	// speech request names no Gommo equivalent. A voice id is mandatory upstream
+	// and has no universal default, so a request without either is refused
+	// rather than sent with a guessed value.
+	GommoTTSModel string `json:"gommoTtsModel,omitempty"`
+	GommoVoiceID  string `json:"gommoVoiceId,omitempty"`
+	// GommoCreditsCheckedAt records the last successful balance read (Unix
+	// seconds).
+	GommoCreditsCheckedAt int64 `json:"gommoCreditsCheckedAt,omitempty"`
 
 	// Priority weight for load balancing (higher = more requests)
 	Weight int `json:"weight,omitempty"` // 0 or 1 = normal, 2+ = higher priority
@@ -672,6 +720,66 @@ func saveLocked() error {
 // newUUID returns a UUID v4 string. Defined here to avoid pulling extra deps in this file.
 func newUUID() string {
 	return GenerateMachineId()
+}
+
+// coalescedSaveDelay is how long a scheduled save waits for further mutations
+// before writing. Every Save serializes the whole config, re-reads the file to
+// merge newer runtime fields, then writes+fsyncs a temp file and renames it —
+// cost proportional to the config size, not to the change. Per-request counters
+// mutate on every chat turn, so writing each one individually made that cost a
+// per-request tax under the config write lock. Batching them means one write per
+// window regardless of request rate; the window is short enough that an
+// unexpected process death loses at most a couple of seconds of counters, which
+// are cumulative statistics rather than credentials.
+const coalescedSaveDelay = 2 * time.Second
+
+var (
+	pendingSave  atomic.Bool
+	saveRequests = make(chan struct{}, 1)
+	saveLoopOnce sync.Once
+)
+
+// scheduleSave marks cfg dirty and asks the background writer to persist it
+// within coalescedSaveDelay. Use it only for high-frequency, non-credential
+// state (per-account usage counters). Anything a restart must not lose —
+// tokens, account records, settings — must keep calling Save directly.
+//
+// Callers must hold cfgLock: the in-memory mutation and the dirty flag have to
+// become visible together, otherwise a flush racing between them writes the old
+// value and clears the flag.
+func scheduleSave() {
+	pendingSave.Store(true)
+	saveLoopOnce.Do(func() { go saveLoop() })
+	select {
+	case saveRequests <- struct{}{}:
+	default:
+		// A save is already queued; it will pick up this mutation too.
+	}
+}
+
+func saveLoop() {
+	for range saveRequests {
+		time.Sleep(coalescedSaveDelay)
+		_ = FlushPendingSave()
+	}
+}
+
+// FlushPendingSave writes cfg to disk when a coalesced save is outstanding, and
+// is a no-op otherwise. Call it on shutdown so the final counters are not lost,
+// and from tests that need to observe scheduled writes on disk.
+func FlushPendingSave() error {
+	if !pendingSave.Swap(false) {
+		return nil
+	}
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if err := Save(); err != nil {
+		// Keep the config marked dirty so the next window retries instead of
+		// silently dropping the counters this write was carrying.
+		pendingSave.Store(true)
+		return err
+	}
+	return nil
 }
 
 // Save persists the current configuration to the JSON file.
@@ -1190,6 +1298,70 @@ func UpdateAccountChatGPTAccountID(id, accountID string) error {
 	return nil
 }
 
+// UpdateAccountAntigravityProject persists the cloudaicompanion project that
+// loadCodeAssist / onboardUser resolved for an Antigravity account. The project
+// is per-account and must be discovered rather than assumed: sending another
+// account's project id is how requests end up attributed to a project the
+// caller has no access to.
+func UpdateAccountAntigravityProject(id, projectID, tier string, checkedAt int64) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID != id {
+			continue
+		}
+		if projectID != "" {
+			cfg.Accounts[i].GoogleProjectID = projectID
+		}
+		if tier != "" {
+			cfg.Accounts[i].AntigravityTier = tier
+		}
+		cfg.Accounts[i].AntigravityProjectCheckedAt = checkedAt
+		return Save()
+	}
+	return nil
+}
+
+// UpdateAccountGommoBalances persists the balances reported by Gommo's account
+// endpoint. credits_ai is the balance the generative endpoints draw down, so it
+// is tracked separately from the cash balance shown in the UI.
+func UpdateAccountGommoBalances(id string, creditsAI, balance float64, currency string, checkedAt int64) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID != id {
+			continue
+		}
+		cfg.Accounts[i].GommoCreditsAI = creditsAI
+		cfg.Accounts[i].GommoBalance = balance
+		if currency != "" {
+			cfg.Accounts[i].GommoCurrency = currency
+		}
+		cfg.Accounts[i].GommoCreditsCheckedAt = checkedAt
+		return Save()
+	}
+	return nil
+}
+
+// UpdateAccountGommoCredits persists only the credits_ai balance, which the
+// generative endpoints return alongside their own result. It is separate from
+// UpdateAccountGommoBalances because those responses carry no cash balance or
+// currency, and writing zeros for them would discard what the account endpoint
+// already reported.
+func UpdateAccountGommoCredits(id string, creditsAI float64, checkedAt int64) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID != id {
+			continue
+		}
+		cfg.Accounts[i].GommoCreditsAI = creditsAI
+		cfg.Accounts[i].GommoCreditsCheckedAt = checkedAt
+		return Save()
+	}
+	return nil
+}
+
 // UpdateAccountCodexUsage stores Codex rate-limit / usage headers captured
 // from the upstream /v1/responses response. Called after every Codex request.
 // creditsKnown reports whether the upstream actually sent x-codex-credits-*
@@ -1402,7 +1574,10 @@ func UpdateAccountStats(id string, requestCount, errorCount, totalTokens, codexT
 			}
 			cfg.Accounts[i].TotalCredits = totalCredits
 			cfg.Accounts[i].LastUsed = lastUsed
-			return Save()
+			// Coalesced: this runs once per chat turn, and these are cumulative
+			// counters rather than credentials. See scheduleSave.
+			scheduleSave()
+			return nil
 		}
 	}
 	return nil

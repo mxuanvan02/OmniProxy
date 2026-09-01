@@ -1252,8 +1252,17 @@ func (h *Handler) refreshAllAccounts() {
 		if account.AuthMethod == codexAuthMethod {
 			needsRefresh = codexTokenNeedsRefresh(account, time.Now().Unix())
 		}
+		if isAntigravityAccount(account) {
+			needsRefresh = antigravityTokenNeedsRefresh(account, time.Now().Unix())
+		}
 		if needsRefresh {
-			if account.AuthMethod == codexAuthMethod {
+			if isAntigravityAccount(account) {
+				if err := refreshAntigravityAccountToken(account); err != nil {
+					logger.Warnf("[BackgroundRefresh] Antigravity token refresh failed for %s: %v", account.Email, err)
+					continue
+				}
+				h.pool.UpdateToken(account.ID, account.AccessToken, account.RefreshToken, account.ExpiresAt)
+			} else if account.AuthMethod == codexAuthMethod {
 				if err := refreshCodexAccountToken(account); err != nil {
 					markCodexAuthFailure(account, err)
 					logger.Warnf("[BackgroundRefresh] Codex token refresh failed for %s: %v", account.Email, err)
@@ -1315,9 +1324,9 @@ func (h *Handler) refreshAllAccounts() {
 			refreshCodexAccountID(account)
 		}
 
-		// refresh account info (skip for external IdP and Codex — their
-		// tokens cannot call CodeWhisperer usage APIs).
-		if account.AuthMethod != "external_idp" && account.AuthMethod != codexAuthMethod && (account.BanStatus == "" || account.BanStatus == "ACTIVE") {
+		// refresh account info (skip for external IdP, Codex and Antigravity —
+		// their tokens cannot call CodeWhisperer usage APIs).
+		if account.AuthMethod != "external_idp" && account.AuthMethod != codexAuthMethod && !isAntigravityAccount(account) && (account.BanStatus == "" || account.BanStatus == "ACTIVE") {
 			info, err := RefreshAccountInfo(account)
 			if err != nil {
 				errMsg := err.Error()
@@ -1442,6 +1451,22 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.handleImageGeneration(w, ar)
+	// Video generation is asynchronous upstream. The create route waits for the
+	// finished asset so a simple client needs one call, and the status route
+	// exists for jobs that outlive that wait rather than being lost.
+	case path == "/v1/videos/generations" || path == "/videos/generations":
+		ar := h.authenticateForOpenAI(w, r)
+		if ar == nil {
+			return
+		}
+		h.apiGommoCreateVideo(w, ar)
+	case strings.HasPrefix(path, "/v1/videos/") || strings.HasPrefix(path, "/videos/"):
+		jobID := strings.TrimPrefix(strings.TrimPrefix(path, "/v1/videos/"), "/videos/")
+		ar := h.authenticateForOpenAI(w, r)
+		if ar == nil {
+			return
+		}
+		h.apiGommoVideoStatus(w, ar, jobID)
 	// Capability passthrough endpoints (embeddings, audio, image edits,
 	// moderations). Routing is driven by the account capability table rather
 	// than a per-endpoint provider switch, so a provider that starts serving a
@@ -1881,12 +1906,25 @@ func (h *Handler) refreshModelsCache() {
 			aggregated = mergeUniqueModels(aggregated, codexModels)
 			continue
 		}
+		// Antigravity accounts answer their own catalog action and never
+		// CodeWhisperer's, so they are served the same way as the external pool.
+		if isAntigravityAccount(account) {
+			if err := h.fetchAndCacheAccountModels(account); err == nil {
+				h.modelsCacheMu.RLock()
+				aggregated = mergeUniqueModels(aggregated, h.cachedModels)
+				h.modelsCacheMu.RUnlock()
+			}
+			continue
+		}
 		// Skip external OpenAI-compatible providers — they have no Kiro token and
 		// their model list comes from {BaseURL}/v1/models via fetchExternalProviderModels,
 		// not CodeWhisperer's ListAvailableModels. Calling ListAvailableModels with
 		// their access token fails (DNS/auth) and triggers handleAccountFailure,
 		// which can wrongly mark the account BANNED.
-		if isExternalAccount(account) || isServiceAccount(account) {
+		// Antigravity accounts are in the same position: their catalog comes from
+		// Cloud Code Assist's own fetchAvailableModels, and a Google OAuth token
+		// cannot call ListAvailableModels at all.
+		if isExternalAccount(account) || isServiceAccount(account) || isAntigravityAccount(account) {
 			if err := h.fetchAndCacheAccountModels(account); err == nil {
 				h.modelsCacheMu.RLock()
 				aggregated = mergeUniqueModels(aggregated, h.cachedModels)
@@ -1932,6 +1970,29 @@ func (h *Handler) refreshModelsCache() {
 // fetchAndCacheAccountModels fetches and writes model cache for a single account.
 // Also updates the pool routing cache and global aggregated model list.
 func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
+	// Gommo is checked before the service-account guard below: a Gommo account
+	// carries the image capability, so that guard would otherwise reject it as
+	// "no chat models" and leave its media catalog permanently empty.
+	if isGommoAccount(account) {
+		models, err := fetchGommoModels(account)
+		if err != nil {
+			return err
+		}
+		if len(models) == 0 {
+			return fmt.Errorf("gommo account %s returned an empty model catalog", account.Email)
+		}
+		modelIDs := make([]string, 0, len(models))
+		for _, m := range models {
+			modelIDs = append(modelIDs, m.ModelId)
+		}
+		h.pool.SetModelList(account.ID, modelIDs)
+		h.modelsCacheMu.Lock()
+		h.cachedModels = mergeUniqueModels(h.cachedModels, models)
+		h.modelsCacheTime = time.Now().Unix()
+		h.modelsCacheMu.Unlock()
+		logger.Infof("[ModelsCache] Cached %d Gommo media models for %s", len(models), account.Email)
+		return nil
+	}
 	if isServiceAccount(account) {
 		return fmt.Errorf("service account %s does not expose chat models", account.Provider)
 	}
@@ -1951,6 +2012,30 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 		h.modelsCacheTime = time.Now().Unix()
 		h.modelsCacheMu.Unlock()
 		logger.Infof("[ModelsCache] Seeded %d Codex subscription models for %s", len(models), account.Email)
+		return nil
+	}
+	// Antigravity publishes its catalog through fetchAvailableModels. The call
+	// can fail while the credential is still good (the action is not available
+	// on every environment), so a verified static list backs it rather than
+	// leaving the account with no routable models.
+	if isAntigravityAccount(account) {
+		models, err := fetchAntigravityModels(account)
+		if err != nil || len(models) == 0 {
+			models = antigravityFallbackModels()
+			if err != nil {
+				logger.Warnf("[ModelsCache] Antigravity catalog fetch failed for %s (%v); using verified fallback list", account.Email, err)
+			}
+		}
+		modelIDs := make([]string, 0, len(models))
+		for _, m := range models {
+			modelIDs = append(modelIDs, m.ModelId)
+		}
+		h.pool.SetModelList(account.ID, modelIDs)
+		h.modelsCacheMu.Lock()
+		h.cachedModels = mergeUniqueModels(h.cachedModels, models)
+		h.modelsCacheTime = time.Now().Unix()
+		h.modelsCacheMu.Unlock()
+		logger.Infof("[ModelsCache] Seeded %d Antigravity models for %s", len(models), account.Email)
 		return nil
 	}
 	// External OpenAI-compatible providers expose /v1/models, not Kiro's
@@ -5048,6 +5133,28 @@ func (h *Handler) ensureValidToken(account *config.Account) error {
 		return nil
 	}
 
+	// Antigravity accounts refresh against Google's OAuth token endpoint, not
+	// the Kiro/OIDC path below. Routing them through auth.RefreshAccountToken
+	// would submit a Google refresh token to an AWS endpoint and fail.
+	if isAntigravityAccount(account) {
+		h.tokenRefreshMu.Lock()
+		defer h.tokenRefreshMu.Unlock()
+		if latest := h.pool.GetByID(account.ID); latest != nil {
+			account.AccessToken = latest.AccessToken
+			account.RefreshToken = latest.RefreshToken
+			account.ExpiresAt = latest.ExpiresAt
+			if !tokenNeedsRefresh(account, time.Now().Unix()) {
+				return nil
+			}
+		}
+		if err := refreshAntigravityAccountToken(account); err != nil {
+			logger.Warnf("[TokenRefresh] Antigravity refresh failed for %s: %v", account.Email, err)
+			return err
+		}
+		h.pool.UpdateToken(account.ID, account.AccessToken, account.RefreshToken, account.ExpiresAt)
+		return nil
+	}
+
 	h.tokenRefreshMu.Lock()
 	defer h.tokenRefreshMu.Unlock()
 
@@ -5135,6 +5242,9 @@ func tokenNeedsRefresh(account *config.Account, now int64) bool {
 	if isCodexAccount(account) {
 		return codexTokenNeedsRefresh(account, now)
 	}
+	if isAntigravityAccount(account) {
+		return antigravityTokenNeedsRefresh(account, now)
+	}
 	return account != nil && account.ExpiresAt > 0 && now >= account.ExpiresAt-tokenRefreshSkewSeconds
 }
 
@@ -5214,6 +5324,12 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/codex-security") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/codex-security")
 		h.apiOpenCodexSecurity(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/antigravity-project") && r.Method == "POST":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/antigravity-project")
+		h.apiAntigravityRefreshProject(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/gommo-balance") && r.Method == "POST":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/gommo-balance")
+		h.apiRefreshGommoBalance(w, r, id)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/refresh-token") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/refresh-token")
 		h.apiRefreshAccountToken(w, r, id)
@@ -5275,6 +5391,18 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiCodexLoginCancel(w, r)
 	case path == "/auth/codex-import" && r.Method == "POST":
 		h.apiImportCodexTokens(w, r)
+	case path == "/auth/antigravity/login" && r.Method == "POST":
+		h.apiAntigravityLoginStart(w, r)
+	case path == "/auth/antigravity/poll" && r.Method == "POST":
+		h.apiAntigravityLoginPoll(w, r)
+	case path == "/auth/antigravity/cancel" && r.Method == "POST":
+		h.apiAntigravityLoginCancel(w, r)
+	case path == "/auth/antigravity/local" && r.Method == "GET":
+		h.apiAntigravityLocalCreds(w, r)
+	case path == "/auth/antigravity-import" && r.Method == "POST":
+		h.apiImportAntigravityCreds(w, r)
+	case path == "/auth/gommo" && r.Method == "POST":
+		h.apiImportGommoProvider(w, r)
 	case path == "/auth/import-9router" && r.Method == "POST":
 		h.apiImportFrom9Router(w, r)
 	case path == "/auth/import-9router/preview" && r.Method == "POST":
@@ -7197,7 +7325,7 @@ func (h *Handler) apiGetAccountOverage(w http.ResponseWriter, r *http.Request, i
 	// accounts. Calling FetchOverageStatus with their access token hits
 	// q.external.amazonaws.com and fails with a DNS error. Return a
 	// friendly error instead.
-	if isExternalAccount(account) || isCodexAccount(account) {
+	if isExternalAccount(account) || isCodexAccount(account) || isAntigravityAccount(account) {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Overages are only available for native Kiro/AWS accounts"})
 		return
@@ -7256,7 +7384,7 @@ func (h *Handler) apiSetAccountOverage(w http.ResponseWriter, r *http.Request, i
 	// external OpenAI-compatible providers or Codex (ChatGPT subscription)
 	// accounts. Refuse the toggle so the UI doesn't trigger a doomed
 	// q.external.amazonaws.com call.
-	if isExternalAccount(account) || isCodexAccount(account) {
+	if isExternalAccount(account) || isCodexAccount(account) || isAntigravityAccount(account) {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Overages are only available for native Kiro/AWS accounts"})
 		return

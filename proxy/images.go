@@ -143,13 +143,21 @@ func (h *Handler) handleImageGeneration(w http.ResponseWriter, r *http.Request) 
 	excluded := make(map[string]bool)
 	var lastErr error
 	var lastAccountID string
+	// Dedicated image providers (Gommo, OpenRouter-style gateways) live in the
+	// service pool and are tried first: they are provisioned specifically for
+	// image work, whereas a Codex account spends its shared chat quota on it.
+	// Codex remains the fallback so an install with no image provider keeps
+	// working exactly as before.
 	for {
-		account := h.pool.GetNextCodex(excluded)
+		account := h.pool.GetNextForCapability(capabilityImage, "", excluded)
+		if account == nil {
+			account = h.pool.GetNextCodex(excluded)
+		}
 		if account == nil {
 			break
 		}
 		lastAccountID = account.ID
-		response, err := callCodexImage(r, account, in)
+		response, err := callImageGeneration(r, account, in)
 		if err == nil {
 			h.pool.RecordSuccess(account.ID, "image")
 			h.recordUsage(apiKeyIDFromContext(r.Context()), account.ID, in.Model, endpointImage, 0, 0, 0, 0, 0, 0)
@@ -551,6 +559,12 @@ func callImageGeneration(parent *http.Request, account *config.Account, in image
 	}
 	if isCodexAccount(account) {
 		return callCodexImage(parent, account, in)
+	}
+	// Gommo must be matched before the generic image-capability branch: its
+	// accounts carry the "image" capability but speak a form-urlencoded,
+	// job-polling API rather than an OpenAI-compatible one.
+	if isGommoAccount(account) {
+		return callGommoImage(parent, account, in)
 	}
 	if isExternalAccount(account) {
 		return callOpenAIImages(parent, account, in)

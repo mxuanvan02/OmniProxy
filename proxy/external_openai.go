@@ -1343,6 +1343,9 @@ func dispatchChat(account *config.Account, payload *KiroPayload, callback *KiroS
 	if isCodexAccount(account) {
 		return CallExternalCodex(account, payload, callback)
 	}
+	if isAntigravityAccount(account) {
+		return CallExternalAntigravity(account, payload, callback)
+	}
 	if isAgentRouterAccount(account) {
 		return CallExternalAgentRouter(account, payload, callback)
 	}

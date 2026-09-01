@@ -217,8 +217,22 @@ func (p *AccountPool) Reload() {
 	}
 }
 
+// serviceCapabilities are the non-chat capabilities served from the service
+// pool. They are listed explicitly rather than derived because the chat pool and
+// the service pool are partitioned on this answer: a credential that lands in
+// the wrong one is either unreachable or exposed to chat traffic it cannot
+// serve. audio-tts and video belong here because media providers (Gommo) expose
+// them without any chat model, so an account configured only for speech or
+// video would otherwise join no pool at all and never be selected.
+var serviceCapabilities = []string{"search", "image", "audio-tts", "video"}
+
 func accountSupportsServiceCapability(account config.Account) bool {
-	return accountSupportsCapability(account, "search") || accountSupportsCapability(account, "image")
+	for _, capability := range serviceCapabilities {
+		if accountSupportsCapability(account, capability) {
+			return true
+		}
+	}
+	return false
 }
 
 func accountSupportsCapability(account config.Account, capability string) bool {

@@ -42,6 +42,23 @@ func (h *Handler) refreshAccountFull(account *config.Account) (accountRefreshRes
 	}
 	id := account.ID
 
+	// Gommo is checked before the service branch below: a Gommo account carries
+	// the "image" capability, so the generic service path would claim it and
+	// skip the balance read that is the only usable health signal here.
+	if isGommoAccount(account) {
+		modelsErr := h.fetchAndCacheAccountModels(account)
+		balanceErr := refreshGommoAccount(account)
+		if balanceErr != nil {
+			return accountRefreshResult{}, fmt.Errorf("gommo account refresh failed: %w", balanceErr)
+		}
+		msg := fmt.Sprintf("Gommo account refreshed (credits_ai %.2f)", account.GommoCreditsAI)
+		if modelsErr != nil {
+			msg = "Gommo balance refreshed; catalog unavailable: " + modelsErr.Error()
+		}
+		h.pool.Reload()
+		return accountRefreshResult{Message: msg}, nil
+	}
+
 	if isServiceAccount(account) {
 		h.pool.Reload()
 		return accountRefreshResult{Message: "Service account metadata refreshed"}, nil
@@ -68,6 +85,29 @@ func (h *Handler) refreshAccountFull(account *config.Account) (accountRefreshRes
 			msg = "Models refreshed; credits unavailable: " + creditsErr.Error()
 		}
 		return accountRefreshResult{Message: msg}, nil
+	}
+
+	// Antigravity accounts authenticate with Google OAuth and have no Kiro
+	// usage API. Refreshing means: exchange the refresh token, then re-resolve
+	// the cloudaicompanion project, which is server-side state that can change
+	// (tier moves, project deletion) with no local signal.
+	if isAntigravityAccount(account) {
+		var tokenErr error
+		if account.RefreshToken != "" {
+			tokenErr = refreshAntigravityAccountToken(account)
+		}
+		if tokenErr != nil {
+			return accountRefreshResult{}, fmt.Errorf("antigravity token refresh failed: %w", tokenErr)
+		}
+		h.pool.UpdateToken(id, account.AccessToken, account.RefreshToken, account.ExpiresAt)
+		// Force rediscovery rather than trusting the cached value on an
+		// explicit operator refresh.
+		account.AntigravityProjectCheckedAt = 0
+		projectID, projectErr := ensureAntigravityProject(account)
+		if projectErr != nil {
+			return accountRefreshResult{Message: "Antigravity token refreshed; project unavailable: " + projectErr.Error()}, nil
+		}
+		return accountRefreshResult{Message: "Antigravity account refreshed (token + project " + projectID + ")"}, nil
 	}
 
 	// Force an OAuth refresh-token exchange and persist the new credentials.
