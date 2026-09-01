@@ -258,6 +258,12 @@ Google 的 Antigravity 条款只允许通过 Google 自家的客户端访问。�
 账号随时可能被 Google 停用，实际上已有人遇到这种情况。请把它当作启用该提供商的
 预期结果，而不是边缘案例。
 
+本仓库不附带 OAuth 客户端。Antigravity 桌面客户端的 ID 与 secret 属于 Google，因此
+登录流程从 `ANTIGRAVITY_CLIENT_ID` 与 `ANTIGRAVITY_CLIENT_SECRET`（或
+`antigravityClientId` / `antigravityClientSecret` 设置项）读取；两者都未设置时会以
+明确的错误信息失败。请从你自己安装的 IDE 中取值。导入 Antigravity 或 Gemini CLI
+已写入本机的凭据则不需要这两个值。
+
 OmniProxy 在这方面的处理：
 
 * 只发送 Cloud Code Assist API 要求的协议字段 —— OAuth 令牌、`Client-Metadata`

@@ -260,6 +260,13 @@ Google. Một tài khoản dùng qua proxy này có thể bị Google vô hiệu
 nào, và điều đó đã xảy ra với nhiều người trong thực tế. Hãy coi đó là kết quả
 dự kiến khi bật provider này, không phải trường hợp biên.
 
+OAuth client không được đóng gói kèm ở đây. Client ID và secret của bản desktop
+Antigravity thuộc về Google, nên luồng đăng nhập đọc chúng từ
+`ANTIGRAVITY_CLIENT_ID` và `ANTIGRAVITY_CLIENT_SECRET` (hoặc setting
+`antigravityClientId` / `antigravityClientSecret`) và báo lỗi rõ ràng khi không
+có. Hãy lấy giá trị từ chính IDE bạn đã cài. Việc nhập credential mà Antigravity
+hoặc Gemini CLI đã ghi sẵn ra máy thì không cần cả hai.
+
 OmniProxy xử lý điều đó như sau:
 
 * Gửi đúng những field giao thức mà Cloud Code Assist API yêu cầu — OAuth token,

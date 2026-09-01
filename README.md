@@ -260,6 +260,13 @@ account used through this proxy can be disabled by Google at any time, and that
 has happened to people in practice. Treat it as an expected outcome of enabling
 the provider, not an edge case.
 
+The OAuth client is not shipped here. Antigravity's desktop client ID and secret
+belong to Google, so the login reads them from `ANTIGRAVITY_CLIENT_ID` and
+`ANTIGRAVITY_CLIENT_SECRET` (or the `antigravityClientId` /
+`antigravityClientSecret` settings) and fails with a clear message when neither
+is set. Take the values from your own installed IDE. Importing credentials that
+Antigravity or the Gemini CLI already wrote locally needs neither.
+
 What OmniProxy does about it:
 
 * It sends the protocol fields the Cloud Code Assist API requires — the OAuth
