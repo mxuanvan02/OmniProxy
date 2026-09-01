@@ -1824,7 +1824,15 @@ let collapsedGroups = loadCollapsedGroups();
             : '') +
           (kind === 'video'
             ? '<div class="form-group"><label>' + escapeHtml(t('gommo.sizeLabel') || 'Ratio') + '</label>' +
-              '<select id="gommoRatio"><option value="16_9">16:9</option><option value="9_16">9:16</option><option value="1_1">1:1</option></select></div>'
+              '<select id="gommoRatio"><option value="16_9">16:9</option><option value="9_16">9:16</option><option value="1_1">1:1</option></select></div>' +
+              // mode is mandatory and its vocabulary is per-model (trial|vip,
+              // cheap|vip, flash); left blank the catalog default is used.
+              '<div class="form-group"><label>' + escapeHtml(t('gommo.modeLabel') || 'Mode') + '</label>' +
+              '<input type="text" id="gommoMode" class="font-mono" placeholder="' + escapeAttr(t('gommo.modePlaceholder') || '') + '" /></div>' +
+              // Several models advertise text-to-video yet reject a text-only
+              // prompt and demand a first frame, so a seed image is offered.
+              '<div class="form-group"><label>' + escapeHtml(t('gommo.imagesLabel') || 'First frame URL') + '</label>' +
+              '<input type="text" id="gommoImages" class="font-mono" placeholder="' + escapeAttr(t('gommo.imagesPlaceholder') || '') + '" /></div>'
             : '') +
           // Speech needs a voice id: the upstream rejects a synthesis request
           // without one, so it is asked for here rather than failing later.
@@ -1889,6 +1897,8 @@ let collapsedGroups = loadCollapsedGroups();
       ratio: $('gommoRatio') ? $('gommoRatio').value : '',
       voice: $('gommoVoice') ? $('gommoVoice').value.trim() : '',
       jobId: $('gommoJobId') ? $('gommoJobId').value.trim() : '',
+      mode: $('gommoMode') ? $('gommoMode').value.trim() : '',
+      images: $('gommoImages') && $('gommoImages').value.trim() ? [$('gommoImages').value.trim()] : [],
       n: 1,
     };
     renderGommoModal();

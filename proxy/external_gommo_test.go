@@ -906,8 +906,8 @@ func TestCallGommoTTSRecordsReportedCredit(t *testing.T) {
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		form, _ := url.ParseQuery(string(body))
-		if form.Get("action_type") != "createAudio" {
-			t.Errorf("action_type = %q, want createAudio", form.Get("action_type"))
+		if form.Get("action_type") != "create" {
+			t.Errorf("action_type = %q, want create", form.Get("action_type"))
 		}
 		if form.Get("voice_settings[speed]") == "" {
 			t.Error("speed must be forwarded when the caller sets it")

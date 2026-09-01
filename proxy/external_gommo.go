@@ -735,7 +735,7 @@ func callGommoImage(parent *http.Request, account *config.Account, in imageGener
 // ==================== Text to speech ====================
 
 // gommoTTSRequest is the subset of the OpenAI /v1/audio/speech body that maps
-// onto Gommo's createAudio call.
+// onto Gommo's audio create call.
 type gommoTTSRequest struct {
 	Model          string  `json:"model,omitempty"`
 	Input          string  `json:"input"`
@@ -788,7 +788,9 @@ func callGommoTTS(parent *http.Request, account *config.Account, in gommoTTSRequ
 	}
 
 	params := map[string]interface{}{
-		"action_type": "createAudio",
+		// "create", not "createAudio": /ai/audio answers any other value with
+		// "Unknown action_type".
+		"action_type": "create",
 		"text":        text,
 		"voice_id":    voice,
 		"model":       gommoTTSModel(account, in.Model),
