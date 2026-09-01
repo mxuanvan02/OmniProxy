@@ -290,8 +290,21 @@ let collapsedGroups = loadCollapsedGroups();
     });
     return result;
   }
-  function hasCapability(a, capability) {
-    return accountCapabilities(a).includes(capability);
+  // hasConfiguredCapability answers "is this account a service provider of this
+  // kind", which is a different question from "can it do this". It matches the
+  // backend's accountHasCapability: only providerKind and the explicit
+  // Capabilities list count, never discoveredCapabilities.
+  //
+  // Discovery must stay out: an OpenAI-compatible gateway whose catalog happens
+  // to list an image model gets "image" discovered, and treating that as a
+  // service kind filed a chat provider under Image Generation and removed it
+  // from its own External group — while routing still sent it chat traffic.
+  function hasConfiguredCapability(a, capability) {
+    const wanted = String(capability || '').toLowerCase().trim();
+    if (!wanted) return false;
+    if (String((a && a.providerKind) || '').toLowerCase().trim() === wanted) return true;
+    const capabilities = Array.isArray(a && a.capabilities) ? a.capabilities : [];
+    return capabilities.some(value => String(value).toLowerCase().trim() === wanted);
   }
 
   // capabilityProbeState answers a question the catalog cannot: did the endpoint
@@ -334,7 +347,7 @@ let collapsedGroups = loadCollapsedGroups();
       escapeHtml(capabilityLabel(capability)) + mark + '</span>';
   }
   function isServiceAccountUI(a) {
-    return hasCapability(a, 'search') || hasCapability(a, 'image');
+    return hasConfiguredCapability(a, 'search') || hasConfiguredCapability(a, 'image');
   }
   function isCodexAccountUI(a) {
     return String((a && a.authMethod) || '').toLowerCase() === 'codex';
@@ -352,8 +365,8 @@ let collapsedGroups = loadCollapsedGroups();
     // capability, so a capability-first test would file a media provider under
     // the search/image service bucket and hide it from its own group.
     if (String((a && a.authMethod) || '').toLowerCase() === 'gommo') return 'media';
-    if (hasCapability(a, 'search')) return 'search';
-    if (hasCapability(a, 'image')) return 'image';
+    if (hasConfiguredCapability(a, 'search')) return 'search';
+    if (hasConfiguredCapability(a, 'image')) return 'image';
     const m = String(a.authMethod || '').toLowerCase();
     if (m === 'codex') return 'codex';
     if (m === 'antigravity') return 'external';
@@ -566,8 +579,8 @@ let collapsedGroups = loadCollapsedGroups();
       const trialClass = trialPct > 90 ? 'critical' : trialPct > 70 ? 'high' : '';
       const isExternal = (a.authMethod === 'external_openai');
       const isCodex = (a.authMethod === 'codex');
-      const isSearch = hasCapability(a, 'search');
-      const isImage = hasCapability(a, 'image');
+      const isSearch = hasConfiguredCapability(a, 'search');
+      const isImage = hasConfiguredCapability(a, 'image');
       const isService = isSearch || isImage;
       const isGommo = String(a.authMethod || '').toLowerCase() === 'gommo';
       const extLimit = a.extCreditLimit || 0;
@@ -1165,8 +1178,8 @@ let collapsedGroups = loadCollapsedGroups();
     const idAttr = escapeAttr(id);
     const isCodex = String(a.authMethod || '').toLowerCase() === 'codex';
     const isExternal = String(a.authMethod || '').toLowerCase() === 'external_openai';
-    const isSearch = hasCapability(a, 'search');
-    const isImage = hasCapability(a, 'image');
+    const isSearch = hasConfiguredCapability(a, 'search');
+    const isImage = hasConfiguredCapability(a, 'image');
     const isService = isSearch || isImage;
     // Kiro-native accounts use Machine ID, Weight, Overage, and the Kiro
     // subscription/quota system. Codex and external providers don't.
@@ -1528,7 +1541,7 @@ let collapsedGroups = loadCollapsedGroups();
         model: customModel || selectedModel || ''
       };
     }
-    if (testModalMode === 'search' && acc && hasCapability(acc, 'search')) {
+    if (testModalMode === 'search' && acc && hasConfiguredCapability(acc, 'search')) {
       return {
         capability: 'search',
         query: (($('testSearchQuery') && $('testSearchQuery').value.trim()) || 'OmniProxy health check'),
@@ -1579,8 +1592,8 @@ let collapsedGroups = loadCollapsedGroups();
     const accountIdentity = getAccountIdentityLabel(acc, testModalAccountId);
     const accountIdentityShort = getAccountIdentityLabel(acc, testModalAccountId, { includeId: false });
     const proxy = acc ? (acc.proxyURL || t('accounts.testLog.globalProxy')) : '?';
-    const isSearch = acc && hasCapability(acc, 'search');
-    const isImage = acc && hasCapability(acc, 'image');
+    const isSearch = acc && hasConfiguredCapability(acc, 'search');
+    const isImage = acc && hasConfiguredCapability(acc, 'image');
     const isCodex = isCodexAccountUI(acc);
     const isImageTest = testModalMode === 'image';
     const isService = isSearch || isImage;
