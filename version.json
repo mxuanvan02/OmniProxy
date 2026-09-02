@@ -1,5 +1,5 @@
 {
-  "version": "0.3.0",
-  "changelog": "Pool routing strategies (cost-optimized, reset-aware) + instructions-based cache key with async warming + Codex/external provider support",
+  "version": "0.4.0",
+  "changelog": "Antigravity + Gommo media backends (image/video/TTS/music), capability discovery and endpoint probing, per-account cache_control override, admin media playground",
   "download": "https://github.com/mxuanvan02/OmniProxy"
 }

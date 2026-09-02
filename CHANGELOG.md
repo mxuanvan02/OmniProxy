@@ -4,10 +4,15 @@ All notable changes to OmniProxy are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-02
+
 ### Added
 - **Google Antigravity backend** (`AuthMethod: "antigravity"`) — OAuth PKCE loopback login, import of local `~/.gemini` / `~/.antigravity` credentials, per-account `cloudaicompanionProject` discovery (`loadCodeAssist` / `onboardUser`, cached 24h), streaming and non-streaming chat over `cloudcode-pa.googleapis.com`, live model catalog. A 403 without an auth phrase marks the account `BANNED` so the pool stops selecting it. The desktop OAuth client is not shipped: the login reads `ANTIGRAVITY_CLIENT_ID` / `ANTIGRAVITY_CLIENT_SECRET` (or the matching settings) and fails with a clear message when neither is set. **Google's Antigravity Terms of Service prohibit third-party clients and accounts have been disabled for using them** — see §7 of the README before enabling.
 - **Gommo AutoAI backend** (`AuthMethod: "gommo"`) — form-urlencoded provider (also fronted by 79AI) for image, video, TTS and music generation, with async job polling, credit/balance tracking and per-image billing that keeps already-paid-for results when a later image fails. The provider cannot answer chat completions, so the `chat` capability is rejected at import.
 - **Video generation endpoints** — `POST /v1/videos/generations` and `GET /v1/videos/{id}`, plus admin routes for creating and polling Gommo video jobs.
+- **Music generation endpoints** — `POST /v1/music/generations` and `GET /v1/music/{id}` behind the `audio-music` capability, with the song-name and styles floors upstream enforces checked locally so a rejected request costs no round-trip.
+- **Gommo media playground** — an admin modal that runs image, video, speech and music generation, and both job lookups, against one named account instead of the pool, so a credential can be verified the moment it is added.
+- **Editable Gommo account settings** — capabilities, default speech model and default voice ID can be changed after import. Capabilities partition the pool, so an account whose upstream gained music support previously stayed `503` on `/v1/music/generations` for its whole life.
 - **Native capability hook** — `tryNativeCapability` runs before the OpenAI-compatible passthrough, letting non-OpenAI-shaped providers serve `/v1/audio/speech` and `/v1/images/generations` directly.
 - **Admin UI** — Antigravity (OAuth / import / local-credential detection / project refresh) and Gommo (import, capability picker, balance refresh) cards in the add-account flow, with EN / VN / ZH strings.
 - **Pool routing strategies** — `cost-optimized` and `reset-aware` opt-in strategies for pools with 20+ accounts. Configurable via admin panel (Usage → Pool tab) or `PATCH /admin/api/pool/strategy`. Round-robin remains the default with zero overhead.
@@ -17,9 +22,16 @@ All notable changes to OmniProxy are documented here. The format follows [Keep a
 ### Changed
 - `GetNextForModelExcluding` now collects filter-passing candidates and picks by strategy score when a non-default strategy is active. Round-robin keeps the original early-return path for zero overhead.
 - `GetBoolSetting` / `GetStringSetting` / `SetBoolSetting` / `SetStringSetting` in `config/config.go` now nil-guard `cfg` so unit tests that bypass `config.Init` no longer panic.
+- Capability probing separates *advertised* (listed in a provider catalog) from *verified* (an endpoint answered), and keeps "skipped" distinct from "failed" — a probe that never left the process says nothing about the endpoint.
+- The admin account list groups by configured capability rather than discovered, with collapsible provider groups and external accounts subgrouped by base URL.
+- The Details tab streams over SSE deltas and polled endpoints revalidate with ETags, cutting render churn on large pools.
 
 ### Fixed
 - `accountSupportsServiceCapability` now accepts `audio-tts` and `video`. An account configured with only those capabilities previously entered no pool at all and was never selected.
+- Gommo job status replies are read from their nested envelope (`videoInfo` / `musicInfo`), tolerate the `null` and empty-array shapes returned for an unknown id, and answer `404` instead of reporting a finished render with a blank URL.
+- The Gommo playground no longer shows duplicate job-lookup tabs, empty or unusable model dropdowns, or untranslated i18n keys, and now sends the song name and lyrics the handler already parsed.
+- Prompt-cache configuration is aligned with provider docs, unprimed conversations are keyed separately, and sticky pinning survives past the cache window.
+- Streaming: metadata-only SSE is bounded and HTTP/2 stream resets are retried instead of surfacing as a hang.
 - `handleImageGeneration` no longer hardcodes Codex account selection; it picks an image-capable account and dispatches through `callImageGeneration`.
 - Four "non-Kiro" guards in `account_failover.go` and `handler.go` now recognise Antigravity accounts, which would otherwise be refreshed against the AWS Kiro endpoint with a Google token.
 
