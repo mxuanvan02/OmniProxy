@@ -5794,6 +5794,11 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 			http.Error(w, `{"error":"failed to write auth.json"}`, 500)
 			return
 		}
+		if err := syncCodexModelCatalog(homeDir, codexCatalogModels(h.omniProxyModelCatalog(model, subagent))); err != nil {
+			// The proxy config and credentials are already usable. A catalog
+			// failure should not prevent the user from configuring Codex CLI.
+			logger.Warnf("[CodexCatalog] Failed to update desktop model catalog: %v", err)
+		}
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
 	case "kilocode":

@@ -9,6 +9,37 @@ import (
 	"time"
 )
 
+// codexCatalogModels converts OmniProxy's unified model catalog into the
+// fields Codex Desktop can safely consume. The desktop catalog deliberately
+// receives no inferred tool or reasoning capabilities; syncCodexModelCatalog
+// supplies conservative client-required defaults for those fields.
+func codexCatalogModels(models []ModelInfo) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(models))
+	for _, model := range models {
+		id := strings.TrimSpace(model.ModelId)
+		if id == "" {
+			continue
+		}
+		name := strings.TrimSpace(model.ModelName)
+		if name == "" {
+			name = id
+		}
+		entry := map[string]interface{}{
+			"id":               id,
+			"name":             name,
+			"description":      model.Description,
+			"input_modalities": model.InputTypes,
+		}
+		if model.TokenLimits != nil {
+			entry["token_limits"] = map[string]interface{}{
+				"maxInputTokens": model.TokenLimits.MaxInputTokens,
+			}
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
 // syncCodexModelCatalog updates the local catalog used by Codex Desktop. The
 // desktop picker reads this file instead of requesting /v1/models on demand,
 // so configuring a custom OpenAI-compatible provider alone is not sufficient.

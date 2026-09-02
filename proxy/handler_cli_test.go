@@ -149,6 +149,46 @@ func TestApplyClaudeCliSettingsPreservesModelRouting(t *testing.T) {
 	}
 }
 
+func TestApplyCodexCliSettingsWritesDesktopModelCatalog(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	h := &Handler{cachedModels: []ModelInfo{cliTestModel("claude-opus-5", 1_000_000, 128_000)}}
+	req := httptest.NewRequest(http.MethodPost, "/cli-tools/codex", strings.NewReader(`{"baseUrl":"http://proxy","apiKey":"key","model":"claude-opus-5"}`))
+	rec := httptest.NewRecorder()
+	h.apiApplyCliToolSettings(rec, req, "codex")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply Codex settings status = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	raw, err := os.ReadFile(filepath.Join(homeDir, ".codex", "model-catalog.json"))
+	if err != nil {
+		t.Fatalf("read Codex desktop catalog: %v", err)
+	}
+	var catalog struct {
+		Models []map[string]interface{} `json:"models"`
+	}
+	if err := json.Unmarshal(raw, &catalog); err != nil {
+		t.Fatalf("decode Codex desktop catalog: %v", err)
+	}
+	var claude map[string]interface{}
+	for _, model := range catalog.Models {
+		if model["slug"] == "claude-opus-5" {
+			claude = model
+			break
+		}
+	}
+	if claude == nil {
+		t.Fatalf("configured model missing from desktop catalog: %#v", catalog.Models)
+	}
+	if got := claude["context_window"]; got != float64(1_000_000) {
+		t.Fatalf("catalog context_window = %#v, want 1000000", got)
+	}
+	if managed, _ := claude["omniproxy_managed"].(bool); !managed {
+		t.Fatalf("catalog entry is not OmniProxy-managed: %#v", claude)
+	}
+}
+
 func TestApplyOpenClawSettingsMergesExistingAgentsAndProviderModels(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
