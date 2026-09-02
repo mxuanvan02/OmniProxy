@@ -886,6 +886,25 @@ func TestGommoVideoStatusRequiresJobID(t *testing.T) {
 	}
 }
 
+// /ai/video answers an unknown id with videoInfo as an empty array (and
+// sometimes null), which must read as "no such job" rather than a parse failure.
+func TestGommoVideoStatusHandlesMissingJobEnvelopes(t *testing.T) {
+	for _, body := range []string{`{"videoInfo":[]}`, `{"videoInfo":null}`} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(body))
+		}))
+		job, err := gommoVideoStatus(nil, gommoTestAccount(server.URL), "vid-404")
+		server.Close()
+		if err != nil {
+			t.Fatalf("%s: gommoVideoStatus: %v", body, err)
+		}
+		if job.ID != "vid-404" || job.Status != "" || job.URL != "" {
+			t.Errorf("%s: job = %+v, want the requested id with no status or URL", body, job)
+		}
+	}
+}
+
 // A speech response reports the remaining credit; recording it keeps the admin
 // balance current without a separate round-trip.
 func TestCallGommoTTSRecordsReportedCredit(t *testing.T) {

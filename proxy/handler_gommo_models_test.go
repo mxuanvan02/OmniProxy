@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"omniproxy/config"
 	accountpool "omniproxy/pool"
+	"strings"
 	"testing"
 )
 
@@ -142,5 +143,81 @@ func TestAccountImageModelsKeepsCustomModelWhenGommoCatalogFails(t *testing.T) {
 	}
 	if len(resp.Models) != 0 {
 		t.Errorf("models = %+v, want none", resp.Models)
+	}
+}
+
+// An id upstream does not know comes back as an empty envelope. Reporting that
+// as success with a blank URL made the playground show a finished render that
+// never existed, so it has to be a 404.
+func TestWriteGommoJobStatusRejectsEmptyJob(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeGommoJobStatus(rec, "music", gommoJob{ID: "999999999"})
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 for a job upstream does not know", rec.Code)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "job not found") {
+		t.Errorf("body = %s, want a not-found error", body)
+	}
+}
+
+func TestWriteGommoJobStatusOmitsBlankURLWhilePending(t *testing.T) {
+	rec := httptest.NewRecorder()
+	writeGommoJobStatus(rec, "video", gommoJob{ID: "vid-1", Status: "PROCESSING"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for a job still rendering", rec.Code)
+	}
+	var resp struct {
+		Status string   `json:"status"`
+		URLs   []string `json:"urls"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "PROCESSING" || len(resp.URLs) != 0 {
+		t.Errorf("resp = %+v, want PROCESSING with no urls", resp)
+	}
+}
+
+// Capabilities partition the pool, so an account whose upstream gained music
+// support answered 503 on /v1/music/generations forever: the import form was the
+// only place that ever set them.
+func TestUpdateAccountEditsGommoCapabilities(t *testing.T) {
+	const accountID = "gommo-caps"
+	p := gommoAdminAccount(t, accountID, "")
+
+	h := &Handler{pool: p}
+	body := `{"capabilities":["image","video","audio-tts","audio-music"],"gommoVoiceID":" voice-7 "}`
+	rec := httptest.NewRecorder()
+	h.apiUpdateAccount(rec, httptest.NewRequest(http.MethodPut, "/accounts/"+accountID, strings.NewReader(body)), accountID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+
+	updated := p.GetByID(accountID)
+	if updated == nil {
+		t.Fatal("account missing from the pool after update")
+	}
+	if !containsFold(updated.Capabilities, capabilityAudioMusic) {
+		t.Errorf("capabilities = %v, want audio-music included", updated.Capabilities)
+	}
+	if updated.GommoVoiceID != "voice-7" {
+		t.Errorf("voice id = %q, want the trimmed value", updated.GommoVoiceID)
+	}
+}
+
+// An empty list must not erase every capability: an account with none is
+// invisible to every pool and would silently stop serving.
+func TestUpdateAccountKeepsGommoServingWhenCapabilitiesEmptied(t *testing.T) {
+	const accountID = "gommo-caps-empty"
+	p := gommoAdminAccount(t, accountID, "")
+
+	h := &Handler{pool: p}
+	rec := httptest.NewRecorder()
+	h.apiUpdateAccount(rec, httptest.NewRequest(http.MethodPut, "/accounts/"+accountID, strings.NewReader(`{"capabilities":[]}`)), accountID)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if updated := p.GetByID(accountID); updated == nil || len(updated.Capabilities) == 0 {
+		t.Fatalf("capabilities = %v, want the full media set rather than none", updated.Capabilities)
 	}
 }

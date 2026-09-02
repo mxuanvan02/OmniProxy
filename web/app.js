@@ -1095,6 +1095,7 @@ let customSelectRefreshQueued = false;
       else if (a === 'restoreCodexRefreshToken') restoreCodexRefreshToken(id);
       else if (a === 'saveCodexImageModel') saveCodexImageModel(id);
       else if (a === 'saveImageModel') saveImageModel(id);
+      else if (a === 'saveGommoSettings') saveGommoSettings(id);
       else if (a === 'refresh') refreshAccount(id);
     });
   }

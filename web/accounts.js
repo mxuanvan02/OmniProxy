@@ -1181,6 +1181,7 @@ let collapsedGroups = loadCollapsedGroups();
     const isSearch = hasConfiguredCapability(a, 'search');
     const isImage = hasConfiguredCapability(a, 'image');
     const isService = isSearch || isImage;
+    const isGommo = String(a.authMethod || '').toLowerCase() === 'gommo';
     // Kiro-native accounts use Machine ID, Weight, Overage, and the Kiro
     // subscription/quota system. Codex and external providers don't.
     const isKiroNative = !isCodex && !isExternal && !isService;
@@ -1299,6 +1300,26 @@ let collapsedGroups = loadCollapsedGroups();
         (a.codexUsageCheckedAt ? detailItem(t('detail.codexLastChecked'), new Date(a.codexUsageCheckedAt * 1000).toLocaleString()) : '') +
         '</div>' +
         '<p class="help-block">' + escapeHtml(t('detail.codexUsageHint')) + '</p>' +
+        '</div>' : '') +
+
+      // Capabilities partition the pool: an account whose upstream gained music
+      // support stays 503 on /v1/music/generations until this is edited, and the
+      // import form is the only other place that sets them.
+      (isGommo ?
+        '<div class="detail-section"><h4>' + escapeHtml(t('gommo.title')) + '</h4>' +
+        '<div class="form-group"><label>' + escapeHtml(t('gommo.capabilitiesLabel')) + '</label>' +
+        '<div class="flex gap-3 flex-wrap">' +
+        ['image', 'video', 'audio-tts', 'audio-music'].map(cap =>
+          '<label class="flex items-center gap-1 text-sm"><input type="checkbox" class="detailGommoCap" value="' + cap + '"' +
+          (hasConfiguredCapability(a, cap) ? ' checked' : '') + ' /> ' +
+          escapeHtml(t('category.' + (cap === 'audio-tts' ? 'audioTts' : cap === 'audio-music' ? 'audioMusic' : cap))) + '</label>'
+        ).join('') +
+        '</div></div>' +
+        '<div class="form-group"><label>' + escapeHtml(t('gommo.ttsModelLabel')) + '</label>' +
+        '<input type="text" id="detailGommoTtsModel" class="font-mono" value="' + escapeAttr(a.gommoTTSModel || '') + '" placeholder="eleven_flash_v2_5" /></div>' +
+        '<div class="form-group"><label>' + escapeHtml(t('gommo.voiceLabel')) + '</label>' +
+        '<input type="text" id="detailGommoVoiceId" class="font-mono" value="' + escapeAttr(a.gommoVoiceID || '') + '" placeholder="' + escapeAttr(t('gommo.voicePlaceholder')) + '" /></div>' +
+        '<button class="btn btn-sm btn-primary" data-detail-action="saveGommoSettings" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
         '</div>' : '') +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('accounts.imageModel')) + '</h4>' +
@@ -1523,6 +1544,15 @@ let collapsedGroups = loadCollapsedGroups();
   async function saveImageModel(id) {
     const input = $('imageModelInput');
     await putAccount(id, { imageModel: input ? input.value.trim() : '' }, t('detail.saved'));
+  }
+  async function saveGommoSettings(id) {
+    const capabilities = qsa('.detailGommoCap').filter(cb => cb.checked).map(cb => cb.value);
+    if (capabilities.length === 0) return toastWarning(t('gommo.capabilitiesRequired'));
+    await putAccount(id, {
+      capabilities,
+      gommoTTSModel: ($('detailGommoTtsModel') || {}).value ? $('detailGommoTtsModel').value.trim() : '',
+      gommoVoiceID: ($('detailGommoVoiceId') || {}).value ? $('detailGommoVoiceId').value.trim() : '',
+    }, t('detail.saved'));
   }
   function closeDetailModal() { closeDialog('detailModal'); }
 
@@ -1787,8 +1817,14 @@ let collapsedGroups = loadCollapsedGroups();
 
   function closeGommoModal() { closeDialog('gommoModal'); }
 
+  // An empty partition still needs one option: a select with no options renders
+  // as a blank control that cannot be opened, which reads as a broken dropdown
+  // rather than a catalog the account has no models for.
   function gommoModelOptions(kind) {
     const list = gommoPlaygroundModels[kind === 'tts' ? 'audio' : kind] || [];
+    if (!list.length) {
+      return '<option value="">' + escapeHtml(t('gommo.noModels')) + '</option>';
+    }
     return list.map(m =>
       '<option value="' + escapeAttr(m.id) + '">' + escapeHtml(m.name || m.id) + '</option>'
     ).join('');
@@ -1811,8 +1847,8 @@ let collapsedGroups = loadCollapsedGroups();
       tab('video', t('category.video')) +
       tab('tts', t('category.audioTts')) +
       tab('music', t('category.audioMusic')) +
-      tab('video-status', t('gommo.jobLookup') || 'Job lookup') +
-      tab('music-status', t('gommo.jobLookup') || 'Job lookup') +
+      tab('video-status', t('gommo.jobLookupVideo')) +
+      tab('music-status', t('gommo.jobLookupMusic')) +
       '</div>' +
       (kind === 'video-status' || kind === 'music-status'
         ? '<div class="form-group"><label>' + escapeHtml(t('gommo.jobIdLabel') || 'Job ID') + '</label>' +
@@ -1865,6 +1901,9 @@ let collapsedGroups = loadCollapsedGroups();
       gommoPlaygroundResult = null;
       renderGommoModal();
     }));
+    // Every render replaces the markup, so the fresh <select> elements have no
+    // custom-select wrapper yet and would stay invisible without this.
+    enhanceCustomSelects(body);
   }
 
   function gommoDefaultPrompt(kind) {
@@ -1912,6 +1951,8 @@ let collapsedGroups = loadCollapsedGroups();
       voice: $('gommoVoice') ? $('gommoVoice').value.trim() : '',
       jobId: $('gommoJobId') ? $('gommoJobId').value.trim() : '',
       mode: $('gommoMode') ? $('gommoMode').value.trim() : '',
+      title: $('gommoTitle') ? $('gommoTitle').value.trim() : '',
+      lyrics: $('gommoLyrics') ? $('gommoLyrics').value.trim() : '',
       images: $('gommoImages') && $('gommoImages').value.trim() ? [$('gommoImages').value.trim()] : [],
       n: 1,
     };

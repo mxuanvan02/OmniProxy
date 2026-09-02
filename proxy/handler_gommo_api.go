@@ -440,6 +440,23 @@ func (h *Handler) apiGommoModels(w http.ResponseWriter, r *http.Request, id stri
 	})
 }
 
+// writeGommoJobStatus answers a status lookup. An unknown job id comes back from
+// upstream as an empty envelope, which must not be reported as a finished render
+// with a blank URL, so a job with neither status nor URL is a 404 instead.
+func writeGommoJobStatus(w http.ResponseWriter, kind string, job gommoJob) {
+	if job.Status == "" && job.URL == "" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "gommo " + kind + " status: job not found"})
+		return
+	}
+	urls := []string{}
+	if job.URL != "" {
+		urls = append(urls, job.URL)
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true, "kind": kind, "id": job.ID, "status": job.Status, "urls": urls,
+	})
+}
+
 // apiGommoPlaygroundRun runs one generation against one account and returns the
 // artifact as a URL (image, video) or an inline data URL (speech), so the admin
 // page can render the result without a second credentialed fetch.
@@ -497,10 +514,7 @@ func (h *Handler) apiGommoPlaygroundRun(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, serviceErrorStatus(err), map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"success": true, "kind": "video", "id": job.ID, "status": job.Status,
-			"urls": []string{job.URL},
-		})
+		writeGommoJobStatus(w, "video", job)
 
 	case "music":
 		job, err := callGommoMusic(r, account, gommoMusicRequest{
@@ -522,10 +536,7 @@ func (h *Handler) apiGommoPlaygroundRun(w http.ResponseWriter, r *http.Request) 
 			writeJSON(w, serviceErrorStatus(err), map[string]string{"error": err.Error()})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"success": true, "kind": "music", "id": job.ID, "status": job.Status,
-			"urls": []string{job.URL},
-		})
+		writeGommoJobStatus(w, "music", job)
 
 	case "tts":
 		audio, mime, err := callGommoTTS(r, account, gommoTTSRequest{

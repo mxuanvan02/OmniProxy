@@ -7102,6 +7102,8 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"discoveredCapabilities":    a.DiscoveredCapabilities,
 			"capabilitiesDiscoveredAt":  a.CapabilitiesDiscoveredAt,
 			"capabilityProbes":          a.CapabilityProbes,
+			"gommoTTSModel":             a.GommoTTSModel,
+			"gommoVoiceID":              a.GommoVoiceID,
 			"region":                    a.Region,
 			"enabled":                   a.Enabled,
 			"banStatus":                 a.BanStatus,
@@ -7286,6 +7288,27 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	}
 	if v, ok := updates["imageModel"].(string); ok {
 		existing.ImageModel = strings.TrimSpace(v)
+	}
+	// Capabilities partition the pool, so an account that gained a capability
+	// upstream stays unreachable on that endpoint until this is editable: the
+	// import-time set is otherwise frozen for the account's whole life.
+	if raw, present := updates["capabilities"]; present && isGommoAccount(existing) {
+		if list, ok := raw.([]interface{}); ok {
+			requested := make([]string, 0, len(list))
+			for _, item := range list {
+				if text, ok := item.(string); ok {
+					requested = append(requested, text)
+				}
+			}
+			existing.Capabilities = normalizeGommoCapabilities(requested)
+			existing.ProviderKind = existing.Capabilities[0]
+		}
+	}
+	if v, ok := updates["gommoTTSModel"].(string); ok && isGommoAccount(existing) {
+		existing.GommoTTSModel = strings.TrimSpace(v)
+	}
+	if v, ok := updates["gommoVoiceID"].(string); ok && isGommoAccount(existing) {
+		existing.GommoVoiceID = strings.TrimSpace(v)
 	}
 	// Per-account cache_control passthrough override. Tri-state on the wire:
 	// a bool sets an explicit override, JSON null clears it back to

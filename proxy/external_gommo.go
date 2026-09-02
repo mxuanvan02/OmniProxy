@@ -901,11 +901,25 @@ const endpointVideo = "video"
 // videoInfo, so reading these fields at the top level silently yields an empty
 // status and no download url.
 type gommoVideoStatusBody struct {
-	VideoInfo struct {
-		IDBase      string `json:"id_base"`
-		Status      string `json:"status"`
-		DownloadURL string `json:"download_url"`
-	} `json:"videoInfo"`
+	VideoInfo gommoVideoInfo `json:"videoInfo"`
+}
+
+// gommoVideoInfo tolerates the other shapes /ai/video answers with for an id it
+// does not know: null, and an empty array. Both mean "no such job", so they
+// decode to a zero value instead of failing the whole reply.
+type gommoVideoInfo struct {
+	IDBase      string `json:"id_base"`
+	Status      string `json:"status"`
+	DownloadURL string `json:"download_url"`
+}
+
+func (v *gommoVideoInfo) UnmarshalJSON(data []byte) error {
+	data = []byte(strings.TrimSpace(string(data)))
+	if len(data) == 0 || data[0] != '{' {
+		return nil
+	}
+	type plain gommoVideoInfo
+	return json.Unmarshal(data, (*plain)(v))
 }
 
 func (b gommoVideoStatusBody) job(jobID string) gommoJob {
