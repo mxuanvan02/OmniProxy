@@ -23,7 +23,7 @@ let testModalImageReason = '';
 let testModalRunning = false;
 let testModalMode = 'chat';
 let gommoPlaygroundId = '';
-let gommoPlaygroundModels = { image: [], video: [], audio: [] };
+let gommoPlaygroundModels = { image: [], video: [], audio: [], music: [] };
 let gommoPlaygroundKind = 'image';
 let gommoPlaygroundRunning = false;
 let gommoPlaygroundResult = null;
@@ -1594,7 +1594,7 @@ let collapsedGroups = loadCollapsedGroups();
     const proxy = acc ? (acc.proxyURL || t('accounts.testLog.globalProxy')) : '?';
     const isSearch = acc && hasConfiguredCapability(acc, 'search');
     const isImage = acc && hasConfiguredCapability(acc, 'image');
-    const isCodex = isCodexAccountUI(acc);
+    const isGommo = acc && String(acc.authMethod || '').toLowerCase() === 'gommo';
     const isImageTest = testModalMode === 'image';
     const isService = isSearch || isImage;
     const statusText = isImageTest
@@ -1607,7 +1607,7 @@ let collapsedGroups = loadCollapsedGroups();
         ? t('accounts.testModelsFallback')
         : t('accounts.testModelsReady', testModalModels.length);
     const modeField = '<div class="segmented-control test-mode-control" role="tablist">' +
-        '<button type="button" class="btn btn-sm ' + (testModalMode === 'chat' ? 'btn-primary' : 'btn-outline') + '" data-test-mode="chat">' + escapeHtml(t('accounts.testChatMode')) + '</button>' +
+        (!isGommo ? '<button type="button" class="btn btn-sm ' + (testModalMode === 'chat' ? 'btn-primary' : 'btn-outline') + '" data-test-mode="chat">' + escapeHtml(t('accounts.testChatMode')) + '</button>' : '') +
         '<button type="button" class="btn btn-sm ' + (testModalMode === 'image' ? 'btn-primary' : 'btn-outline') + '" data-test-mode="image">' + escapeHtml(t('accounts.testImageMode')) + '</button>' +
         (isSearch ? '<button type="button" class="btn btn-sm ' + (testModalMode === 'search' ? 'btn-primary' : 'btn-outline') + '" data-test-mode="search">' + escapeHtml(t('accounts.testSearchMode')) + '</button>' : '') +
         '</div>';
@@ -1681,8 +1681,8 @@ let collapsedGroups = loadCollapsedGroups();
     const acc = getTestAccount(id);
     testModalModels = [];
     testModalImageModels = [];
-    testModalMode = 'chat';
-    testModalLoadingModels = true;
+    testModalMode = acc && String(acc.authMethod || '').toLowerCase() === 'gommo' ? 'image' : 'chat';
+    testModalLoadingModels = testModalMode === 'chat';
     testModalModelError = false;
     testModalLoadingImageModels = true;
     testModalImageModelError = false;
@@ -1759,7 +1759,7 @@ let collapsedGroups = loadCollapsedGroups();
   async function gommoPlayground(id) {
     gommoPlaygroundId = id;
     gommoPlaygroundKind = 'image';
-    gommoPlaygroundModels = { image: [], video: [], audio: [] };
+    gommoPlaygroundModels = { image: [], video: [], audio: [], music: [] };
     gommoPlaygroundResult = null;
     gommoPlaygroundRunning = false;
     gommoPlaygroundVoice = '';
@@ -1773,6 +1773,7 @@ let collapsedGroups = loadCollapsedGroups();
           image: d.models.image || [],
           video: d.models.video || [],
           audio: d.models.audio || [],
+          music: d.models.music || [],
         };
         gommoPlaygroundVoice = d.voiceId || '';
       } else {
@@ -1809,9 +1810,11 @@ let collapsedGroups = loadCollapsedGroups();
       tab('image', t('category.image')) +
       tab('video', t('category.video')) +
       tab('tts', t('category.audioTts')) +
+      tab('music', t('category.audioMusic')) +
       tab('video-status', t('gommo.jobLookup') || 'Job lookup') +
+      tab('music-status', t('gommo.jobLookup') || 'Job lookup') +
       '</div>' +
-      (kind === 'video-status'
+      (kind === 'video-status' || kind === 'music-status'
         ? '<div class="form-group"><label>' + escapeHtml(t('gommo.jobIdLabel') || 'Job ID') + '</label>' +
           '<input type="text" id="gommoJobId" class="font-mono" /></div>'
         : '<div class="form-group"><label>' + escapeHtml(t('gommo.promptLabel') || 'Prompt') + '</label>' +
@@ -1859,6 +1862,7 @@ let collapsedGroups = loadCollapsedGroups();
   function gommoDefaultPrompt(kind) {
     if (kind === 'tts') return t('gommo.samplePromptTts') || 'Xin chào, đây là bản thử giọng đọc.';
     if (kind === 'video') return t('gommo.samplePromptVideo') || 'A red fox running through falling snow, cinematic';
+    if (kind === 'music') return t('gommo.samplePromptMusic') || 'Upbeat electronic music with piano melody, 120 BPM';
     return t('gommo.samplePromptImage') || 'A red fox in deep snow at golden hour, cinematic, sharp detail';
   }
 
@@ -1876,7 +1880,9 @@ let collapsedGroups = loadCollapsedGroups();
       if (!url) continue;
       html += r.kind === 'video'
         ? '<video src="' + escapeAttr(url) + '" controls class="w-full mt-2"></video>'
-        : '<img src="' + escapeAttr(url) + '" class="w-full mt-2" alt="" />';
+        : r.kind === 'music'
+          ? '<audio src="' + escapeAttr(url) + '" controls class="w-full mt-2"></audio>'
+          : '<img src="' + escapeAttr(url) + '" class="w-full mt-2" alt="" />';
       html += '<p class="text-sm"><a href="' + escapeAttr(url) + '" target="_blank" rel="noopener">' + escapeHtml(url) + '</a></p>';
     }
     if (r.dataUrl) html += '<audio src="' + escapeAttr(r.dataUrl) + '" controls class="w-full mt-2"></audio>';
@@ -3055,6 +3061,7 @@ let collapsedGroups = loadCollapsedGroups();
       '<label class="flex items-center gap-1 text-sm"><input type="checkbox" class="gommoCap" value="image" checked /> ' + escapeHtml(t('category.image')) + '</label>' +
       '<label class="flex items-center gap-1 text-sm"><input type="checkbox" class="gommoCap" value="video" checked /> ' + escapeHtml(t('category.video')) + '</label>' +
       '<label class="flex items-center gap-1 text-sm"><input type="checkbox" class="gommoCap" value="audio-tts" checked /> ' + escapeHtml(t('category.audioTts')) + '</label>' +
+      '<label class="flex items-center gap-1 text-sm"><input type="checkbox" class="gommoCap" value="audio-music" checked /> ' + escapeHtml(t('category.audioMusic')) + '</label>' +
       '</div></div>' +
       '<details class="mt-1"><summary class="text-sm muted-text cursor-pointer">' + escapeHtml(t('gommo.advancedToggle') || 'Advanced') + '</summary>' +
       '<div class="form-group mt-2"><label>' + escapeHtml(t('external.baseUrlLabel')) + ' <span class="muted-text">(' + escapeHtml(t('common.optional') || 'optional') + ')</span></label>' +

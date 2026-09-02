@@ -1467,6 +1467,19 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.apiGommoVideoStatus(w, ar, jobID)
+	case path == "/v1/music/generations" || path == "/music/generations":
+		ar := h.authenticateForOpenAI(w, r)
+		if ar == nil {
+			return
+		}
+		h.apiGommoCreateMusic(w, ar)
+	case strings.HasPrefix(path, "/v1/music/") || strings.HasPrefix(path, "/music/"):
+		jobID := strings.TrimPrefix(strings.TrimPrefix(path, "/v1/music/"), "/music/")
+		ar := h.authenticateForOpenAI(w, r)
+		if ar == nil {
+			return
+		}
+		h.apiGommoMusicStatus(w, ar, jobID)
 	// Capability passthrough endpoints (embeddings, audio, image edits,
 	// moderations). Routing is driven by the account capability table rather
 	// than a per-endpoint provider switch, so a provider that starts serving a
@@ -1669,7 +1682,6 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		"data":   models,
 	})
 }
-
 
 // handleModelByID returns a single entry from the public catalog.
 func (h *Handler) handleModelByID(w http.ResponseWriter, r *http.Request, modelID string) {
@@ -7161,9 +7173,9 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			// and disable the Bank Reset button instead of hiding it.
 			"codexResetCreditsAvailable": a.CodexResetCreditsAvailable,
 			"codexUsageCheckedAt":        a.CodexUsageCheckedAt,
-			"imageModel":                a.ImageModel,
-			"codexImageModel":           a.CodexImageModel,
-			"tokenRefreshedAt":          a.TokenRefreshedAt,
+			"imageModel":                 a.ImageModel,
+			"codexImageModel":            a.CodexImageModel,
+			"tokenRefreshedAt":           a.TokenRefreshedAt,
 		}
 	}
 	json.NewEncoder(w).Encode(result)
@@ -10992,6 +11004,13 @@ func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id
 
 // apiGetAccountModelsCached returns cached model list for an account (no live fetch)
 func (h *Handler) apiGetAccountModelsCached(w http.ResponseWriter, r *http.Request, id string) {
+	if account := h.pool.GetByID(id); account != nil && isGommoAccount(account) {
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"models":  []string{},
+		})
+		return
+	}
 	models := h.pool.GetModelList(id)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
@@ -11032,6 +11051,22 @@ func (h *Handler) apiGetAccountImageModels(w http.ResponseWriter, r *http.Reques
 	}
 
 	switch {
+	case isGommoAccount(account):
+		source = "gommo:image"
+		imageModels, err := fetchGommoModelsFor(account, "image")
+		if err == nil {
+			for _, model := range imageModels {
+				appendModel(model.ModelId, model.ModelName, source)
+			}
+		}
+		supported = err == nil && len(models) > 0
+		if err != nil {
+			reason = "image model discovery failed; custom model is still allowed"
+		} else if supported {
+			reason = ""
+		} else {
+			reason = "upstream returned no image models; custom model is still allowed"
+		}
 	case isCodexAccount(account):
 		// Codex image generation runs through the image_generation tool, whose
 		// "model" field only accepts the gpt-image-* family. Listing the text

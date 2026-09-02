@@ -19,8 +19,8 @@ const (
 	capabilityAudioTTS  = "audio-tts"
 	capabilityModeration = "moderation"
 	capabilityVideo      = "video"
+	capabilityAudioMusic = "audio-music"
 )
-
 // discoverableCapabilities is the ordered list reported by the capabilities
 // endpoint. Order is stable so the admin UI renders badges deterministically.
 var discoverableCapabilities = []string{
@@ -31,6 +31,7 @@ var discoverableCapabilities = []string{
 	capabilityAudioTTS,
 	capabilityModeration,
 	capabilityVideo,
+	capabilityAudioMusic,
 	capabilitySearch,
 }
 

@@ -120,9 +120,10 @@ func (h *Handler) apiImportGommoProvider(w http.ResponseWriter, r *http.Request)
 // is invisible to every pool and would silently never be selected.
 func normalizeGommoCapabilities(requested []string) []string {
 	allowed := map[string]bool{
-		capabilityImage:    true,
-		capabilityVideo:    true,
-		capabilityAudioTTS: true,
+		capabilityImage:      true,
+		capabilityVideo:      true,
+		capabilityAudioTTS:   true,
+		capabilityAudioMusic: true,
 	}
 	out := make([]string, 0, len(allowed))
 	seen := make(map[string]bool)
@@ -137,24 +138,24 @@ func normalizeGommoCapabilities(requested []string) []string {
 		}
 	}
 	if len(out) == 0 {
-		return []string{capabilityImage, capabilityVideo, capabilityAudioTTS}
+		return []string{capabilityImage, capabilityVideo, capabilityAudioTTS, capabilityAudioMusic}
 	}
 	return out
 }
 
 func gommoAccountJSON(account *config.Account) map[string]interface{} {
 	return map[string]interface{}{
-		"id":            account.ID,
-		"email":         account.Email,
-		"nickname":      account.Nickname,
-		"provider":      account.Provider,
-		"domain":        account.GommoDomain,
-		"projectId":     account.GommoProjectID,
-		"capabilities":  account.Capabilities,
-		"creditsAi":     account.GommoCreditsAI,
-		"balance":       account.GommoBalance,
-		"currency":      account.GommoCurrency,
-		"checkedAt":     account.GommoCreditsCheckedAt,
+		"id":           account.ID,
+		"email":        account.Email,
+		"nickname":     account.Nickname,
+		"provider":     account.Provider,
+		"domain":       account.GommoDomain,
+		"projectId":    account.GommoProjectID,
+		"capabilities": account.Capabilities,
+		"creditsAi":    account.GommoCreditsAI,
+		"balance":      account.GommoBalance,
+		"currency":     account.GommoCurrency,
+		"checkedAt":    account.GommoCreditsCheckedAt,
 	}
 }
 
@@ -278,6 +279,90 @@ func (h *Handler) apiGommoVideoStatus(w http.ResponseWriter, r *http.Request, jo
 	}
 	if lastErr == nil {
 		h.sendOpenAIError(w, http.StatusServiceUnavailable, "server_error", "No available accounts with video capability")
+		return
+	}
+	h.sendOpenAIError(w, serviceErrorStatus(lastErr), "server_error", lastErr.Error())
+}
+
+// ==================== Music generation ====================
+
+func (h *Handler) apiGommoCreateMusic(w http.ResponseWriter, r *http.Request) {
+	var in gommoMusicRequest
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		h.sendOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "Invalid JSON")
+		return
+	}
+	if strings.TrimSpace(in.Prompt) == "" {
+		h.sendOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "prompt is required")
+		return
+	}
+
+	apiKeyID := apiKeyIDFromContext(r.Context())
+	excluded := make(map[string]bool)
+	var lastErr error
+	var lastAccountID string
+	for {
+		account := h.pool.GetNextForCapability(capabilityAudioMusic, "", excluded)
+		if account == nil {
+			break
+		}
+		excluded[account.ID] = true
+		if !isGommoAccount(account) {
+			continue
+		}
+		lastAccountID = account.ID
+		job, err := callGommoMusic(r, account, in)
+		if err != nil {
+			lastErr = err
+			h.pool.RecordError(account.ID, serviceErrorIsQuota(err), capabilityAudioMusic)
+			logger.Infof("[Gommo] music via %s failed: %v", account.Email, err)
+			continue
+		}
+		h.pool.RecordSuccess(account.ID, capabilityAudioMusic)
+		h.recordUsage(apiKeyID, account.ID, in.Model, endpointMusic, 0, 0, 0, 0, 0, 0)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"created": time.Now().Unix(), "id": job.ID, "status": job.Status,
+			"data": []map[string]string{{"url": job.URL}},
+		})
+		return
+	}
+	if lastErr == nil {
+		h.sendOpenAIError(w, http.StatusServiceUnavailable, "server_error", "No available accounts with audio-music capability")
+		return
+	}
+	h.recordError(apiKeyID, lastAccountID, in.Model, endpointMusic, lastErr.Error())
+	h.sendOpenAIError(w, serviceErrorStatus(lastErr), "server_error", lastErr.Error())
+}
+
+func (h *Handler) apiGommoMusicStatus(w http.ResponseWriter, r *http.Request, jobID string) {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		h.sendOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "music id is required")
+		return
+	}
+	excluded := make(map[string]bool)
+	var lastErr error
+	for {
+		account := h.pool.GetNextForCapability(capabilityAudioMusic, "", excluded)
+		if account == nil {
+			break
+		}
+		excluded[account.ID] = true
+		if !isGommoAccount(account) {
+			continue
+		}
+		job, err := gommoMusicStatus(r, account, jobID)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"id": job.ID, "status": job.Status, "data": []map[string]string{{"url": job.URL}},
+		})
+		return
+	}
+	if lastErr == nil {
+		h.sendOpenAIError(w, http.StatusServiceUnavailable, "server_error", "No available accounts with audio-music capability")
 		return
 	}
 	h.sendOpenAIError(w, serviceErrorStatus(lastErr), "server_error", lastErr.Error())
@@ -413,6 +498,30 @@ func (h *Handler) apiGommoPlaygroundRun(w http.ResponseWriter, r *http.Request) 
 			"urls": []string{job.URL},
 		})
 
+	case "music":
+		job, err := callGommoMusic(r, account, gommoMusicRequest{
+			Prompt: in.Prompt, Model: in.Model, Duration: in.Duration,
+		})
+		if err != nil {
+			writeJSON(w, serviceErrorStatus(err), map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true, "kind": "music", "id": job.ID, "status": job.Status,
+			"urls": []string{job.URL}, "elapsedMs": time.Since(started).Milliseconds(),
+		})
+
+	case "music-status":
+		job, err := gommoMusicStatus(r, account, in.JobID)
+		if err != nil {
+			writeJSON(w, serviceErrorStatus(err), map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"success": true, "kind": "music", "id": job.ID, "status": job.Status,
+			"urls": []string{job.URL},
+		})
+
 	case "tts":
 		audio, mime, err := callGommoTTS(r, account, gommoTTSRequest{
 			Input: in.Prompt, Model: in.Model, Voice: in.Voice,
@@ -432,6 +541,6 @@ func (h *Handler) apiGommoPlaygroundRun(w http.ResponseWriter, r *http.Request) 
 		})
 
 	default:
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind must be image, video, video-status or tts"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "kind must be image, video, video-status, music, music-status or tts"})
 	}
 }

@@ -790,3 +790,10 @@ func TestPruneCacheStickyKeepsLiveLongTTLPins(t *testing.T) {
 		t.Fatalf("expired anthropic pin survived pruning: got %q", id)
 	}
 }
+
+func TestMusicOnlyAccountIsInServicePool(t *testing.T) {
+	account := config.Account{ID: "music-only", Capabilities: []string{"audio-music"}}
+	if !accountSupportsServiceCapability(account) {
+		t.Fatal("music-only account must be assigned to the service pool")
+	}
+}

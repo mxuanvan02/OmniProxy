@@ -1016,6 +1016,89 @@ func callGommoVideo(parent *http.Request, account *config.Account, in gommoVideo
 		})
 }
 
+// ==================== Music ====================
+
+type gommoMusicRequest struct {
+	Prompt   string `json:"prompt"`
+	Model    string `json:"model,omitempty"`
+	Duration string `json:"duration,omitempty"`
+	Privacy  string `json:"privacy,omitempty"`
+}
+
+const endpointMusic = "music"
+
+type gommoMusicStatusBody struct {
+	MusicInfo struct {
+		IDBase      string `json:"id_base"`
+		Status      string `json:"status"`
+		DownloadURL string `json:"download_url"`
+		FileURL     string `json:"file_url"`
+	} `json:"musicInfo"`
+}
+
+func (b gommoMusicStatusBody) job(jobID string) gommoJob {
+	return gommoJob{
+		ID:     firstNonEmpty(strings.TrimSpace(b.MusicInfo.IDBase), jobID),
+		Status: strings.TrimSpace(b.MusicInfo.Status),
+		URL:    firstNonEmpty(strings.TrimSpace(b.MusicInfo.DownloadURL), strings.TrimSpace(b.MusicInfo.FileURL)),
+	}
+}
+
+func gommoMusicStatus(parent *http.Request, account *config.Account, jobID string) (gommoJob, error) {
+	jobID = strings.TrimSpace(jobID)
+	if jobID == "" {
+		return gommoJob{}, fmt.Errorf("gommo music status: job id is required")
+	}
+	raw, err := gommoPost(parent, account, gommoPathMusicInfo, map[string]interface{}{"musicId": jobID})
+	if err != nil {
+		return gommoJob{}, err
+	}
+	var status gommoMusicStatusBody
+	if err := json.Unmarshal(raw, &status); err != nil {
+		return gommoJob{}, fmt.Errorf("gommo music status parse: %w", err)
+	}
+	return status.job(jobID), nil
+}
+
+func callGommoMusic(parent *http.Request, account *config.Account, in gommoMusicRequest) (gommoJob, error) {
+	prompt := strings.TrimSpace(in.Prompt)
+	if prompt == "" {
+		return gommoJob{}, fmt.Errorf("gommo music: prompt is required")
+	}
+	privacy := strings.ToUpper(strings.TrimSpace(in.Privacy))
+	if privacy != "PUBLIC" {
+		privacy = "PRIVATE"
+	}
+	params := map[string]interface{}{
+		"prompt":     prompt,
+		"model":      strings.TrimSpace(in.Model),
+		"duration":   strings.TrimSpace(in.Duration),
+		"privacy":    privacy,
+		"project_id": gommoProjectID(account),
+	}
+	raw, err := gommoPost(parent, account, gommoPathCreateMusic, params)
+	if err != nil {
+		return gommoJob{}, err
+	}
+	var created gommoMusicStatusBody
+	if err := json.Unmarshal(raw, &created); err != nil {
+		return gommoJob{}, fmt.Errorf("gommo music create parse: %w", err)
+	}
+	job := created.job("")
+	if job.ID == "" {
+		return gommoJob{}, &serviceHTTPError{Status: http.StatusBadGateway, Body: "gommo music create returned no id_base"}
+	}
+	return gommoPollJob(parent, account, gommoPathMusicInfo,
+		map[string]interface{}{"musicId": job.ID},
+		func(body []byte) gommoJob {
+			var status gommoMusicStatusBody
+			if json.Unmarshal(body, &status) != nil {
+				return gommoJob{ID: job.ID}
+			}
+			return status.job(job.ID)
+		})
+}
+
 // ==================== Model catalog ====================
 
 // gommoModelTypes are the catalog partitions the provider exposes. Each is a
@@ -1027,6 +1110,7 @@ var gommoModelTypes = []struct {
 	{"image", capabilityImage},
 	{"video", capabilityVideo},
 	{"tts", capabilityAudioTTS},
+	{"music", capabilityAudioMusic},
 }
 
 // fetchGommoModels reads the provider's own catalog for every media type. A
@@ -1036,18 +1120,28 @@ func fetchGommoModels(account *config.Account) ([]ModelInfo, error) {
 	var out []ModelInfo
 	var lastErr error
 	for _, partition := range gommoModelTypes {
-		raw, err := gommoPost(nil, account, gommoPathModels, map[string]interface{}{"type": partition.apiType})
+		models, err := fetchGommoModelsFor(account, partition.apiType)
 		if err != nil {
 			lastErr = err
 			logger.Warnf("[Gommo] model catalog %s failed for %s: %v", partition.apiType, account.Email, err)
 			continue
 		}
-		out = append(out, parseGommoModels(raw, partition.apiType)...)
+		out = append(out, models...)
 	}
 	if len(out) == 0 && lastErr != nil {
 		return nil, lastErr
 	}
 	return out, nil
+}
+
+// fetchGommoModelsFor reads a single catalog partition, so a caller that needs
+// one media type pays one round-trip instead of three.
+func fetchGommoModelsFor(account *config.Account, apiType string) ([]ModelInfo, error) {
+	raw, err := gommoPost(nil, account, gommoPathModels, map[string]interface{}{"type": apiType})
+	if err != nil {
+		return nil, err
+	}
+	return parseGommoModels(raw, apiType), nil
 }
 
 // parseGommoModels normalizes one catalog partition. The entries are free-form

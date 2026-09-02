@@ -217,9 +217,9 @@ func TestGommoPostPrefersBearerHeaderAndKeepsBodyFallback(t *testing.T) {
 
 func TestGommoTerminalStatus(t *testing.T) {
 	cases := []struct {
-		status    string
-		wantDone  bool
-		wantOK    bool
+		status   string
+		wantDone bool
+		wantOK   bool
 	}{
 		{"SUCCESS", true, true},
 		{"completed", true, true},
@@ -421,7 +421,7 @@ func TestParseGommoModelsMapsTTSPartitionToAudio(t *testing.T) {
 
 func TestNormalizeGommoCapabilitiesDefaultsToAllMediaTypes(t *testing.T) {
 	got := normalizeGommoCapabilities(nil)
-	for _, want := range []string{capabilityImage, capabilityVideo, capabilityAudioTTS} {
+	for _, want := range []string{capabilityImage, capabilityVideo, capabilityAudioTTS, capabilityAudioMusic} {
 		if !containsFold(got, want) {
 			t.Errorf("default capabilities %v missing %q", got, want)
 		}
@@ -686,7 +686,7 @@ func TestFetchGommoModelsQueriesEveryPartition(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchGommoModels: %v", err)
 	}
-	want := []string{"image", "video", "tts"}
+	want := []string{"image", "video", "tts", "music"}
 	if len(types) != len(want) {
 		t.Fatalf("queried types = %v, want %v", types, want)
 	}
@@ -695,7 +695,7 @@ func TestFetchGommoModelsQueriesEveryPartition(t *testing.T) {
 			t.Errorf("partition %d = %q, want %q", i, types[i], want[i])
 		}
 	}
-	if len(models) != 3 {
+	if len(models) != 4 {
 		t.Fatalf("models = %d, want one per partition: %+v", len(models), models)
 	}
 }
@@ -721,8 +721,8 @@ func TestFetchGommoModelsKeepsPartitionsThatAnswered(t *testing.T) {
 	if err != nil {
 		t.Fatalf("a single failing partition must not fail the refresh: %v", err)
 	}
-	if len(models) != 2 {
-		t.Fatalf("models = %+v, want the image and tts partitions", models)
+	if len(models) != 3 {
+		t.Fatalf("models = %+v, want the image, tts and music partitions", models)
 	}
 }
 
@@ -997,5 +997,88 @@ func TestParseImageSizeReadsDimensionPair(t *testing.T) {
 	}
 	if _, _, ok := parseImageSize("wide"); ok {
 		t.Error("a non-dimension string must not parse")
+	}
+}
+
+func TestCallGommoMusicPollsUntilDownloadURL(t *testing.T) {
+	polls := 0
+	var createdForm url.Values
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		form, _ := url.ParseQuery(string(body))
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case gommoPathCreateMusic:
+			createdForm = form
+			w.Write([]byte(`{"musicInfo":{"id_base":"music-7","status":"PENDING"}}`))
+		case gommoPathMusicInfo:
+			polls++
+			if form.Get("musicId") != "music-7" {
+				t.Errorf("status poll musicId = %q, want music-7", form.Get("musicId"))
+			}
+			if polls < 2 {
+				w.Write([]byte(`{"musicInfo":{"status":"PROCESSING"}}`))
+				return
+			}
+			w.Write([]byte(`{"musicInfo":{"id_base":"music-7","status":"SUCCESS","download_url":"https://cdn.example.test/music-7.mp3"}}`))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	defer gommoPollIntervalForTest(time.Millisecond)()
+
+	job, err := callGommoMusic(nil, gommoTestAccount(server.URL), gommoMusicRequest{
+		Prompt: "piano", Model: "suno-v4", Duration: "30", Privacy: "PUBLIC",
+	})
+	if err != nil {
+		t.Fatalf("callGommoMusic: %v", err)
+	}
+	if job.ID != "music-7" || job.URL != "https://cdn.example.test/music-7.mp3" {
+		t.Errorf("job = %+v", job)
+	}
+	if polls < 2 {
+		t.Errorf("polls = %d, want at least 2", polls)
+	}
+	if createdForm.Get("model") != "suno-v4" || createdForm.Get("duration") != "30" || createdForm.Get("privacy") != "PUBLIC" {
+		t.Errorf("create form = %v", createdForm)
+	}
+}
+
+func TestCallGommoMusicRequiresPromptAndJobID(t *testing.T) {
+	if _, err := callGommoMusic(nil, gommoTestAccount(""), gommoMusicRequest{Prompt: "  "}); err == nil {
+		t.Fatal("empty prompt must be rejected")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"musicInfo":{"status":"PENDING"}}`))
+	}))
+	defer server.Close()
+	if _, err := callGommoMusic(nil, gommoTestAccount(server.URL), gommoMusicRequest{Prompt: "piano"}); err == nil {
+		t.Fatal("create response without id_base must fail")
+	}
+}
+
+func TestGommoMusicStatusReadsFileURLAndRequiresJobID(t *testing.T) {
+	if _, err := gommoMusicStatus(nil, gommoTestAccount(""), " "); err == nil {
+		t.Fatal("empty job id must be rejected")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		form, _ := url.ParseQuery(string(body))
+		if form.Get("musicId") != "music-9" {
+			t.Errorf("musicId = %q, want music-9", form.Get("musicId"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"musicInfo":{"status":"SUCCESS","file_url":"https://cdn.example.test/music-9.mp3"}}`))
+	}))
+	defer server.Close()
+
+	job, err := gommoMusicStatus(nil, gommoTestAccount(server.URL), "music-9")
+	if err != nil {
+		t.Fatalf("gommoMusicStatus: %v", err)
+	}
+	if job.ID != "music-9" || job.URL != "https://cdn.example.test/music-9.mp3" {
+		t.Errorf("job = %+v", job)
 	}
 }

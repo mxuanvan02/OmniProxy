@@ -1,0 +1,146 @@
+package proxy
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"omniproxy/config"
+	accountpool "omniproxy/pool"
+	"testing"
+)
+
+// gommoAdminAccount registers a Gommo media account in config and returns the
+// reloaded pool, which is what both admin endpoints resolve IDs through.
+func gommoAdminAccount(t *testing.T, id, baseURL string) *accountpool.AccountPool {
+	t.Helper()
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	if err := config.AddAccount(config.Account{
+		ID:           id,
+		Email:        "media@example.test",
+		AuthMethod:   gommoAuthMethod,
+		Provider:     gommoProviderLabel,
+		AccessToken:  "tok-abc",
+		GommoDomain:  "example.test",
+		BaseURL:      baseURL,
+		Capabilities: []string{capabilityImage, capabilityVideo, capabilityAudioTTS},
+		Enabled:      true,
+	}); err != nil {
+		t.Fatalf("AddAccount: %v", err)
+	}
+	p := accountpool.GetPool()
+	p.Reload()
+	return p
+}
+
+// Gommo has no chat capability, but its media catalog lands in the routing
+// cache, so the admin test modal used to offer grok_video_heavy and hailuo_2_3
+// as chat models.
+func TestAccountModelsCachedReportsNoChatModelsForGommo(t *testing.T) {
+	const accountID = "gommo-cached"
+	p := gommoAdminAccount(t, accountID, "")
+	p.SetModelList(accountID, []string{"grok_video_heavy", "hailuo_2_3", "imagegen_2_0"})
+
+	h := &Handler{pool: p}
+	rec := httptest.NewRecorder()
+	h.apiGetAccountModelsCached(rec, httptest.NewRequest(http.MethodGet, "/accounts/"+accountID+"/models/cached", nil), accountID)
+
+	var resp struct {
+		Models []string `json:"models"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Models) != 0 {
+		t.Fatalf("models = %v, want none: Gommo exposes no chat models", resp.Models)
+	}
+}
+
+// /image-models must read the image partition of the Gommo catalog. Without
+// that it fell through to the generic image-capability branch, which offered
+// the chat account's gpt-5.6-luna and a hardcoded openai/gpt-5-image.
+func TestAccountImageModelsReadsOnlyGommoImagePartition(t *testing.T) {
+	var types []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		form, _ := url.ParseQuery(string(body))
+		types = append(types, form.Get("type"))
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"data":[{"model":"imagegen_2_0","title":"ImageGen 2.0"}]}`))
+	}))
+	defer server.Close()
+
+	const accountID = "gommo-image-models"
+	p := gommoAdminAccount(t, accountID, server.URL)
+
+	h := &Handler{pool: p}
+	rec := httptest.NewRecorder()
+	h.apiGetAccountImageModels(rec, httptest.NewRequest(http.MethodGet, "/accounts/"+accountID+"/image-models", nil), accountID)
+
+	if len(types) != 1 || types[0] != "image" {
+		t.Fatalf("queried catalog types = %v, want exactly [image]", types)
+	}
+
+	var resp struct {
+		Models []struct {
+			ID     string `json:"id"`
+			Name   string `json:"name"`
+			Source string `json:"source"`
+		} `json:"models"`
+		Source    string `json:"source"`
+		Supported bool   `json:"supported"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Source != "gommo:image" || !resp.Supported {
+		t.Errorf("source = %q supported = %v, want gommo:image/true", resp.Source, resp.Supported)
+	}
+	if len(resp.Models) != 1 || resp.Models[0].ID != "imagegen_2_0" {
+		t.Fatalf("models = %+v, want only the image partition entry", resp.Models)
+	}
+	if resp.Models[0].Name != "ImageGen 2.0" {
+		t.Errorf("name = %q, want the catalog title", resp.Models[0].Name)
+	}
+}
+
+// A catalog outage must keep the modal usable: no models, but a custom model is
+// still accepted rather than the endpoint erroring out.
+func TestAccountImageModelsKeepsCustomModelWhenGommoCatalogFails(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"bad token"}`))
+	}))
+	defer server.Close()
+
+	const accountID = "gommo-image-fail"
+	p := gommoAdminAccount(t, accountID, server.URL)
+
+	h := &Handler{pool: p}
+	rec := httptest.NewRecorder()
+	h.apiGetAccountImageModels(rec, httptest.NewRequest(http.MethodGet, "/accounts/"+accountID+"/image-models", nil), accountID)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 so the modal can still submit a custom model", rec.Code)
+	}
+	var resp struct {
+		Models        []map[string]interface{} `json:"models"`
+		Supported     bool                     `json:"supported"`
+		CustomAllowed bool                     `json:"customAllowed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Supported {
+		t.Error("supported must be false when the catalog call failed")
+	}
+	if !resp.CustomAllowed {
+		t.Error("customAllowed must stay true so the operator can type a model")
+	}
+	if len(resp.Models) != 0 {
+		t.Errorf("models = %+v, want none", resp.Models)
+	}
+}

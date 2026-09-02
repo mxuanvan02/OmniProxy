@@ -224,7 +224,7 @@ func (p *AccountPool) Reload() {
 // serve. audio-tts and video belong here because media providers (Gommo) expose
 // them without any chat model, so an account configured only for speech or
 // video would otherwise join no pool at all and never be selected.
-var serviceCapabilities = []string{"search", "image", "audio-tts", "video"}
+var serviceCapabilities = []string{"search", "image", "audio-tts", "audio-music", "video"}
 
 func accountSupportsServiceCapability(account config.Account) bool {
 	for _, capability := range serviceCapabilities {
