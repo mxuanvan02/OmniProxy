@@ -21,7 +21,7 @@ OmniProxy is derived from the **SuperKiro** project, extended with model-family 
   * **AWS IAM SSO / Builder ID** — login and background token refresh for CodeWhisperer/Kiro.
   * **Service API keys** — web search via Firecrawl, Tavily, Exa, Jina Reader.
   * **Gommo AutoAI** — long-lived token for the media API behind `api.gommo.net` (also served by the 79AI front end).
-* **Media generation:** Image (`/v1/images/generations`), speech (`/v1/audio/speech`), and video (`/v1/videos/generations`, with `/v1/videos/{id}` for a render that outlives the request) are served from providers that expose them. Asynchronous upstream jobs are polled internally, so a client receives a finished result rather than a job id.
+* **Media generation:** Image (`/v1/images/generations`), speech (`/v1/audio/speech`), video (`/v1/videos/generations`, with `/v1/videos/{id}` for a render that outlives the request), and music (`/v1/music/generations`, with `/v1/music/{id}` for the status) are served from providers that expose them. Asynchronous upstream jobs are polled internally, so a client receives a finished result rather than a job id.
 * **Model family catalog:** Groups discovered model IDs into families (`gpt`, `claude`, `qwen`, `deepseek`, `glm`, `grok`, `llama`, `kimi`, `minimax`) with context and output token limits.
 * **Account pool:**
   * Selection strategies: weighted round-robin, cost-optimized, reset-aware.
@@ -135,7 +135,7 @@ docker compose up -d
       "imageModel": "<image-model-id>",
       "gommoTtsModel": "eleven_flash_v2_5",
       "gommoVoiceId": "<voice-id>",
-      "capabilities": ["image", "video", "audio-tts"],
+      "capabilities": ["image", "video", "audio-tts", "audio-music"],
       "enabled": true,
       "weight": 1,
       "region": "external"
@@ -240,6 +240,15 @@ curl http://127.0.0.1:8080/v1/videos/generations \
   -d '{"prompt":"a paper boat drifting downstream","ratio":"16_9"}'
 
 curl http://127.0.0.1:8080/v1/videos/<id> \
+  -H "Authorization: Bearer $OMNIPROXY_API_KEY"
+
+# Music — the render is polled internally; `id` lets you retrieve a slow one later
+curl http://127.0.0.1:8080/v1/music/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OMNIPROXY_API_KEY" \
+  -d '{"prompt":"upbeat lofi piano","title":"Midnight Drive","lyrics":"la la la"}'
+
+curl http://127.0.0.1:8080/v1/music/<id> \
   -H "Authorization: Bearer $OMNIPROXY_API_KEY"
 ```
 

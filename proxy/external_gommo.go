@@ -1018,11 +1018,15 @@ func callGommoVideo(parent *http.Request, account *config.Account, in gommoVideo
 
 // ==================== Music ====================
 
+// gommoMusicRequest mirrors what /ai_musics/create actually validates: a song
+// name over 5 characters and a styles description over 3. Prompt carries the
+// styles because that is the field a caller with one text box would fill;
+// Title is derived from it when absent so a minimal request still passes.
 type gommoMusicRequest struct {
-	Prompt   string `json:"prompt"`
-	Model    string `json:"model,omitempty"`
-	Duration string `json:"duration,omitempty"`
-	Privacy  string `json:"privacy,omitempty"`
+	Prompt string `json:"prompt"`
+	Title  string `json:"title,omitempty"`
+	Lyrics string `json:"lyrics,omitempty"`
+	Model  string `json:"model,omitempty"`
 }
 
 const endpointMusic = "music"
@@ -1061,20 +1065,28 @@ func gommoMusicStatus(parent *http.Request, account *config.Account, jobID strin
 }
 
 func callGommoMusic(parent *http.Request, account *config.Account, in gommoMusicRequest) (gommoJob, error) {
-	prompt := strings.TrimSpace(in.Prompt)
-	if prompt == "" {
+	styles := strings.TrimSpace(in.Prompt)
+	if styles == "" {
 		return gommoJob{}, fmt.Errorf("gommo music: prompt is required")
 	}
-	privacy := strings.ToUpper(strings.TrimSpace(in.Privacy))
-	if privacy != "PUBLIC" {
-		privacy = "PRIVATE"
+	// Upstream rejects a styles string of 3 characters or fewer, and a name of
+	// 5 or fewer, before it charges anything. Both are checked here so a caller
+	// gets a local error instead of an opaque upstream code.
+	if len([]rune(styles)) <= 3 {
+		return gommoJob{}, fmt.Errorf("gommo music: prompt must be longer than 3 characters")
+	}
+	title := strings.TrimSpace(in.Title)
+	if title == "" {
+		title = styles
+	}
+	if len([]rune(title)) <= 5 {
+		return gommoJob{}, fmt.Errorf("gommo music: title must be longer than 5 characters")
 	}
 	params := map[string]interface{}{
-		"prompt":     prompt,
-		"model":      strings.TrimSpace(in.Model),
-		"duration":   strings.TrimSpace(in.Duration),
-		"privacy":    privacy,
-		"project_id": gommoProjectID(account),
+		"name":   title,
+		"styles": styles,
+		"lyrics": strings.TrimSpace(in.Lyrics),
+		"model":  strings.TrimSpace(in.Model),
 	}
 	raw, err := gommoPost(parent, account, gommoPathCreateMusic, params)
 	if err != nil {

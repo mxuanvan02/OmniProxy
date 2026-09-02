@@ -21,7 +21,7 @@ OmniProxy 派生自 **SuperKiro** 项目，并在其基础上扩展了按模型�
   * **AWS IAM SSO / Builder ID** — CodeWhisperer/Kiro 的登录与后台令牌刷新。
   * **服务 API Key** — 通过 Firecrawl、Tavily、Exa、Jina Reader 进行网页搜索。
   * **Gommo AutoAI** — 用于 `api.gommo.net` 背后媒体 API 的长期令牌（79AI 前端使用的也是同一后端）。
-* **媒体生成：** 图像（`/v1/images/generations`）、语音（`/v1/audio/speech`）与视频（`/v1/videos/generations`，渲染时间超出请求时可用 `/v1/videos/{id}` 取回）由具备相应能力的提供商承担。上游的异步任务在内部轮询完成，因此客户端拿到的是最终结果而不是一个任务 ID。
+* **媒体生成：** 图像（`/v1/images/generations`）、语音（`/v1/audio/speech`）、视频（`/v1/videos/generations`，渲染时间超出请求时可用 `/v1/videos/{id}` 取回）与音乐（`/v1/music/generations`，可用 `/v1/music/{id}` 查询状态）由具备相应能力的提供商承担。上游的异步任务在内部轮询完成，因此客户端拿到的是最终结果而不是一个任务 ID。
 * **模型家族目录：** 将发现的模型 ID 按家族分组（`gpt`、`claude`、`qwen`、`deepseek`、`glm`、`grok`、`llama`、`kimi`、`minimax`），并附带上下文与输出 token 限制。
 * **账户池：**
   * 选择策略：加权轮询、成本优先、重置感知。
@@ -135,7 +135,7 @@ docker compose up -d
       "imageModel": "<image-model-id>",
       "gommoTtsModel": "eleven_flash_v2_5",
       "gommoVoiceId": "<voice-id>",
-      "capabilities": ["image", "video", "audio-tts"],
+      "capabilities": ["image", "video", "audio-tts", "audio-music"],
       "enabled": true,
       "weight": 1,
       "region": "external"
@@ -239,6 +239,15 @@ curl http://127.0.0.1:8080/v1/videos/generations \
   -d '{"prompt":"a paper boat drifting downstream","ratio":"16_9"}'
 
 curl http://127.0.0.1:8080/v1/videos/<id> \
+  -H "Authorization: Bearer $OMNIPROXY_API_KEY"
+
+# 音乐 — proxy 内部轮询渲染进度；`id` 用于取回耗时较长的渲染
+curl http://127.0.0.1:8080/v1/music/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OMNIPROXY_API_KEY" \
+  -d '{"prompt":"upbeat lofi piano","title":"Midnight Drive","lyrics":"la la la"}'
+
+curl http://127.0.0.1:8080/v1/music/<id> \
   -H "Authorization: Bearer $OMNIPROXY_API_KEY"
 ```
 

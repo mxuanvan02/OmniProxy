@@ -385,7 +385,11 @@ type gommoPlaygroundRequest struct {
 	Mode       string `json:"mode"`
 	Voice      string `json:"voice"`
 	JobID      string `json:"jobId"`
-	N          int    `json:"n"`
+	// Music takes a song name and optional lyrics alongside the styles text the
+	// shared Prompt field carries.
+	Title  string `json:"title"`
+	Lyrics string `json:"lyrics"`
+	N      int    `json:"n"`
 	// Images seeds image-to-video: several video models reject a text-only
 	// prompt and demand a first frame, so the playground has to be able to
 	// supply one.
@@ -500,7 +504,8 @@ func (h *Handler) apiGommoPlaygroundRun(w http.ResponseWriter, r *http.Request) 
 
 	case "music":
 		job, err := callGommoMusic(r, account, gommoMusicRequest{
-			Prompt: in.Prompt, Model: in.Model, Duration: in.Duration,
+			Prompt: in.Prompt, Model: in.Model,
+			Title: in.Title, Lyrics: in.Lyrics,
 		})
 		if err != nil {
 			writeJSON(w, serviceErrorStatus(err), map[string]string{"error": err.Error()})

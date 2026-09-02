@@ -21,7 +21,7 @@ OmniProxy được phát triển từ dự án **SuperKiro**, bổ sung danh m�
   * **AWS IAM SSO / Builder ID** — đăng nhập và làm mới token nền cho CodeWhisperer/Kiro.
   * **Service API key** — tìm kiếm web qua Firecrawl, Tavily, Exa, Jina Reader.
   * **Gommo AutoAI** — token dài hạn cho API media sau `api.gommo.net` (cũng là backend của front end 79AI).
-* **Sinh media:** Ảnh (`/v1/images/generations`), giọng nói (`/v1/audio/speech`) và video (`/v1/videos/generations`, kèm `/v1/videos/{id}` cho bản render vượt quá thời gian chờ của request) được phục vụ từ những nhà cung cấp có khả năng đó. Các job bất đồng bộ phía trên được poll nội bộ, nên client nhận kết quả hoàn chỉnh thay vì một job id.
+* **Sinh media:** Ảnh (`/v1/images/generations`), giọng nói (`/v1/audio/speech`), video (`/v1/videos/generations`, kèm `/v1/videos/{id}` cho bản render vượt quá thời gian chờ của request), và nhạc (`/v1/music/generations`, kèm `/v1/music/{id}` cho trạng thái) được phục vụ từ những nhà cung cấp có khả năng đó. Các job bất đồng bộ phía trên được poll nội bộ, nên client nhận kết quả hoàn chỉnh thay vì một job id.
 * **Danh mục theo họ mô hình:** Nhóm các mô hình đã khám phá thành các họ (`gpt`, `claude`, `qwen`, `deepseek`, `glm`, `grok`, `llama`, `kimi`, `minimax`) kèm giới hạn context và output token.
 * **Nhóm tài khoản:**
   * Chiến lược chọn tài khoản: round-robin có trọng số, tối ưu chi phí, nhận biết chu kỳ reset.
@@ -135,7 +135,7 @@ docker compose up -d
       "imageModel": "<image-model-id>",
       "gommoTtsModel": "eleven_flash_v2_5",
       "gommoVoiceId": "<voice-id>",
-      "capabilities": ["image", "video", "audio-tts"],
+      "capabilities": ["image", "video", "audio-tts", "audio-music"],
       "enabled": true,
       "weight": 1,
       "region": "external"
@@ -240,6 +240,15 @@ curl http://127.0.0.1:8080/v1/videos/generations \
   -d '{"prompt":"chiếc thuyền giấy trôi theo dòng","ratio":"16_9"}'
 
 curl http://127.0.0.1:8080/v1/videos/<id> \
+  -H "Authorization: Bearer $OMNIPROXY_API_KEY"
+
+# Nhạc — proxy tự poll tiến trình render; `id` dùng để lấy lại bản render chậm
+curl http://127.0.0.1:8080/v1/music/generations \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OMNIPROXY_API_KEY" \
+  -d '{"prompt":"upbeat lofi piano","title":"Midnight Drive","lyrics":"la la la"}'
+
+curl http://127.0.0.1:8080/v1/music/<id> \
   -H "Authorization: Bearer $OMNIPROXY_API_KEY"
 ```
 

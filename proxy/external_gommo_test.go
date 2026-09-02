@@ -1029,7 +1029,8 @@ func TestCallGommoMusicPollsUntilDownloadURL(t *testing.T) {
 	defer gommoPollIntervalForTest(time.Millisecond)()
 
 	job, err := callGommoMusic(nil, gommoTestAccount(server.URL), gommoMusicRequest{
-		Prompt: "piano", Model: "suno-v4", Duration: "30", Privacy: "PUBLIC",
+		Prompt: "upbeat lofi piano", Title: "Chill Piano Night",
+		Lyrics: "la la la", Model: "suno-v5.0",
 	})
 	if err != nil {
 		t.Fatalf("callGommoMusic: %v", err)
@@ -1040,22 +1041,62 @@ func TestCallGommoMusicPollsUntilDownloadURL(t *testing.T) {
 	if polls < 2 {
 		t.Errorf("polls = %d, want at least 2", polls)
 	}
-	if createdForm.Get("model") != "suno-v4" || createdForm.Get("duration") != "30" || createdForm.Get("privacy") != "PUBLIC" {
-		t.Errorf("create form = %v", createdForm)
+	// Upstream validates "name" and "styles", not "prompt": a create that sent
+	// the prompt under its own key is rejected with error 133/1522.
+	if createdForm.Get("name") != "Chill Piano Night" || createdForm.Get("styles") != "upbeat lofi piano" {
+		t.Errorf("create form = %v, want the name/styles pair the API validates", createdForm)
+	}
+	if createdForm.Get("lyrics") != "la la la" || createdForm.Get("model") != "suno-v5.0" {
+		t.Errorf("create form dropped optional controls: %v", createdForm)
 	}
 }
 
-func TestCallGommoMusicRequiresPromptAndJobID(t *testing.T) {
-	if _, err := callGommoMusic(nil, gommoTestAccount(""), gommoMusicRequest{Prompt: "  "}); err == nil {
+// The length floors are enforced locally so a caller gets a clear error instead
+// of upstream code 133 (styles) or 1522 (name).
+func TestCallGommoMusicRejectsShortNameAndStyles(t *testing.T) {
+	account := gommoTestAccount("")
+	if _, err := callGommoMusic(nil, account, gommoMusicRequest{Prompt: "  "}); err == nil {
 		t.Fatal("empty prompt must be rejected")
 	}
+	if _, err := callGommoMusic(nil, account, gommoMusicRequest{Prompt: "pop"}); err == nil {
+		t.Fatal("a styles string of 3 characters must be rejected")
+	}
+	// With no title the styles text is reused, so it must also clear the longer
+	// name floor.
+	if _, err := callGommoMusic(nil, account, gommoMusicRequest{Prompt: "piano"}); err == nil {
+		t.Fatal("a derived name of 5 characters must be rejected")
+	}
+	if _, err := callGommoMusic(nil, account, gommoMusicRequest{Prompt: "lofi piano", Title: "short"}); err == nil {
+		t.Fatal("an explicit name of 5 characters must be rejected")
+	}
+}
+
+func TestCallGommoMusicFailsWhenCreateReturnsNoJobID(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Write([]byte(`{"musicInfo":{"status":"PENDING"}}`))
 	}))
 	defer server.Close()
-	if _, err := callGommoMusic(nil, gommoTestAccount(server.URL), gommoMusicRequest{Prompt: "piano"}); err == nil {
+	if _, err := callGommoMusic(nil, gommoTestAccount(server.URL), gommoMusicRequest{Prompt: "upbeat lofi piano"}); err == nil {
 		t.Fatal("create response without id_base must fail")
+	}
+}
+
+// getInfo answers a missing job with {"musicInfo":null}, which must not be read
+// as a finished render with an empty URL.
+func TestGommoMusicStatusHandlesNullEnvelope(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"musicInfo":null,"runtime":0.07}`))
+	}))
+	defer server.Close()
+
+	job, err := gommoMusicStatus(nil, gommoTestAccount(server.URL), "music-404")
+	if err != nil {
+		t.Fatalf("gommoMusicStatus: %v", err)
+	}
+	if job.ID != "music-404" || job.Status != "" || job.URL != "" {
+		t.Errorf("job = %+v, want the requested id with no status or URL", job)
 	}
 }
 

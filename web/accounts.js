@@ -1837,6 +1837,14 @@ let collapsedGroups = loadCollapsedGroups();
               '<div class="form-group"><label>' + escapeHtml(t('gommo.imagesLabel') || 'First frame URL') + '</label>' +
               '<input type="text" id="gommoImages" class="font-mono" placeholder="' + escapeAttr(t('gommo.imagesPlaceholder') || '') + '" /></div>'
             : '') +
+          // Music validates a song name over 5 characters upstream; lyrics are
+          // optional and left blank the model writes its own.
+          (kind === 'music'
+            ? '<div class="form-group"><label>' + escapeHtml(t('gommo.titleLabel') || 'Song name') + '</label>' +
+              '<input type="text" id="gommoTitle" value="' + escapeAttr(t('gommo.sampleTitleMusic') || 'Midnight Drive') + '" /></div>' +
+              '<div class="form-group"><label>' + escapeHtml(t('gommo.lyricsLabel') || 'Lyrics') + '</label>' +
+              '<textarea id="gommoLyrics" rows="3" placeholder="' + escapeAttr(t('gommo.lyricsPlaceholder') || '') + '"></textarea></div>'
+            : '') +
           // Speech needs a voice id: the upstream rejects a synthesis request
           // without one, so it is asked for here rather than failing later.
           (kind === 'tts'
