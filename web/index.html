@@ -18,6 +18,9 @@
       if (css) css.href = '/admin/styles.css?v=' + v;
       var tcss = document.getElementById('__toastCss');
       if (tcss) tcss.href = '/admin/toast.css?v=' + v;
+      // Blocking, parser-inserted so it always runs before the body script
+      // loader below (whose dynamic scripts are async/unordered).
+      document.write('<script src="/admin/escape.js?v=' + v + '"><\/script>');
     })();
   </script>
 </head>

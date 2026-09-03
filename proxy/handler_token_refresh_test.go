@@ -18,6 +18,7 @@ import (
 
 func TestEnsureValidTokenRefreshesExpiredCodexJWTWithStalePersistedExpiry(t *testing.T) {
 	initConfigForTests(t)
+	auth.ResetRotationMapForTest()
 
 	const accountID = "codex-expired-jwt"
 	const oldRefreshToken = "refresh-old"

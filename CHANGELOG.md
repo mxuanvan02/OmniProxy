@@ -4,6 +4,43 @@ All notable changes to OmniProxy are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Security
+- **Admin auth is now a session token.** `POST /admin/api/login` exchanges the password for a 12-hour token compared with `crypto/subtle.ConstantTimeCompare`; every other admin route requires it in `X-Admin-Token`. The `?pwd=` query parameter and the `admin_password` cookie are gone — a password could previously leak through referrers, proxy access logs and browser history. The two SSE routes (`/admin/api/logs/stream`, `/admin/api/usage/stream`) accept `?token=` because `EventSource` cannot set headers. The dashboard no longer stores the password anywhere; legacy `admin_password` / `kiro_remembered_pwd` storage keys are purged on load.
+- **CORS no longer wildcards the admin API.** `/admin/api/*` echoes `Access-Control-Allow-Origin` only for same-origin or loopback requests; `/v1/*` keeps `*` for API clients. The admin API returns every stored upstream OAuth token, so any page the operator visited could previously read them cross-origin.
+- **Default bind is `127.0.0.1`.** A fresh install is no longer reachable from the LAN. Existing configs keep their stored `host`; containers opt back in via `docker-compose.yml`.
+- **`changeme` and blank admin passwords are refused.** A 24-byte random password is generated on first run and printed once to stderr (never through `logger`, whose ring buffer is replayed by `/admin/api/logs`). `ADMIN_PASSWORD` is held to the same floor, and the check trims first, so `" "` is rejected as blank rather than stored as a one-space secret.
+- **Changing the admin password revokes every existing session.** An operator rotating a password they believe compromised previously left the attacker's token valid for its full 12-hour life; only the browser that made the change re-authenticated.
+- Client API keys and the legacy key are compared with `crypto/subtle` over SHA-256 digests, so neither the value nor its length leaks through timing.
+- Credential files written by the CLI-tool integrations (VS Code secrets, `~/.codex/auth.json`, Kilo, DeepSeek/JCode, 9router, Hermes, Droid, OpenClaw) and config backups are `0600`, their directories `0700` — previously `0644`/`0755`.
+- SSRF guard on the one client-supplied URL (`jina-reader`): scheme must be http/https, and loopback / RFC1918 / CGNAT / link-local targets are rejected after DNS resolution, so cloud metadata endpoints are unreachable.
+- `Content-Security-Policy`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer` and `X-Frame-Options: DENY` on the admin pages; static assets are served by `http.FileServer`, which cannot be walked out of its root.
+- Request bodies on the inference paths are capped at 64 MiB and answered with 413 instead of being buffered unbounded.
+
+### Fixed
+- **Concurrent map read/write crash.** `SetBoolSetting` / `SetStringSetting` released `cfgLock` before calling `Save()`, so a concurrent setting write could race the marshal and kill the process with an unrecoverable runtime throw.
+- **Account pool handed out pointers into its own slice.** Every selector now returns a copy; callers writing `AccessToken` / `ExpiresAt` through the returned account could previously corrupt a token mid-refresh or lose the update entirely when `Reload()` replaced the slice.
+- **A panic in any spawned goroutine took down the whole proxy**, dropping every in-flight stream. `net/http` only recovers its own handler goroutines; all 14 self-spawned goroutines now run under a `safeGo` recover guard that logs the panic and its stack.
+- Compression settings are read through an immutable snapshot taken under the lock, so a live settings change can no longer tear a string field mid-request; `InitCompressionConfig` and the admin read path hold the right mutex.
+- Capability routing no longer holds the pool write lock across a config read — it took `Lock` for a read-only selection and then acquired `cfgLock`, serialising all capability routing against chat routing.
+- The bulk account refresh patches only token and ban fields, instead of replacing the whole record and clobbering usage counters a live request had just bumped.
+- Usage flush no longer discards write errors or clears its dirty flag on failure (a full disk silently dropped records permanently), and writes temp+rename so a crash mid-write cannot truncate `usage_daily.json`.
+- **Client disconnects now cancel the upstream request.** Every chat path derives from `r.Context()`, so an abandoned stream releases its account immediately instead of holding it — and billing tokens — until the 15-minute idle timeout. The failover loop recognises a cancellation as the client leaving rather than an account fault, so one disconnect no longer walks the pool recording a failure against every account.
+- Changing the admin password revokes every outstanding session token; previously a rotation left existing tokens valid for their full 12 hours.
+- The usage flush writes to a uniquely-named temp file, so a shutdown flush racing the 30-second ticker can no longer splice two writes into one corrupt file that is then silently discarded on load.
+- A compression settings change persists after releasing the settings lock, instead of holding it across six fsynced config writes while every in-flight request waits to read those settings.
+- The Codex branch of the bulk refresh patches only the ban fields, matching the Kiro branch; it previously rewrote the whole record and reset usage counters that live requests had bumped during the pass.
+- **Usage charts read UTC**, matching the UTC storage keys. In a non-UTC zone the chart's "today" column and `?period=today` disagreed nightly. Separately, the hourly "today" window was filled from *yesterday*: it snapped to midnight and then subtracted 24 hours.
+- Clean shutdown stops the background loops and flushes usage, stats and any coalesced config save; the final 30-second window was previously lost.
+- sqlite auto-import applies `busy_timeout` via `_pragma` (the `_busy_timeout` DSN form is silently ignored by `modernc.org/sqlite`), limits itself to one connection, and reports a partial table listing as an error instead of "key absent".
+
+### Added
+- GitHub Actions CI runs `go build`, `go vet` and `go test -race` on every push to `main` and every PR — previously nothing verified Go code.
+- Tests: `auth` 15.0% → 50.2%, `pool` 59.9% → 88.2% coverage, covering OAuth refresh/exchange/decode for every provider, the model-aware pool selector, error recording and cooldowns, and the CLI-config writers.
+
+### Changed
+- Docker: pinned `alpine:3.21` runtime, non-root `65532`, healthcheck via the bundled busybox `wget`; `docker-compose.yml` drops the obsolete `version:` key.
+- `web/escape.js` holds the single `escapeHtml` / `escapeAttr` implementation, replacing two divergent copies; the unreferenced 2 MB `web/icon.svg` is deleted.
+
 ## [0.4.0] — 2026-09-02
 
 ### Added

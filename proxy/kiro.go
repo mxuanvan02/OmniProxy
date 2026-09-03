@@ -4,6 +4,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -423,7 +424,9 @@ func sortEndpointsForAuth(endpoints []kiroEndpoint, authMethod string, accessTok
 }
 
 // CallKiroAPI calls the Kiro streaming API, trying each configured endpoint with automatic fallback.
-func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+// ctx carries the client request's lifetime: when the client disconnects the
+// upstream request is cancelled so the account is released immediately.
+func CallKiroAPI(ctx context.Context, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
 	originalProfileArn := ""
 	if payload != nil {
 		originalProfileArn = payload.ProfileArn
@@ -498,7 +501,7 @@ func CallKiroAPI(account *config.Account, payload *KiroPayload, callback *KiroSt
 		}
 
 		reqBody, _ := json.Marshal(payload)
-		req, err := http.NewRequest("POST", ep.URL, bytes.NewReader(reqBody))
+		req, err := http.NewRequestWithContext(ctx, "POST", ep.URL, bytes.NewReader(reqBody))
 		if err != nil {
 			lastErr = err
 			continue
@@ -821,9 +824,11 @@ func getContextWindowSize(model string) int {
 	return 200_000
 }
 
-// largeContextMinor matches "claude-<family>-<major>.<minor>" (dot or dash form)
-// and is used to classify 1M-window models by version.
-var claudeVersionExtractor = regexp.MustCompile(`claude-(?:opus|sonnet|haiku|fable)-(\d+)[.-](\d+)`)
+// claudeVersionExtractor matches "claude-<family>-<major>[.<minor>]" (dot or
+// dash form) and is used to classify 1M-window models by version. The minor
+// component is optional because the Claude 5 identifiers are major-only
+// (claude-opus-5, claude-fable-5).
+var claudeVersionExtractor = regexp.MustCompile(`claude-(?:opus|sonnet|haiku|fable|mythos)-(\d+)(?:[.-](\d+))?`)
 
 func isLargeContextModel(model string) bool {
 	m := strings.ToLower(strings.TrimSpace(model))
@@ -833,21 +838,15 @@ func isLargeContextModel(model string) bool {
 	// [1m] is a Claude Code capability suffix, not part of the model ID.
 	m = stripClaudeContextSuffix(m)
 
-	// Claude 5 model IDs may be major-only (for example claude-opus-5), so
-	// they do not match claudeVersionExtractor, which requires a minor number.
-	// Keep the family boundary explicit so a malformed ID such as opus-50 is
-	// not accidentally treated as a known Claude 5 model.
-	if strings.HasPrefix(m, "claude-opus-5") ||
-		strings.HasPrefix(m, "claude-sonnet-5") ||
-		strings.HasPrefix(m, "claude-haiku-5") {
-		return true
-	}
-	// Claude Code's Fable 5 identifier has no minor component, so it cannot
-	// be classified by claudeVersionExtractor below.
 	if match := claudeVersionExtractor.FindStringSubmatch(m); match != nil {
 		major, errMaj := strconv.Atoi(match[1])
-		minor, errMin := strconv.Atoi(match[2])
-		if errMaj == nil && errMin == nil {
+		// A major-only identifier (claude-opus-5, claude-fable-5) has no minor
+		// component; treat it as .0, which is above the 4.6 boundary anyway.
+		minor := 0
+		if match[2] != "" {
+			minor, _ = strconv.Atoi(match[2])
+		}
+		if errMaj == nil {
 			// 1M window for Claude >= 4.6 (4.6, 4.7, 4.8, ...) and any major >= 5.
 			if major > 4 {
 				return true

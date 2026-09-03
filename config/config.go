@@ -12,6 +12,7 @@ package config
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -107,11 +108,11 @@ type Account struct {
 	// path may not be implemented at all. Discovery alone therefore cannot tell
 	// "advertised" from "works", so probe results are stored separately.
 	CapabilityProbes map[string]CapabilityProbeResult `json:"capabilityProbes,omitempty"`
-	Region       string   `json:"region"`                 // AWS region for OIDC endpoints
-	StartUrl     string   `json:"startUrl,omitempty"`     // AWS SSO start URL
-	ExpiresAt    int64    `json:"expiresAt,omitempty"`    // Token expiration timestamp (Unix seconds)
-	MachineId    string   `json:"machineId,omitempty"`    // UUID machine identifier for request tracking
-	ProfileArn   string   `json:"profileArn,omitempty"`   // CodeWhisperer/Kiro profile ARN for generation requests
+	Region           string                           `json:"region"`               // AWS region for OIDC endpoints
+	StartUrl         string                           `json:"startUrl,omitempty"`   // AWS SSO start URL
+	ExpiresAt        int64                            `json:"expiresAt,omitempty"`  // Token expiration timestamp (Unix seconds)
+	MachineId        string                           `json:"machineId,omitempty"`  // UUID machine identifier for request tracking
+	ProfileArn       string                           `json:"profileArn,omitempty"` // CodeWhisperer/Kiro profile ARN for generation requests
 
 	// TokenRefreshedAt records the last time the access token was refreshed
 	// (via OAuth refresh-token flow). Used by the admin UI to show "last
@@ -282,10 +283,11 @@ type Account struct {
 	ServiceRetryAfter         string `json:"serviceRetryAfter,omitempty"`
 	ServiceUsageCheckedAt     int64  `json:"serviceUsageCheckedAt,omitempty"`
 
-	// External provider credit balance (AuthMethod == "external_openai").
-	// Populated by fetching {BaseURL}/api/me with the account's AccessToken.
-	// Mirrors the upstream /api/me response so the admin UI can show remaining
-	// credits, usage, and request count alongside native Kiro usage bars.
+	// External provider credit balance (external_openai / agentrouter).
+	// Populated by probing the provider's billing API with the account's
+	// AccessToken (/api/me, /v1/me, or /v1/dashboard/billing/*), normalised to
+	// USD so the admin UI can show remaining credits, usage, and request count
+	// alongside native Kiro usage bars.
 	ExtCreditLimit      float64 `json:"extCreditLimit,omitempty"`
 	ExtCreditsRemaining float64 `json:"extCreditsRemaining,omitempty"`
 	ExtCreditsUsed      float64 `json:"extCreditsUsed,omitempty"`
@@ -309,21 +311,21 @@ type Account struct {
 	CodexPrimaryResetAt       int64  `json:"codexPrimaryResetAt,omitempty"`       // Unix seconds
 	// CodexPrimaryWindowTokensInitialized prevents a migration backfill from
 	// treating a later primary reset as if all historical tokens were current.
-	CodexPrimaryWindowTokensInitialized bool   `json:"codexPrimaryWindowTokensInitialized,omitempty"`
-	CodexSecondaryResetAt               int64  `json:"codexSecondaryResetAt,omitempty"`      // Unix seconds
-	CodexCreditsBalance                 int    `json:"codexCreditsBalance,omitempty"`        // purchased credits remaining
-	CodexCreditsUnlimited               bool   `json:"codexCreditsUnlimited,omitempty"`      // unlimited credits flag
-	CodexCreditsKnown                   bool   `json:"codexCreditsKnown,omitempty"`          // true when upstream sent x-codex-credits-* headers (pay-as-you-go); false for ChatGPT Plus subscription (no credit balance)
-	CodexResetCreditsAvailable          int    `json:"codexResetCreditsAvailable,omitempty"` // bank-reset credits available (from wham/usage rate_limit_reset_credits.available_count)
+	CodexPrimaryWindowTokensInitialized bool  `json:"codexPrimaryWindowTokensInitialized,omitempty"`
+	CodexSecondaryResetAt               int64 `json:"codexSecondaryResetAt,omitempty"`      // Unix seconds
+	CodexCreditsBalance                 int   `json:"codexCreditsBalance,omitempty"`        // purchased credits remaining
+	CodexCreditsUnlimited               bool  `json:"codexCreditsUnlimited,omitempty"`      // unlimited credits flag
+	CodexCreditsKnown                   bool  `json:"codexCreditsKnown,omitempty"`          // true when upstream sent x-codex-credits-* headers (pay-as-you-go); false for ChatGPT Plus subscription (no credit balance)
+	CodexResetCreditsAvailable          int   `json:"codexResetCreditsAvailable,omitempty"` // bank-reset credits available (from wham/usage rate_limit_reset_credits.available_count)
 	// CodexResetRedeemID holds the redeem_request_id of a bank-reset consume
 	// attempt that did not return a conclusive answer (network error, timeout,
 	// non-200). The upstream dedupes on this id, so reusing it on retry makes
 	// the operation idempotent instead of burning a second credit. Cleared on
 	// any conclusive outcome (reset / no_credit / explicit upstream failure).
-	CodexResetRedeemID                  string `json:"codexResetRedeemId,omitempty"`
-	CodexUsageCheckedAt                 int64  `json:"codexUsageCheckedAt,omitempty"`        // last header capture timestamp
-	ImageModel                          string `json:"imageModel,omitempty"`                 // model used by image-generation tests/requests
-	CodexImageModel                     string `json:"codexImageModel,omitempty"`            // model used with the Codex image_generation tool
+	CodexResetRedeemID  string `json:"codexResetRedeemId,omitempty"`
+	CodexUsageCheckedAt int64  `json:"codexUsageCheckedAt,omitempty"` // last header capture timestamp
+	ImageModel          string `json:"imageModel,omitempty"`          // model used by image-generation tests/requests
+	CodexImageModel     string `json:"codexImageModel,omitempty"`     // model used with the Codex image_generation tool
 }
 
 const codexPrimaryWindowTolerance = 5 * time.Minute
@@ -589,17 +591,67 @@ func Load() error {
 	return loadLocked()
 }
 
+// generatedPassword holds a first-run/replacement admin password so the caller
+// can print it exactly once. Read it with TakeGeneratedPassword.
+var generatedPassword string
+
+// randomPassword returns 24 bytes of crypto/rand as URL-safe base64.
+func randomPassword() string {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand failing is fatal for an auth secret; refuse to fall back
+		// to anything guessable.
+		panic("config: crypto/rand unavailable: " + err.Error())
+	}
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// isWeakPassword reports whether p may not be used as an admin password. A
+// blank password authorises every admin request (the comparison is against ""),
+// and "changeme" is the published default. Trimmed first, so " " is blank and
+// not a one-space secret that ensurePasswordLocked would then refuse to repair.
+func isWeakPassword(p string) bool {
+	p = strings.TrimSpace(p)
+	return p == "" || strings.EqualFold(p, "changeme")
+}
+
+// TakeGeneratedPassword returns a freshly generated admin password once and
+// clears it, so it is printed to the operator exactly one time and never
+// logged again.
+func TakeGeneratedPassword() string {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	p := generatedPassword
+	generatedPassword = ""
+	return p
+}
+
+// ensurePasswordLocked replaces an absent or well-known default admin password
+// with a random one. An empty password authorises every admin request (the
+// comparison is against ""), and "changeme" is published in the README, so
+// neither may survive a load. Caller must hold cfgLock.
+func ensurePasswordLocked() bool {
+	if !isWeakPassword(cfg.Password) {
+		return false
+	}
+	cfg.Password = randomPassword()
+	generatedPassword = cfg.Password
+	return true
+}
+
 // loadLocked loads cfg from cfgPath. Caller must hold cfgLock.
 func loadLocked() error {
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// Create default configuration.
-			// Binds to 0.0.0.0 by default for Docker/container compatibility.
+			// Create default configuration. Binds to loopback: the admin API
+			// exposes every stored upstream OAuth token, so a fresh install must
+			// not be reachable from the LAN. Containers opt back in by setting
+			// host to 0.0.0.0 (docker-compose ships that).
 			cfg = &Config{
-				Password:                 "changeme",
+				Password:                 "",
 				Port:                     8080,
-				Host:                     "0.0.0.0",
+				Host:                     "127.0.0.1",
 				RequireApiKey:            false,
 				Accounts:                 []Account{},
 				KiroApiTimeoutMs:         defaultKiroApiTimeoutMs,
@@ -613,6 +665,7 @@ func loadLocked() error {
 				initialized:              true,
 			}
 			extraModelsExplicit = false
+			ensurePasswordLocked()
 			return saveLocked()
 		}
 		return err
@@ -691,6 +744,9 @@ func loadLocked() error {
 		}
 	}
 	if overageMigrated || addedAtMigrated {
+		configMigrated = true
+	}
+	if ensurePasswordLocked() {
 		configMigrated = true
 	}
 	if configMigrated {
@@ -927,10 +983,16 @@ func stringSlicesEqual(left, right []string) bool {
 
 // SetPassword updates the admin password.
 // Primarily used for environment variable override in containerized deployments.
-func SetPassword(password string) {
+// A blank or published-default value is refused: it would re-open the
+// authorise-everything hole that ensurePasswordLocked closes at load.
+func SetPassword(password string) error {
+	if isWeakPassword(password) {
+		return ErrWeakPassword
+	}
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.Password = password
+	return nil
 }
 
 // GetConfigDir returns the directory containing the config JSON file.
@@ -1001,32 +1063,30 @@ func GetStringSetting(key, fallback string) string {
 // No-op when config is not initialised (e.g. unit tests that bypass Init).
 func SetBoolSetting(key string, val bool) {
 	cfgLock.Lock()
+	defer cfgLock.Unlock()
 	if cfg == nil {
-		cfgLock.Unlock()
 		return
 	}
 	if cfg.KVSettings == nil {
 		cfg.KVSettings = make(map[string]interface{})
 	}
 	cfg.KVSettings[key] = val
-	cfgLock.Unlock()
-	_ = Save()
+	_ = saveLocked()
 }
 
 // SetStringSetting stores a string in KVSettings and persists.
 // No-op when config is not initialised (e.g. unit tests that bypass Init).
 func SetStringSetting(key, val string) {
 	cfgLock.Lock()
+	defer cfgLock.Unlock()
 	if cfg == nil {
-		cfgLock.Unlock()
 		return
 	}
 	if cfg.KVSettings == nil {
 		cfg.KVSettings = make(map[string]interface{})
 	}
 	cfg.KVSettings[key] = val
-	cfgLock.Unlock()
-	_ = Save()
+	_ = saveLocked()
 }
 
 func GetPassword() string {
@@ -1504,6 +1564,25 @@ func UpdateAccountToken(id, accessToken, refreshToken string, expiresAt int64) e
 	return nil
 }
 
+// UpdateAccountBanStatus persists only the ban/enable fields. Bulk refresh runs
+// one goroutine per account over a snapshot taken before the pass started, so
+// writing the whole record back would reset any counter a live request bumped
+// through UpdateAccountStats in the meantime.
+func UpdateAccountBanStatus(id, banStatus, banReason string, banTime int64, enabled bool) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			cfg.Accounts[i].BanStatus = banStatus
+			cfg.Accounts[i].BanReason = banReason
+			cfg.Accounts[i].BanTime = banTime
+			cfg.Accounts[i].Enabled = enabled
+			return saveLocked()
+		}
+	}
+	return nil
+}
+
 func GetApiKey() string {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
@@ -1516,7 +1595,30 @@ func IsApiKeyRequired() bool {
 	return cfg.RequireApiKey
 }
 
+// ErrWeakPassword is returned when a caller tries to set a published default or
+// blank admin password. Blank authorises every admin request; "changeme" ships
+// in the README.
+var ErrWeakPassword = errors.New("admin password must not be blank or \"changeme\"")
+
+// validatePassword rejects the known-bad admin passwords, deferring the rule
+// itself to isWeakPassword so there is one definition. An empty string means
+// "leave unchanged" at the UpdateSettings* call sites, so it is not an error
+// there — but " " is, because it would otherwise be stored as a secret that
+// isWeakPassword later reads as blank and ensurePasswordLocked cannot repair.
+func validatePassword(password string) error {
+	if password == "" {
+		return nil
+	}
+	if isWeakPassword(password) {
+		return ErrWeakPassword
+	}
+	return nil
+}
+
 func UpdateSettings(apiKey string, requireApiKey bool, password string) error {
+	if err := validatePassword(password); err != nil {
+		return err
+	}
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	cfg.ApiKey = apiKey
@@ -1528,6 +1630,9 @@ func UpdateSettings(apiKey string, requireApiKey bool, password string) error {
 }
 
 func UpdateSettingsPatch(apiKey *string, requireApiKey *bool, password string) error {
+	if err := validatePassword(password); err != nil {
+		return err
+	}
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	if apiKey != nil {

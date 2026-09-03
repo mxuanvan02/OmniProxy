@@ -2,11 +2,19 @@
 
 // State
 const baseUrl = location.origin;
-if (localStorage.getItem('kiro_remember') !== '1') {
-  localStorage.removeItem('admin_password');
+// Legacy storage kept the admin password in cleartext. Purge those keys on
+// every load; auth is a session token now.
+['admin_password', 'kiro_remembered_pwd'].forEach(function (k) {
+  sessionStorage.removeItem(k);
+  localStorage.removeItem(k);
+});
+const localAdminHost = /^(localhost|127\.0\.0\.1|\[::1\])$/i.test(location.hostname);
+if (!localAdminHost && localStorage.getItem('kiro_remember') !== '1') {
+  localStorage.removeItem('admin_token');
   localStorage.removeItem('admin_login_time');
+  localStorage.removeItem('admin_expires_at');
 }
-let password = sessionStorage.getItem('admin_password') || localStorage.getItem('admin_password') || '';
+let adminToken = sessionStorage.getItem('admin_token') || localStorage.getItem('admin_token') || '';
 let currentLang = localStorage.getItem('kiro_lang') || 'en';
 const dict = { en: null, zh: null };
 let privacyModeEnabled = true;
@@ -19,14 +27,7 @@ let customSelectRefreshQueued = false;
   // DOM helpers
   const $ = (id) => document.getElementById(id);
   const qsa = (sel, root) => Array.from((root || document).querySelectorAll(sel));
-  function escapeHtml(s) {
-    const d = document.createElement('div');
-    d.textContent = s == null ? '' : String(s);
-    return d.innerHTML;
-  }
-  function escapeAttr(s) {
-    return escapeHtml(s).replace(/"/g, '&quot;');
-  }
+  // escapeHtml / escapeAttr live in escape.js (loaded first in index.html).
   async function copyText(input) {
     const isPromise = input && typeof input.then === 'function';
     if (isPromise && typeof ClipboardItem !== 'undefined' && navigator.clipboard && navigator.clipboard.write) {
@@ -579,7 +580,7 @@ let customSelectRefreshQueued = false;
   // Fetch wrapper
   function api(path, opts) {
     opts = opts || {};
-    opts.headers = Object.assign({ 'X-Admin-Password': password }, opts.headers || {});
+    opts.headers = Object.assign({ 'X-Admin-Token': adminToken }, opts.headers || {});
     if (opts.body && !opts.headers['Content-Type']) opts.headers['Content-Type'] = 'application/json';
     return fetch('/admin/api' + path, opts).then(function(res) {
       var backupFile = res.headers.get('X-Cli-Backup');
@@ -593,53 +594,78 @@ let customSelectRefreshQueued = false;
   }
 
   // Login
-  function clearActivePassword() {
-    sessionStorage.removeItem('admin_password');
+  function clearActiveToken() {
+    sessionStorage.removeItem('admin_token');
     sessionStorage.removeItem('admin_login_time');
-    localStorage.removeItem('admin_password');
+    sessionStorage.removeItem('admin_expires_at');
+    localStorage.removeItem('admin_token');
     localStorage.removeItem('admin_login_time');
-    password = '';
+    localStorage.removeItem('admin_expires_at');
+    adminToken = '';
   }
   function getActiveLoginTime() {
-    const storage = sessionStorage.getItem('admin_password') ? sessionStorage : localStorage;
+    const storage = sessionStorage.getItem('admin_token') ? sessionStorage : localStorage;
     return parseInt(storage.getItem('admin_login_time') || '0', 10);
   }
-  function setActivePassword(nextPassword, remember) {
-    const now = Date.now().toString();
-    password = nextPassword;
-    sessionStorage.setItem('admin_password', nextPassword);
-    sessionStorage.setItem('admin_login_time', now);
-    if (remember) {
-      localStorage.setItem('admin_password', nextPassword);
-      localStorage.setItem('admin_login_time', now);
-      localStorage.setItem('kiro_remember', '1');
-      localStorage.setItem('kiro_remembered_pwd', nextPassword);
+  function getActiveExpiresAt() {
+    const storage = sessionStorage.getItem('admin_token') ? sessionStorage : localStorage;
+    return parseInt(storage.getItem('admin_expires_at') || '0', 10);
+  }
+  function setActiveToken(token, remember, expiresIn) {
+    const now = Date.now();
+    const ttlMs = (Number(expiresIn) > 0 ? Number(expiresIn) : (localAdminHost ? 30 : 12) * 3600) * 1000;
+    const expiresAt = String(now + ttlMs);
+    adminToken = token;
+    sessionStorage.setItem('admin_token', token);
+    sessionStorage.setItem('admin_login_time', String(now));
+    sessionStorage.setItem('admin_expires_at', expiresAt);
+    if (remember || localAdminHost) {
+      localStorage.setItem('admin_token', token);
+      localStorage.setItem('admin_login_time', String(now));
+      localStorage.setItem('admin_expires_at', expiresAt);
+      if (remember) localStorage.setItem('kiro_remember', '1');
     } else {
-      localStorage.removeItem('admin_password');
+      localStorage.removeItem('admin_token');
       localStorage.removeItem('admin_login_time');
+      localStorage.removeItem('admin_expires_at');
       localStorage.removeItem('kiro_remember');
-      localStorage.removeItem('kiro_remembered_pwd');
     }
   }
+  // Exchanges the password for a session token. The password is sent exactly
+  // once and never stored.
+  async function exchangePassword(pw, remember) {
+    const res = await fetch('/admin/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: pw }),
+    });
+    if (!res.ok) return false;
+    const d = await res.json().catch(() => ({}));
+    if (!d.token) return false;
+    setActiveToken(d.token, remember, d.expiresIn);
+    return true;
+  }
   async function tryAutoLogin() {
-    if (!password) return;
+    if (!adminToken) return;
+    const expiresAt = getActiveExpiresAt();
     const loginTime = getActiveLoginTime();
-    if (loginTime && Date.now() - loginTime > 72 * 3600 * 1000) {
-      clearActivePassword();
+    if ((expiresAt && Date.now() > expiresAt) ||
+        (!expiresAt && loginTime && Date.now() - loginTime > (localAdminHost ? 30 : 3) * 24 * 3600 * 1000)) {
+      clearActiveToken();
       return;
     }
     try {
       const res = await api('/status');
       if (res.ok) { showMain(); loadData(); setTimeout(function() { switchTab(localStorage.getItem('kiro_activeTab') || 'accounts'); }, 100); }
+      else clearActiveToken();
     } catch (e) { }
   }
   async function login() {
-    password = $('pwdField').value;
+    const remember = $('rememberPwd');
     try {
-      const res = await api('/status');
-      if (res.ok) {
-        const remember = $('rememberPwd');
-        setActivePassword(password, !!(remember && remember.checked));
+      const ok = await exchangePassword($('pwdField').value, !!(remember && remember.checked));
+      if (ok) {
+        $('pwdField').value = '';
         showMain(); loadData();
         setTimeout(function() { switchTab(localStorage.getItem('kiro_activeTab') || 'accounts'); }, 100);
       } else {
@@ -651,16 +677,12 @@ let customSelectRefreshQueued = false;
   }
   function initRememberMe() {
     const remember = $('rememberPwd');
-    const field = $('pwdField');
-    if (!remember || !field) return;
-    if (localStorage.getItem('kiro_remember') === '1') {
-      remember.checked = true;
-      const saved = localStorage.getItem('kiro_remembered_pwd');
-      if (saved) field.value = saved;
-    }
+    if (!remember) return;
+    if (localStorage.getItem('kiro_remember') === '1') remember.checked = true;
   }
   function logout() {
-    clearActivePassword();
+    if (adminToken) api('/logout', { method: 'POST' }).catch(function () {});
+    clearActiveToken();
     location.reload();
   }
   function toggleModelsPanel() {
@@ -1153,7 +1175,7 @@ let customSelectRefreshQueued = false;
     const yr = $('footerYear');
     if (yr) yr.textContent = new Date().getFullYear();
     wireEvents();
-    if (password) tryAutoLogin();
+    if (adminToken) tryAutoLogin();
     startStatsPolling();
   }
 

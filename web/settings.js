@@ -124,7 +124,7 @@ let promptRules = [];
       const res = await api('/settings', { method: 'POST', body: JSON.stringify({ password: np }) });
       const d = await res.json().catch(() => ({}));
       if (!res.ok || d.success === false) throw new Error(d.error || t('common.saveFailed'));
-      setActivePassword(np, localStorage.getItem('kiro_remember') === '1');
+      await exchangePassword(np, localStorage.getItem('kiro_remember') === '1');
       toast(t('settings.passwordChanged'), 'success');
       $('newPassword').value = '';
     } catch (e) {

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -65,7 +66,9 @@ func GetUsageLimits(account *config.Account) (*UsageLimitsResponse, error) {
 	url := fmt.Sprintf("%s/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST&isEmailRequired=true", kiroRestBase(account))
 	url = withProfileArnQuery(url, account)
 
-	req, err := http.NewRequest("GET", url, nil)
+	// Background context: this runs from the periodic account-refresh loop, which
+	// has no inbound request to inherit cancellation from.
+	req, err := http.NewRequestWithContext(context.Background(), "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +98,7 @@ func GetUserInfo(account *config.Account) (*UserInfoResponse, error) {
 	url := fmt.Sprintf("%s/GetUserInfo", kiroRestBase(account))
 
 	payload := `{"origin":"KIRO_IDE"}`
-	req, err := http.NewRequest("POST", url, strings.NewReader(payload))
+	req, err := http.NewRequestWithContext(context.Background(), "POST", url, strings.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
@@ -126,9 +129,13 @@ func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 	var req *http.Request
 	var err error
 
+	// Background context: the model catalog is refreshed by the periodic
+	// models-cache loop as well as by admin actions; no request ctx to inherit.
+	ctx := context.Background()
+
 	// ksk_ keys use Smithy protocol: POST / with X-Amz-Target
 	if account != nil && strings.HasPrefix(account.AccessToken, "ksk_") {
-		req, err = http.NewRequest("POST", kiroRestBase(account)+"/?origin=KIRO_CLI",
+		req, err = http.NewRequestWithContext(ctx, "POST", kiroRestBase(account)+"/?origin=KIRO_CLI",
 			strings.NewReader(`{"origin":"KIRO_CLI"}`))
 		if err != nil {
 			return nil, err
@@ -137,7 +144,7 @@ func ListAvailableModels(account *config.Account) ([]ModelInfo, error) {
 	} else {
 		url := fmt.Sprintf("%s/ListAvailableModels?origin=AI_EDITOR&maxResults=50", kiroRestBase(account))
 		url = withProfileArnQuery(url, account)
-		req, err = http.NewRequest("GET", url, nil)
+		req, err = http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
 			return nil, err
 		}

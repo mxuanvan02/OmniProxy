@@ -31,7 +31,9 @@ go build -o omniproxy .
 ./build.sh
 ```
 
-The admin panel is at `http://localhost:8080/admin`. Default password: `changeme`.
+The admin panel is at `http://localhost:8080/admin`. On first run a random admin
+password is generated and printed once to stderr — save it. Set `ADMIN_PASSWORD`
+to override it; blank and `changeme` are refused.
 
 ### Run tests
 

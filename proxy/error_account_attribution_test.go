@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"omniproxy/config"
@@ -77,7 +78,7 @@ func TestRecordedErrorCarriesAccountIdentity(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	h.handleClaudeStream(recorder, payload, "claude-opus-5", false, claudeThinkingResponseOptions{}, 1, nil, "")
+	h.handleClaudeStream(context.Background(), recorder, payload, "claude-opus-5", false, claudeThinkingResponseOptions{}, 1, nil, "")
 
 	stats := tracker.GetStats("all")
 	var errRecords []RequestRecord

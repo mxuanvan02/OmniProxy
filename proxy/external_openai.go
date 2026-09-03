@@ -12,6 +12,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -27,11 +28,10 @@ import (
 const externalAuthMethod = "external_openai"
 
 // ErrExternalCreditsNotSupported is returned by fetchExternalProviderCredits
-// when the upstream provider does not implement /api/me (HTTP 404). Callers
-// treat this as a non-fatal "no credit info available" condition rather than
-// a hard error, so the refresh button stays green even for providers that
-// only expose /v1/* endpoints.
-var ErrExternalCreditsNotSupported = fmt.Errorf("provider does not expose /api/me (credits API not supported)")
+// when none of the known billing dialects answer. Callers treat this as a
+// non-fatal "no credit info available" condition rather than a hard error, so
+// the refresh button stays green even for providers that only expose /v1/chat.
+var ErrExternalCreditsNotSupported = fmt.Errorf("provider exposes no known credits endpoint")
 
 // isExternalAccount reports whether the account routes to an external
 // OpenAI-compatible or AgentRouter provider instead of the native Kiro/AWS backend.
@@ -48,7 +48,7 @@ func isExternalAccount(account *config.Account) bool {
 // contract: it returns nil on a successful (possibly empty) stream, or an error
 // describing the failure. HTTP 401/403/402 are returned directly so the caller's
 // existing auth-failure handling can disable the account.
-func CallExternalOpenAI(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+func CallExternalOpenAI(ctx context.Context, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
 	if account == nil {
 		return fmt.Errorf("external call: account is nil")
 	}
@@ -78,7 +78,7 @@ func CallExternalOpenAI(account *config.Account, payload *KiroPayload, callback 
 	}
 
 	endpoint := openAICompatibleEndpoint(baseURL, "/v1/chat/completions")
-	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(reqBody))
 	if err != nil {
 		return fmt.Errorf("external call new request: %w", err)
 	}
@@ -1322,15 +1322,93 @@ func flattenModelMetadata(value interface{}) []string {
 	return out
 }
 
+// imageCapabilityMetadata reports an image-output marker only when the provider
+// actually claims image generation. Capability objects are keyed by capability
+// name, so a key on its own proves nothing: flattening keys together with
+// values made a provider that spells out {"image": false} look like a generator.
 func imageCapabilityMetadata(value interface{}) []string {
-	values := flattenModelMetadata(value)
-	for _, item := range values {
-		lower := strings.ToLower(item)
-		if strings.Contains(lower, "image") && (strings.Contains(lower, "output") || strings.Contains(lower, "generate") || lower == "image") {
-			return []string{"image output"}
-		}
+	if capabilityClaimsImageOutput(value) {
+		return []string{"image output"}
 	}
 	return nil
+}
+
+// capabilityClaimsImageOutput walks a capability tree. A bare string counts on
+// its own because capabilities also arrive as lists such as
+// ["image_generation"], while a keyed entry counts only when its value is
+// enabled.
+func capabilityClaimsImageOutput(value interface{}) bool {
+	switch item := value.(type) {
+	case string:
+		return isImageOutputCapabilityName(item)
+	case []interface{}:
+		for _, child := range item {
+			if capabilityClaimsImageOutput(child) {
+				return true
+			}
+		}
+	case map[string]interface{}:
+		for key, child := range item {
+			if isImageOutputCapabilityName(key) {
+				if capabilityValueEnabled(child) {
+					return true
+				}
+				continue
+			}
+			if capabilityClaimsImageOutput(child) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isImageOutputCapabilityName is deliberately narrower than "mentions image":
+// image_input and image_vision describe what a model accepts, not what it emits.
+func isImageOutputCapabilityName(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if !strings.Contains(name, "image") {
+		return false
+	}
+	// "generat" covers generate, generation and generative: providers spell the
+	// same capability all three ways.
+	return name == "image" || strings.Contains(name, "output") || strings.Contains(name, "generat")
+}
+
+// capabilityValueEnabled resolves the value under a capability key. An explicit
+// false, zero, empty string or empty container means unsupported; a nested
+// object states its own support, as in {"supported": true}.
+func capabilityValueEnabled(value interface{}) bool {
+	switch item := value.(type) {
+	case bool:
+		return item
+	case float64:
+		return item != 0
+	case string:
+		switch strings.ToLower(strings.TrimSpace(item)) {
+		case "", "false", "0", "no", "none", "off", "unsupported", "disabled":
+			return false
+		}
+		return true
+	case []interface{}:
+		for _, child := range item {
+			if capabilityValueEnabled(child) {
+				return true
+			}
+		}
+		return false
+	case map[string]interface{}:
+		if supported, ok := item["supported"]; ok {
+			return capabilityValueEnabled(supported)
+		}
+		for _, child := range item {
+			if capabilityValueEnabled(child) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // dispatchChat routes a chat request to the appropriate upstream based on the
@@ -1338,21 +1416,24 @@ func imageCapabilityMetadata(value interface{}) []string {
 // OpenAI-compatible providers use CallExternalOpenAI. All response handlers
 // (Claude/OpenAI, stream/non-stream) go through this so external accounts are
 // supported uniformly without per-handler branching.
-func dispatchChat(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+// ctx carries the client's request lifetime: when the caller disconnects the
+// upstream call is cancelled instead of streaming (and billing) into a dead
+// connection until the idle watchdog fires.
+func dispatchChat(ctx context.Context, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
 	callback = restoreCallbackToolNames(payload, callback)
 	if isCodexAccount(account) {
-		return CallExternalCodex(account, payload, callback)
+		return CallExternalCodex(ctx, account, payload, callback)
 	}
 	if isAntigravityAccount(account) {
-		return CallExternalAntigravity(account, payload, callback)
+		return CallExternalAntigravity(ctx, account, payload, callback)
 	}
 	if isAgentRouterAccount(account) {
-		return CallExternalAgentRouter(account, payload, callback)
+		return CallExternalAgentRouter(ctx, account, payload, callback)
 	}
 	if isExternalAccount(account) {
-		return CallExternalOpenAI(account, payload, callback)
+		return CallExternalOpenAI(ctx, account, payload, callback)
 	}
-	return CallKiroAPI(account, payload, callback)
+	return CallKiroAPI(ctx, account, payload, callback)
 }
 
 // resolveExternalTestModel picks a concrete model ID for the provider-validation
@@ -1409,13 +1490,17 @@ func testExternalProvider(account *config.Account) (time.Duration, error) {
 	cb := &KiroStreamCallback{
 		OnError: func(err error) { callErr = err },
 	}
-	go func() {
-		callErr = dispatchChat(account, payload, cb)
-		close(done)
-	}()
+	// The timeout now cancels the upstream call rather than only abandoning the
+	// goroutine waiting on it.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	safeGo("testExternalProvider/dispatch", func() {
+		defer close(done)
+		callErr = dispatchChat(ctx, account, payload, cb)
+	})
 	select {
 	case <-done:
-	case <-time.After(30 * time.Second):
+	case <-ctx.Done():
 		return 0, fmt.Errorf("timeout")
 	}
 	if callErr != nil {
@@ -1424,9 +1509,10 @@ func testExternalProvider(account *config.Account) (time.Duration, error) {
 	return time.Since(start), nil
 }
 
-// ExternalProviderMe is the response shape returned by an external
-// OpenAI-compatible provider's /api/me endpoint. Not all fields are populated
-// by every provider; consumers must treat missing fields as zero/empty.
+// ExternalProviderMe is the normalised credit/usage snapshot for an external
+// OpenAI-compatible provider. Every billing dialect in fetchExternalProviderCredits
+// is mapped onto this shape; not all fields are populated by every dialect, so
+// consumers must treat missing fields as zero/empty. Monetary fields are USD.
 type ExternalProviderMe struct {
 	CreditLimit      float64 `json:"creditLimit"`
 	CreditsRemaining float64 `json:"creditsRemaining"`
@@ -1440,47 +1526,182 @@ type ExternalProviderMe struct {
 	TokensRemaining  int64   `json:"tokensRemaining"`
 }
 
-// fetchExternalProviderCredits queries the external provider's /api/me
-// endpoint and returns the credit/usage snapshot. The endpoint is optional:
-// providers that do not implement /api/me return an error which the caller
-// treats as "no credit info available" (non-fatal).
+// unlimitedCreditSentinel is the threshold above which a reported quota means
+// "unmetered". one-api/new-api forks answer hard_limit_usd = 100000000 for keys
+// with no quota cap; rendering that as a limit would make every usage bar read
+// 0%. Real prepaid keys are orders of magnitude below this.
+const unlimitedCreditSentinel = 1e7
+
+// fetchExternalProviderCredits returns the provider's credit snapshot, trying
+// each known billing dialect in turn. Every dialect is optional: when none
+// answers, the caller gets ErrExternalCreditsNotSupported and treats it as
+// "no credit info available" rather than a failure.
 func fetchExternalProviderCredits(account *config.Account) (*ExternalProviderMe, error) {
 	baseURL := strings.TrimRight(strings.TrimSpace(account.BaseURL), "/")
 	if baseURL == "" {
 		return nil, fmt.Errorf("no baseUrl")
 	}
-	apiKey := strings.TrimSpace(account.AccessToken)
-	if apiKey == "" {
+	if strings.TrimSpace(account.AccessToken) == "" {
 		return nil, fmt.Errorf("no apiKey")
 	}
-
-	req, err := http.NewRequest("GET", baseURL+"/api/me", nil)
-	if err != nil {
-		return nil, err
+	dialects := []func(string, *config.Account) (*ExternalProviderMe, error){
+		fetchCreditsAPIMe,
+		fetchCreditsV1Me,
+		fetchCreditsDashboardBilling,
 	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	// A real error from one dialect must not hide a later dialect that works,
+	// so keep the first one and report it only if every attempt fails.
+	var firstErr error
+	for _, fetch := range dialects {
+		me, err := fetch(baseURL, account)
+		if err == nil {
+			return me, nil
+		}
+		if err != ErrExternalCreditsNotSupported && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if firstErr != nil {
+		return nil, firstErr
+	}
+	return nil, ErrExternalCreditsNotSupported
+}
+
+// normalizeCreditSnapshot fills in whichever of limit/remaining/used the dialect
+// left implicit and collapses an "unmetered" sentinel quota to zero, which the
+// admin UI renders as "no limit" instead of a permanently-0% usage bar.
+func normalizeCreditSnapshot(me *ExternalProviderMe) {
+	// The sentinel can arrive in either field depending on the dialect: as a
+	// ceiling (spendLimit) or as a remaining balance (one-api hard_limit_usd).
+	// Zero both, or the derivation below would turn it into a bogus limit.
+	if me.CreditsRemaining >= unlimitedCreditSentinel {
+		me.CreditsRemaining = 0
+		me.CreditLimit = 0
+	}
+	if me.CreditLimit >= unlimitedCreditSentinel {
+		me.CreditLimit = 0
+	}
+	if me.CreditLimit == 0 && me.CreditsRemaining > 0 {
+		me.CreditLimit = me.CreditsRemaining + me.CreditsUsed
+	}
+	if me.CreditsRemaining == 0 && me.CreditLimit > me.CreditsUsed {
+		me.CreditsRemaining = me.CreditLimit - me.CreditsUsed
+	}
+}
+
+// getProviderJSON performs an authenticated GET and decodes a JSON body. A
+// 404/405/501, or a non-JSON body (providers that serve their SPA for unknown
+// paths), means this dialect is absent rather than broken.
+func getProviderJSON(account *config.Account, url string, out interface{}) error {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(account.AccessToken))
 	req.Header.Set("Accept", "application/json")
 
-	client := GetRestClientForProxy(ResolveAccountProxyURL(account))
-	resp, err := client.Do(req)
+	resp, err := GetRestClientForProxy(ResolveAccountProxyURL(account)).Do(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == 404 {
-		// /api/me is optional — many OpenAI-compatible providers only expose
-		// /v1/* endpoints. Treat 404 as "credits API not supported" so the
-		// refresh button doesn't surface a scary error.
-		return nil, ErrExternalCreditsNotSupported
+	switch resp.StatusCode {
+	case 200:
+	case 404, 405, 501:
+		return ErrExternalCreditsNotSupported
+	default:
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateErrBody(b))
 	}
-	if resp.StatusCode != 200 {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateErrBody(b))
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(strings.ToLower(ct), "json") {
+		return ErrExternalCreditsNotSupported
 	}
+	return json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out)
+}
 
+// providerRootURL strips a trailing "/v1" so root-level endpoints resolve for
+// accounts whose baseUrl already carries the version segment.
+func providerRootURL(baseURL string) string {
+	return strings.TrimSuffix(baseURL, "/v1")
+}
+
+// fetchCreditsAPIMe reads the snapshot some providers expose at /api/me already
+// shaped like ExternalProviderMe.
+func fetchCreditsAPIMe(baseURL string, account *config.Account) (*ExternalProviderMe, error) {
 	var me ExternalProviderMe
-	if err := json.NewDecoder(resp.Body).Decode(&me); err != nil {
+	if err := getProviderJSON(account, providerRootURL(baseURL)+"/api/me", &me); err != nil {
 		return nil, err
 	}
+	// Decoded, but nothing recognisable — some other dialect's payload.
+	if me.CreditLimit == 0 && me.CreditsRemaining == 0 && me.CreditsUsed == 0 && me.RequestsCount == 0 {
+		return nil, ErrExternalCreditsNotSupported
+	}
+	normalizeCreditSnapshot(&me)
 	return &me, nil
+}
+
+// fetchCreditsV1Me reads the /v1/me dialect: a per-key balance plus lifetime
+// spend and per-model token counts.
+func fetchCreditsV1Me(baseURL string, account *config.Account) (*ExternalProviderMe, error) {
+	var raw struct {
+		Name          string   `json:"name"`
+		Balance       *float64 `json:"balance"`
+		SpendLimit    *float64 `json:"spendLimit"`
+		TotalSpent    float64  `json:"totalSpent"`
+		TotalRequests int64    `json:"totalRequests"`
+		ModelUsage    map[string]struct {
+			InputTokens  int64 `json:"inputTokens"`
+			OutputTokens int64 `json:"outputTokens"`
+		} `json:"modelUsage"`
+	}
+	if err := getProviderJSON(account, openAICompatibleEndpoint(baseURL, "/v1/me"), &raw); err != nil {
+		return nil, err
+	}
+	if raw.Balance == nil && raw.TotalSpent == 0 && raw.TotalRequests == 0 {
+		return nil, ErrExternalCreditsNotSupported
+	}
+	me := &ExternalProviderMe{
+		CreditsUsed:   raw.TotalSpent,
+		RequestsCount: raw.TotalRequests,
+		KeyMasked:     raw.Name,
+	}
+	if raw.Balance != nil {
+		me.CreditsRemaining = *raw.Balance
+	}
+	if raw.SpendLimit != nil {
+		me.CreditLimit = *raw.SpendLimit
+	}
+	for _, u := range raw.ModelUsage {
+		me.TokensUsed += u.InputTokens + u.OutputTokens
+	}
+	normalizeCreditSnapshot(me)
+	return me, nil
+}
+
+// fetchCreditsDashboardBilling reads the one-api/new-api dialect. Note that
+// hard_limit_usd there is the key's REMAINING quota (remain_quota/500000), not a
+// ceiling, and /v1/dashboard/billing/usage reports consumed quota as USD×100
+// (cents). The total limit is therefore derived as remaining + used.
+func fetchCreditsDashboardBilling(baseURL string, account *config.Account) (*ExternalProviderMe, error) {
+	var sub struct {
+		HardLimitUSD float64 `json:"hard_limit_usd"`
+		SoftLimitUSD float64 `json:"soft_limit_usd"`
+	}
+	if err := getProviderJSON(account, openAICompatibleEndpoint(baseURL, "/v1/dashboard/billing/subscription"), &sub); err != nil {
+		return nil, err
+	}
+	me := &ExternalProviderMe{CreditsRemaining: sub.HardLimitUSD}
+	if me.CreditsRemaining == 0 {
+		me.CreditsRemaining = sub.SoftLimitUSD
+	}
+	var usage struct {
+		TotalUsage float64 `json:"total_usage"`
+	}
+	if err := getProviderJSON(account, openAICompatibleEndpoint(baseURL, "/v1/dashboard/billing/usage"), &usage); err == nil {
+		me.CreditsUsed = usage.TotalUsage / 100.0
+	} else if err != ErrExternalCreditsNotSupported {
+		return nil, err
+	}
+	normalizeCreditSnapshot(me)
+	return me, nil
 }

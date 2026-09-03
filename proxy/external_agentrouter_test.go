@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -59,7 +60,7 @@ func TestCallExternalAgentRouterHeaders(t *testing.T) {
 		OnText: func(c string, isThinking bool) { chunks = append(chunks, c) },
 	}
 
-	err := CallExternalAgentRouter(account, payload, cb)
+	err := CallExternalAgentRouter(context.Background(), account, payload, cb)
 	if err != nil {
 		t.Fatalf("CallExternalAgentRouter failed: %v", err)
 	}
@@ -106,7 +107,7 @@ func TestCallExternalAgentRouterFallsBackToNonStreamBeforeOutput(t *testing.T) {
 
 	var text, stopReason string
 	var inputTokens, outputTokens, outputSignals int
-	err := CallExternalAgentRouter(account, payload, &KiroStreamCallback{
+	err := CallExternalAgentRouter(context.Background(), account, payload, &KiroStreamCallback{
 		OnOutput:     func() { outputSignals++ },
 		OnText:       func(chunk string, _ bool) { text += chunk },
 		OnStopReason: func(reason string) { stopReason = reason },
@@ -156,7 +157,7 @@ func TestCallExternalAgentRouterFallsBackOnUnterminatedSSEError(t *testing.T) {
 	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "hi"
 
 	var text string
-	err := CallExternalAgentRouter(account, payload, &KiroStreamCallback{
+	err := CallExternalAgentRouter(context.Background(), account, payload, &KiroStreamCallback{
 		OnText: func(chunk string, _ bool) { text += chunk },
 	})
 	if err != nil {
@@ -186,7 +187,7 @@ func TestCallExternalAgentRouterDoesNotFallbackAfterMetadata(t *testing.T) {
 	payload := &KiroPayload{OriginalModel: "claude-opus-4-8"}
 	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "hi"
 
-	err := CallExternalAgentRouter(account, payload, &KiroStreamCallback{
+	err := CallExternalAgentRouter(context.Background(), account, payload, &KiroStreamCallback{
 		OnCacheRead: func(tokens int) { cacheSignals += tokens },
 	})
 	if err == nil {
@@ -216,7 +217,7 @@ func TestCallExternalAgentRouterDoesNotFallbackAfterOutput(t *testing.T) {
 	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "hi"
 
 	var text string
-	err := CallExternalAgentRouter(account, payload, &KiroStreamCallback{
+	err := CallExternalAgentRouter(context.Background(), account, payload, &KiroStreamCallback{
 		OnText: func(chunk string, _ bool) { text += chunk },
 	})
 	if err == nil {
@@ -244,7 +245,7 @@ func TestCallExternalAgentRouterDoesNotFallbackOnEmptyTruncatedSSE(t *testing.T)
 	payload := &KiroPayload{OriginalModel: "claude-opus-4-8"}
 	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "hi"
 
-	if err := CallExternalAgentRouter(account, payload, nil); err == nil {
+	if err := CallExternalAgentRouter(context.Background(), account, payload, nil); err == nil {
 		t.Fatal("expected truncated SSE error")
 	}
 	if requests != 1 {
@@ -267,7 +268,7 @@ func TestCallExternalAgentRouterDoesNotFallbackAfterToolDeltaWithNilCallback(t *
 	payload := &KiroPayload{OriginalModel: "claude-opus-4-8"}
 	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "hi"
 
-	if err := CallExternalAgentRouter(account, payload, nil); err == nil {
+	if err := CallExternalAgentRouter(context.Background(), account, payload, nil); err == nil {
 		t.Fatal("expected stream error after tool delta")
 	}
 	if requests != 1 {
@@ -412,7 +413,7 @@ func TestLiveAgentRouterIntegration(t *testing.T) {
 		},
 	}
 
-	err := CallExternalAgentRouter(account, payload, cb)
+	err := CallExternalAgentRouter(context.Background(), account, payload, cb)
 	if err != nil {
 		t.Fatalf("CallExternalAgentRouter live test failed: %v", err)
 	}

@@ -2,10 +2,21 @@ package proxy
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"net/http"
 	"omniproxy/config"
 	"strings"
 )
+
+// secretsEqual compares two secrets in constant time. Both sides are hashed first
+// because subtle.ConstantTimeCompare returns early on a length mismatch, which
+// would leak the length of the configured secret.
+func secretsEqual(a, b string) bool {
+	ha := sha256.Sum256([]byte(a))
+	hb := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
+}
 
 // apiKeyContextKey is an unexported type used as the context key for the matched ApiKeyEntry
 // so it cannot collide with keys defined in other packages.
@@ -88,7 +99,7 @@ func (h *Handler) authenticate(r *http.Request) (*config.ApiKeyEntry, error) {
 		// Auth required but nothing configured → fail closed.
 		return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "API key authentication is required but no keys are configured")
 	}
-	if provided == "" || provided != expected {
+	if provided == "" || !secretsEqual(provided, expected) {
 		return nil, newAuthError(http.StatusUnauthorized, "authentication_error", "Invalid or missing API key")
 	}
 	return nil, nil

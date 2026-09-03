@@ -165,7 +165,7 @@ function connectLogsSSE() {
     // A freshly constructed EventSource does NOT send the Last-Event-ID header
     // (the browser only does that on its own internal reconnect), so the
     // resume cursor is passed explicitly as a query parameter.
-    let url = '/admin/api/logs/stream?pwd=' + encodeURIComponent(password);
+    let url = '/admin/api/logs/stream?token=' + encodeURIComponent(adminToken);
     if (logsState.lastEventID) {
       url += '&lastEventId=' + encodeURIComponent(logsState.lastEventID);
     } else {

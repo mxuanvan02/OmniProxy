@@ -307,6 +307,10 @@ func (h *Handler) apiAntigravityRefreshProject(w http.ResponseWriter, r *http.Re
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 		return
 	}
+	// GetByID returns a copy, so the project/tier fields resolved above reached
+	// config but not the pool's own slice. Without this the next request
+	// re-runs loadCodeAssist because the pool still sees CheckedAt == 0.
+	h.pool.Reload()
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":   true,
 		"projectId": projectID,

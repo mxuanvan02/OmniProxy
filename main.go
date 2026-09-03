@@ -60,7 +60,16 @@ func main() {
 	logger.Init(config.GetLogLevel())
 
 	if envPassword := os.Getenv("ADMIN_PASSWORD"); envPassword != "" {
-		config.SetPassword(envPassword)
+		if err := config.SetPassword(envPassword); err != nil {
+			fmt.Fprintf(os.Stderr, "ADMIN_PASSWORD rejected: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// Printed to stderr, once, and never logged: the ring buffer behind
+	// /admin/api/logs is readable by any authenticated caller.
+	if generated := config.TakeGeneratedPassword(); generated != "" {
+		fmt.Fprintf(os.Stderr, "\n  Generated admin password: %s\n  Save it now — it is not shown again.\n\n", generated)
 	}
 
 	pool.GetPool()
@@ -84,11 +93,11 @@ func main() {
 
 	if useMenu && cli.IsTerminal() {
 		cli.ShowMenu(addr, pidPath, func() {
-			shutdownServer(srv)
+			shutdownServer(srv, handler)
 		})
 	} else {
 		waitForSignal(func() {
-			shutdownServer(srv)
+			shutdownServer(srv, handler)
 		})
 	}
 }
@@ -112,10 +121,16 @@ func startServer(addr string, handler *proxy.Handler) *http.Server {
 	return srv
 }
 
-func shutdownServer(srv *http.Server) {
+func shutdownServer(srv *http.Server, handler *proxy.Handler) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx)
+	// Drain in-memory state after in-flight requests finish: background loops
+	// only persist on a 30s tick, so the final window would otherwise be lost.
+	handler.Shutdown()
+	if err := config.FlushPendingSave(); err != nil {
+		logger.Errorf("flush config on shutdown: %v", err)
+	}
 }
 
 func waitForSignal(shutdown func()) {

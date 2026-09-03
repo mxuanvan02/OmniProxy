@@ -28,3 +28,13 @@ func SetGlobalAuthClientForTest(c *http.Client) *http.Client {
 	}
 	return old
 }
+
+// ResetRotationMapForTest clears the old→new refresh-token cache. The map is a
+// package global with a 60s TTL, so a second run of the same test within that
+// window finds its own first-run entry and skips the upstream refresh it is
+// asserting on. Tests that exercise a refresh must call this first.
+func ResetRotationMapForTest() {
+	rotationMapMu.Lock()
+	defer rotationMapMu.Unlock()
+	rotationMap = make(map[string]*rotationResult)
+}

@@ -10,6 +10,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -44,7 +45,7 @@ func isAgentRouterAccount(account *config.Account) bool {
 
 // CallExternalAgentRouter forwards a KiroPayload through AgentRouter's verified
 // OpenAI-compatible chat-completions route.
-func CallExternalAgentRouter(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+func CallExternalAgentRouter(ctx context.Context, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
 	if account == nil {
 		return fmt.Errorf("agentrouter call: account is nil")
 	}
@@ -57,10 +58,10 @@ func CallExternalAgentRouter(account *config.Account, payload *KiroPayload, call
 		return fmt.Errorf("agentrouter account %s has no apiKey/accessToken", account.Email)
 	}
 
-	return callAgentRouterOpenAI(account, agentRouterRootURL(baseURL), apiKey, payload, callback)
+	return callAgentRouterOpenAI(ctx, account, agentRouterRootURL(baseURL), apiKey, payload, callback)
 }
 
-func callAgentRouterOpenAI(account *config.Account, baseURL, apiKey string, payload *KiroPayload, callback *KiroStreamCallback) error {
+func callAgentRouterOpenAI(ctx context.Context, account *config.Account, baseURL, apiKey string, payload *KiroPayload, callback *KiroStreamCallback) error {
 	endpoint := openAICompatibleEndpoint(baseURL, "/v1/chat/completions")
 
 	body, err := kiroPayloadToOpenAIRequest(payload, account)
@@ -72,7 +73,7 @@ func callAgentRouterOpenAI(account *config.Account, baseURL, apiKey string, payl
 	// provider error embedded in HTTP-200 SSE before parser-observed output.
 	// Transport, parse, truncation, idle-timeout, HTTP and post-output failures
 	// are never replayed.
-	streamErr, _ := callAgentRouterOpenAIRequest(account, endpoint, apiKey, body, true, callback)
+	streamErr, _ := callAgentRouterOpenAIRequest(ctx, account, endpoint, apiKey, body, true, callback)
 	if streamErr == nil {
 		return nil
 	}
@@ -83,7 +84,7 @@ func callAgentRouterOpenAI(account *config.Account, baseURL, apiKey string, payl
 	if callback != nil && callback.OnReset != nil {
 		callback.OnReset()
 	}
-	fallbackErr, _ := callAgentRouterOpenAIRequest(account, endpoint, apiKey, body, false, callback)
+	fallbackErr, _ := callAgentRouterOpenAIRequest(ctx, account, endpoint, apiKey, body, false, callback)
 	if fallbackErr != nil {
 		return fmt.Errorf("agentrouter stream failed before output (%v); non-stream fallback failed: %w", streamErr, fallbackErr)
 	}
@@ -93,7 +94,7 @@ func callAgentRouterOpenAI(account *config.Account, baseURL, apiKey string, payl
 // callAgentRouterOpenAIRequest executes one wire attempt. wasSSE is true only
 // when an HTTP 200 response entered the SSE parser; HTTP/auth/transport errors
 // therefore never trigger the stream-to-JSON fallback.
-func callAgentRouterOpenAIRequest(account *config.Account, endpoint, apiKey string, baseBody map[string]interface{}, stream bool, callback *KiroStreamCallback) (err error, wasSSE bool) {
+func callAgentRouterOpenAIRequest(ctx context.Context, account *config.Account, endpoint, apiKey string, baseBody map[string]interface{}, stream bool, callback *KiroStreamCallback) (err error, wasSSE bool) {
 	body := make(map[string]interface{}, len(baseBody)+2)
 	for key, value := range baseBody {
 		body[key] = value
@@ -110,7 +111,7 @@ func callAgentRouterOpenAIRequest(account *config.Account, endpoint, apiKey stri
 		return fmt.Errorf("agentrouter marshal: %w", err), false
 	}
 
-	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(reqBody))
 	if err != nil {
 		return fmt.Errorf("agentrouter new request: %w", err), false
 	}

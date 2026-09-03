@@ -250,7 +250,7 @@ type ClaudeUsage struct {
 
 const maxToolDescLen = 10237
 
-const claudeCodeToolExecutionGuidance = `Tool execution constraint: when the current task requires an action and a relevant tool is available, call the tool in this turn. Do not end the turn by merely promising, announcing, or describing an action that has not been performed. Ask the user only when required information or approval is genuinely missing.`
+const toolExecutionGuidance = `Tool execution constraint: when the current task requires an action and a relevant tool is available, call the tool in this turn. Do not end the turn by merely promising, announcing, or describing an action that has not been performed. Ask the user only when required information or approval is genuinely missing.`
 
 func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	// Strip unsupported content types for this model (image/audio for models that don't support them).
@@ -259,16 +259,14 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	modelID := MapModel(req.Model)
 	origin := "AI_EDITOR"
 
-	// Preserve Claude Code's action-oriented tool behavior across compatible
-	// providers. Some gateways otherwise treat its ordinary auto tool choice as
-	// permission to end with narration such as "running now" without a tool call.
-	rawSystemPrompt := extractSystemPrompt(req.System)
-	isClaudeCodeToolSession := len(req.Tools) > 0 && isClaudeCodeSystemPrompt(rawSystemPrompt)
-
-	// extract system prompt
+	// Preserve action-oriented tool behavior across compatible providers. Some
+	// gateways otherwise treat an ordinary auto tool choice as permission to end
+	// the turn with narration such as "running now" without a tool call. This
+	// applies to any tool-enabled client (Claude Code CLI, Claude Desktop, and
+	// third-party agents alike), not just prompts we can fingerprint.
 	systemPrompt := buildClaudeSystemPrompt(req.System, thinking)
-	if isClaudeCodeToolSession {
-		systemPrompt = appendPromptGuidance(systemPrompt, claudeCodeToolExecutionGuidance)
+	if len(req.Tools) > 0 {
+		systemPrompt = appendPromptGuidance(systemPrompt, toolExecutionGuidance)
 	}
 
 	// build history messages

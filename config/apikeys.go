@@ -2,11 +2,22 @@ package config
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"strings"
 	"time"
 )
+
+// secretsEqual compares two secrets in constant time. Both sides are hashed first
+// because subtle.ConstantTimeCompare returns early on a length mismatch, which
+// would leak the length of the stored secret.
+func secretsEqual(a, b string) bool {
+	ha := sha256.Sum256([]byte(a))
+	hb := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
+}
 
 // ListApiKeys returns a snapshot of all configured API key entries.
 func ListApiKeys() []ApiKeyEntry {
@@ -49,7 +60,7 @@ func AddApiKey(entry ApiKeyEntry) (ApiKeyEntry, error) {
 		return ApiKeyEntry{}, errors.New("api key value must not be empty")
 	}
 	for _, existing := range cfg.ApiKeys {
-		if existing.Key == entry.Key {
+		if secretsEqual(existing.Key, entry.Key) {
 			return ApiKeyEntry{}, errors.New("api key already exists")
 		}
 	}
@@ -97,7 +108,7 @@ func UpdateApiKey(id string, patch ApiKeyEntry) error {
 		newKey := strings.TrimSpace(patch.Key)
 		// Reject duplicates against any other entry.
 		for j := range cfg.ApiKeys {
-			if j != idx && cfg.ApiKeys[j].Key == newKey {
+			if j != idx && secretsEqual(cfg.ApiKeys[j].Key, newKey) {
 				return errors.New("api key value collides with existing entry")
 			}
 		}
@@ -138,7 +149,7 @@ func FindApiKeyByValue(key string) *ApiKeyEntry {
 		return nil
 	}
 	for i := range cfg.ApiKeys {
-		if cfg.ApiKeys[i].Key == key {
+		if secretsEqual(cfg.ApiKeys[i].Key, key) {
 			cp := cfg.ApiKeys[i]
 			return &cp
 		}

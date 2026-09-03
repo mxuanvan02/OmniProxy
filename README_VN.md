@@ -89,7 +89,7 @@ Dịch vụ lắng nghe tại `http://127.0.0.1:8080` (hoặc cổng khai báo t
 docker compose up -d
 ```
 
-> Cấu hình mặc định không bắt buộc API key. Hãy đặt `requireApiKey: true` và đổi `password` trước khi mở cổng ra ngoài loopback.
+> Bản cài mới bind `127.0.0.1` và sinh mật khẩu admin ngẫu nhiên, in ra stderr đúng một lần khi khởi động đầu tiên — hãy lưu lại. Request từ client mặc định không bị kiểm tra API key: hãy đặt `requireApiKey: true`, và chỉ đặt `host` thành `0.0.0.0` khi thực sự có ý định (admin API để lộ toàn bộ token upstream đã lưu).
 
 ---
 

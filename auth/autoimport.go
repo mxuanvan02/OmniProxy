@@ -83,15 +83,26 @@ func ParseKiroCliBytes(data []byte, region string) (*KiroCliCredentials, error) 
 	return readSQLite(tmpFile.Name(), region)
 }
 
+// sqliteDSN builds the read-only DSN. busy_timeout bounds the wait on a DB the
+// running kiro-cli holds locked; modernc's driver takes pragmas via _pragma
+// only — the _busy_timeout spelling parses without error and does nothing.
+func sqliteDSN(dbPath string) string {
+	return dbPath + "?mode=ro&_pragma=busy_timeout(5000)"
+}
+
 // readSQLite opens a kiro-cli SQLite database and extracts credentials using real SQL.
 func readSQLite(dbPath, region string) (*KiroCliCredentials, error) {
-	db, err := sql.Open("sqlite", dbPath+"?mode=ro")
+	db, err := sql.Open("sqlite", sqliteDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("open: %w", err)
 	}
 	defer db.Close()
 
-	// Set a timeout so we don't block on locked DBs.
+	// One connection: every read here is sequential, and a single sqlite handle
+	// avoids concurrent readers piling up on a locked file.
+	db.SetMaxOpenConns(1)
+	// Recycles idle connections; this is NOT a query timeout — busy_timeout above
+	// is what bounds a blocked read.
 	db.SetConnMaxLifetime(5 * time.Second)
 
 	creds := &KiroCliCredentials{}
@@ -101,8 +112,12 @@ func readSQLite(dbPath, region string) (*KiroCliCredentials, error) {
 	profileKey := "api.codewhisperer.profile"
 	knownTables := []string{"auth_kv", "ItemTable", "storage", "state"}
 
-	// Step 1: discover which tables actually exist in this DB.
-	available := discoverTables(db)
+	// Step 1: discover which tables actually exist in this DB. A partial list
+	// would silently turn "table not read" into "key not present".
+	available, err := discoverTables(db)
+	if err != nil {
+		return nil, fmt.Errorf("discover tables: %w", err)
+	}
 
 	// Step 2: read tokens (refresh_token + access_token + region).
 	var tokenData map[string]interface{}
@@ -263,20 +278,21 @@ func ImportSSOCache() (*SSOCacheCredentials, error) {
 }
 
 // discoverTables returns the set of table names present in the database.
-func discoverTables(db *sql.DB) map[string]bool {
+func discoverTables(db *sql.DB) (map[string]bool, error) {
 	result := make(map[string]bool)
 	rows, err := db.Query("SELECT name FROM sqlite_master WHERE type='table'")
 	if err != nil {
-		return result
+		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var name string
-		if err := rows.Scan(&name); err == nil {
-			result[name] = true
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
 		}
+		result[name] = true
 	}
-	return result
+	return result, rows.Err()
 }
 
 // readJSONValue reads a JSON value for a given key from the specified table.
