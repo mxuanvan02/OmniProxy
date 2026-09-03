@@ -60,7 +60,7 @@ func newSSEIdleWatchdog(body io.ReadCloser) *sseIdleWatchdog {
 func (w *sseIdleWatchdog) Start() {
 	w.startOnce.Do(func() {
 		w.startedAt = time.Now()
-		go w.run()
+		safeGo("sseIdleWatchdog", w.run)
 	})
 }
 

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -90,7 +91,7 @@ func TestTransientRetryReplaysHTTP2StreamResetThroughExternalOpenAI(t *testing.T
 	}
 	initialErr := errors.New("external SSE read: stream error: stream ID 57; INTERNAL_ERROR; received from peer")
 
-	if ok := (&Handler{}).tryTransientRetry(account, payload, callback, initialErr); !ok {
+	if ok := (&Handler{}).tryTransientRetry(context.Background(), account, payload, callback, initialErr); !ok {
 		t.Fatal("HTTP/2 stream reset was not recovered by the external-provider retry")
 	}
 	if requests != 1 {
@@ -173,7 +174,7 @@ func TestClaudeStreamConvertsLateThinkingToVisibleText(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	h.handleClaudeStream(recorder, payload, "gpt-5.6-sol", true, claudeThinkingResponseOptions{Format: "thinking"}, 1, nil, "")
+	h.handleClaudeStream(context.Background(), recorder, payload, "gpt-5.6-sol", true, claudeThinkingResponseOptions{Format: "thinking"}, 1, nil, "")
 
 	events := parseClaudeSSEEvents(t, recorder.Body.String())
 	blockTypes := make(map[int]string)
@@ -279,7 +280,7 @@ func runClaudeExternalSSE(t *testing.T, accountID, sse string, thinking bool) []
 	}
 
 	recorder := httptest.NewRecorder()
-	h.handleClaudeStream(recorder, payload, "gpt-5.6-sol", thinking, claudeThinkingResponseOptions{Format: "thinking"}, 1, nil, "")
+	h.handleClaudeStream(context.Background(), recorder, payload, "gpt-5.6-sol", thinking, claudeThinkingResponseOptions{Format: "thinking"}, 1, nil, "")
 	return parseClaudeSSEEvents(t, recorder.Body.String())
 }
 
@@ -462,7 +463,7 @@ func TestClaudeStreamFailsOverAfterEmptyExternalSSE(t *testing.T) {
 	}
 
 	recorder := httptest.NewRecorder()
-	h.handleClaudeStream(recorder, payload, "claude-opus-5", false, claudeThinkingResponseOptions{}, 1, nil, "")
+	h.handleClaudeStream(context.Background(), recorder, payload, "claude-opus-5", false, claudeThinkingResponseOptions{}, 1, nil, "")
 
 	if len(chatTokens) != 2 {
 		t.Fatalf("chat attempts = %d (%v), want 2", len(chatTokens), chatTokens)
@@ -581,7 +582,7 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 	}
 
 	rec := httptest.NewRecorder()
-	h.handleClaudeNonStream(rec, payload, "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, "")
+	h.handleClaudeNonStream(context.Background(), rec, payload, "claude-sonnet-4.5", false, claudeThinkingResponseOptions{}, 1, nil, "")
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected retry to succeed, status=%d body=%s", rec.Code, rec.Body.String())

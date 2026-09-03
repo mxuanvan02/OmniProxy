@@ -152,10 +152,37 @@
   // ================================================================
   // CLAUDE CODE — dedicated config
   // ================================================================
+  // Effort levels Claude Code's settings accept. An unrecognized value is
+  // discarded by the client, so this list must not gain entries the server does
+  // not also accept (see normalizeClaudeEffort).
+  var CLAUDE_EFFORTS = [
+    { value: 'low', label: 'Low — fast & cheap' },
+    { value: 'medium', label: 'Medium — balanced' },
+    { value: 'high', label: 'High — deep reasoning' },
+    { value: 'xhigh', label: 'Extra High — deeper reasoning' },
+    { value: 'max', label: 'Max — hardest problems' }
+  ];
+
   function renderClaudeConfig() {
     var prefix = 'claude';
+    var state = window.__claudeState || { model: '', reasoningEffort: 'high' };
     var html = '<div style="padding:1rem;border-top:1px solid var(--border);">';
     html += renderEndpointApiKeyFields(prefix);
+    html += '<div class="form-group"><label data-i18n="cliTools.model"></label>' +
+      '<div style="display:flex;gap:0.5rem;align-items:center;">' +
+      '<div style="flex:1;position:relative;">' +
+      '<input type="text" id="claudeModel" class="form-control" style="width:100%;" data-i18n-placeholder="cliTools.modelPlaceholder" placeholder="model-id" value="' + escapeAttr(state.model) + '" autocomplete="off" />' +
+      (state.model ? '<button onclick="claudeClearModel()" type="button" style="position:absolute;right:4px;top:50%;transform:translateY(-50%);padding:2px 6px;border:none;background:none;cursor:pointer;font-size:0.85rem;color:var(--muted-foreground);">&times;</button>' : '') +
+      '</div>' +
+      '<button class="btn btn-outline btn-sm" onclick="claudePickModel()" type="button" data-i18n="cliTools.selectModel"></button></div></div>';
+    html += '<div class="form-group"><label>Reasoning Effort</label>' +
+      '<select id="claudeEffort" class="form-control" data-native-select="true">' +
+      CLAUDE_EFFORTS.map(function (opt) {
+        return '<option value="' + opt.value + '"' +
+          (state.reasoningEffort === opt.value ? ' selected' : '') + '>' + opt.label + '</option>';
+      }).join('') +
+      '</select>' +
+      '<small style="display:block;margin-top:0.25rem;color:var(--muted-foreground);">Sets <code>effortLevel</code> in ~/.claude/settings.json, for the session and for the selected model.</small></div>';
     html += '<div id="' + prefix + '_status" class="hidden" style="margin-top:0.75rem;padding:0.5rem 0.75rem;border-radius:6px;font-size:0.8125rem;"></div>';
     html += '<div style="margin-top:1rem;display:flex;gap:0.5rem;">' +
       '<button class="btn btn-secondary" onclick="claudeShowManual()" type="button" data-i18n="cliTools.manualConfig"></button>' +
@@ -166,6 +193,21 @@
   }
 
   window.claudeSlotState = {};
+  window.__claudeState = { model: '', reasoningEffort: 'high' };
+  window.claudePickModel = function () {
+    if (typeof openModelPicker === 'function') {
+      window.__cliModelCallback = function (model) {
+        window.__claudeState.model = model;
+        closeDialog('modelPickerModal');
+        reRenderDetailBody();
+      };
+      openModelPicker();
+    }
+  };
+  window.claudeClearModel = function () {
+    window.__claudeState.model = '';
+    reRenderDetailBody();
+  };
   window.claudeApply = async function () {
     var prefix = 'claude';
     populateAkSelect(prefix);
@@ -173,10 +215,14 @@
     if (!endpoint) { showToolStatus(prefix, 'Please select an endpoint', 'error'); return; }
     var apiKey = await getCliApiKey(prefix + '_ak', prefix + '_akCustom');
     var env = { ANTHROPIC_BASE_URL: endpoint, ANTHROPIC_API_KEY: apiKey };
+    var model = window.__claudeState.model || '';
+    var effortEl = $('claudeEffort');
+    var effort = effortEl ? effortEl.value : (window.__claudeState.reasoningEffort || 'high');
+    window.__claudeState.reasoningEffort = effort;
     var applyBtn = document.querySelector('.cli-tool-detail-body .btn-primary');
     if (applyBtn) { applyBtn.disabled = true; applyBtn.textContent = t('cliTools.applying'); }
     try {
-      var res = await api('/cli-tools/claude', { method: 'POST', body: JSON.stringify({ env: env }) });
+      var res = await api('/cli-tools/claude', { method: 'POST', body: JSON.stringify({ env: env, model: model, reasoningEffort: effort }) });
       if (res.ok) {
         showToolStatus(prefix, t('cliTools.configSuccess'), 'success');
         updateCliBadge('claude', true);
@@ -387,6 +433,18 @@
   // ================================================================
   // CODEX — dedicated config
   // ================================================================
+  // Effort levels Codex can render. The catalog OmniProxy writes narrows this
+  // per model family, and the server steps the value down when the configured
+  // model's family offers less, so a deeper choice here is never silently lost.
+  var CODEX_EFFORTS = [
+    { value: 'low', label: 'Low — fast & cheap' },
+    { value: 'medium', label: 'Medium — balanced' },
+    { value: 'high', label: 'High — deep reasoning' },
+    { value: 'xhigh', label: 'Extra High — deeper reasoning' },
+    { value: 'max', label: 'Max — hardest problems' },
+    { value: 'ultra', label: 'Ultra — max reasoning with delegation' }
+  ];
+
   function renderCodexConfig() {
     var prefix = 'codex';
     var state = window.__codexState || { model: '', subagentModel: '', reasoningEffort: 'medium' };
@@ -408,9 +466,10 @@
       '<button class="btn btn-outline btn-sm" onclick="codexPickSubagent()" type="button" data-i18n="cliTools.codexSelect">Select</button></div></div>';
     html += '<div class="form-group"><label>Reasoning Effort</label>' +
       '<select id="codexEffort" class="form-control" data-native-select="true">' +
-      '<option value="low"' + (state.reasoningEffort === 'low' ? ' selected' : '') + '>Low — fast & cheap</option>' +
-      '<option value="medium"' + (state.reasoningEffort === 'medium' ? ' selected' : '') + '>Medium — balanced</option>' +
-      '<option value="high"' + (state.reasoningEffort === 'high' ? ' selected' : '') + '>High — deep reasoning</option>' +
+      CODEX_EFFORTS.map(function (opt) {
+        return '<option value="' + opt.value + '"' +
+          (state.reasoningEffort === opt.value ? ' selected' : '') + '>' + opt.label + '</option>';
+      }).join('') +
       '</select>' +
       '<small style="display:block;margin-top:0.25rem;color:var(--muted-foreground);">Sets <code>model_reasoning_effort</code> in config.toml. Controls how many reasoning tokens the model spends before answering.</small></div>';
     html += '<div id="' + prefix + '_status" class="hidden" style="margin-top:0.75rem;padding:0.5rem 0.75rem;border-radius:6px;font-size:0.8125rem;"></div>';
@@ -1642,9 +1701,14 @@
 
     switch (toolId) {
       case 'claude':
-        if (s.env) {
-          // Model routing is owned by Claude Code settings, not OmniProxy's
-          // endpoint form. Keep this branch for compatibility with old state.
+        // Restore what is already on disk, or Apply would overwrite the
+        // operator's model and effort with this form's defaults.
+        if (s.model || s.reasoningEffort) {
+          var cls = window.__claudeState || { model: '', reasoningEffort: 'high' };
+          if (s.model) cls.model = s.model;
+          if (s.reasoningEffort) cls.reasoningEffort = s.reasoningEffort;
+          window.__claudeState = cls;
+          needsReRender = true;
         }
         break;
       case 'opencode':
@@ -1800,7 +1864,11 @@
     populateAkSelect(cliToolDetailId);
   }
 
-  function bindClaudeEvents() { bindEndpointApiKeyEvents('claude'); }
+  function bindClaudeEvents() {
+    bindEndpointApiKeyEvents('claude');
+    var m = $('claudeModel');
+    if (m) m.addEventListener('input', function () { window.__claudeState.model = this.value; });
+  }
   function bindClineEvents() {
     bindEndpointApiKeyEvents('cline');
     var m = document.getElementById('clineModel');

@@ -114,3 +114,19 @@ func TestCustomPricingOverride(t *testing.T) {
 		t.Fatalf("ComputeCost after clearing override: got $%.4f, want $%.4f", got, want)
 	}
 }
+
+// A flat per-call override has no per-token rates, so the "is this a real
+// price" check must consider PerCallUSD or storing one would delete it and
+// silently fall back to the vendor rate.
+func TestCustomPricingFlatPerCallOverride(t *testing.T) {
+	SetCustomPricing("gpt-5.6-sol", ModelPricing{PerCallUSD: 0.42, Source: "custom"})
+	defer SetCustomPricing("gpt-5.6-sol", ModelPricing{})
+
+	if got := ComputeCost("gpt-5.6-sol", 1_000_000, 0, 100_000); math.Abs(got-0.42) > 1e-9 {
+		t.Fatalf("flat per-call override: got $%.4f, want $0.4200", got)
+	}
+	// Token counts are irrelevant to a per-call charge.
+	if got := ComputeCost("gpt-5.6-sol", 5, 0, 1); math.Abs(got-0.42) > 1e-9 {
+		t.Fatalf("flat per-call override on a tiny request: got $%.4f, want $0.4200", got)
+	}
+}

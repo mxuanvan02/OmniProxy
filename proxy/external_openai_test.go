@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -384,7 +385,7 @@ func TestCallExternalOpenAISSEStream(t *testing.T) {
 		OnToolUse:  func(tu KiroToolUse) { tools = append(tools, tu) },
 		OnComplete: func(i, o int) { inTok, outTok = i, o },
 	}
-	if err := CallExternalOpenAI(account, payload, cb); err != nil {
+	if err := CallExternalOpenAI(context.Background(), account, payload, cb); err != nil {
 		t.Fatalf("CallExternalOpenAI: %v", err)
 	}
 	if text != "Hello" {
@@ -622,7 +623,7 @@ func TestCallExternalOpenAIJSONFallback(t *testing.T) {
 		OnText:     func(s string, _ bool) { text += s },
 		OnComplete: func(i, o int) { inTok, outTok = i, o },
 	}
-	if err := CallExternalOpenAI(account, payload, cb); err != nil {
+	if err := CallExternalOpenAI(context.Background(), account, payload, cb); err != nil {
 		t.Fatalf("CallExternalOpenAI: %v", err)
 	}
 	if text != "hi there" {
@@ -661,7 +662,7 @@ func TestCallExternalOpenAIAuthError(t *testing.T) {
 		Messages: []OpenAIMessage{{Role: "user", Content: "hi"}},
 	}, false)
 
-	err := CallExternalOpenAI(account, payload, &KiroStreamCallback{})
+	err := CallExternalOpenAI(context.Background(), account, payload, &KiroStreamCallback{})
 	if err == nil {
 		t.Fatal("expected error for 401, got nil")
 	}
@@ -744,5 +745,150 @@ func TestKiroPayloadToOpenAIRequestAppliesAccountModelMapping(t *testing.T) {
 	}
 	if payload.OriginalModel != "claude-haiku-5" {
 		t.Fatalf("public payload model changed to %q", payload.OriginalModel)
+	}
+}
+
+// A capability object is keyed by capability name, so the key alone proves
+// nothing. This provider spells out that image support is off, and an earlier
+// version flattened keys together with values and read it as a generator,
+// which removed the model from the Codex picker.
+func TestImageCapabilityMetadataRespectsDisabledFlags(t *testing.T) {
+	disabled := map[string]interface{}{
+		"image":       false,
+		"image_input": map[string]interface{}{"supported": false},
+		"vision":      false,
+		"tool_use":    map[string]interface{}{"supported": true},
+	}
+	if got := imageCapabilityMetadata(disabled); len(got) != 0 {
+		t.Fatalf("disabled image capability = %#v, want none", got)
+	}
+	for name, caps := range map[string]interface{}{
+		"bool flag":   map[string]interface{}{"image": true},
+		"nested":      map[string]interface{}{"image_generation": map[string]interface{}{"supported": true}},
+		"string list": []interface{}{"image_output"},
+	} {
+		if got := imageCapabilityMetadata(caps); len(got) != 1 {
+			t.Errorf("%s: enabled image capability = %#v, want an image marker", name, got)
+		}
+	}
+}
+
+// The one-api/new-api dialect reports the key's REMAINING quota in
+// hard_limit_usd and its consumed quota in cents. A limit must therefore be
+// derived as remaining+used, or the usage bar reads 0% for a nearly-empty key.
+func TestFetchCreditsDashboardBillingDerivesLimitFromRemainingPlusUsed(t *testing.T) {
+	initConfigForTests(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/dashboard/billing/subscription":
+			_, _ = w.Write([]byte(`{"hard_limit_usd":30,"soft_limit_usd":30}`))
+		case "/v1/dashboard/billing/usage":
+			_, _ = w.Write([]byte(`{"object":"list","total_usage":7000}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	me, err := fetchExternalProviderCredits(&config.Account{AccessToken: "k", BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("fetchExternalProviderCredits: %v", err)
+	}
+	if me.CreditsRemaining != 30 || me.CreditsUsed != 70 || me.CreditLimit != 100 {
+		t.Fatalf("remaining/used/limit = %v/%v/%v, want 30/70/100",
+			me.CreditsRemaining, me.CreditsUsed, me.CreditLimit)
+	}
+}
+
+// An unmetered key answers hard_limit_usd = 1e8. Reporting that as a real
+// balance would render a permanently-0% bar, so both quota fields collapse to
+// zero and the UI shows "no limit" instead.
+func TestFetchCreditsDashboardBillingTreatsSentinelAsUnmetered(t *testing.T) {
+	initConfigForTests(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/dashboard/billing/subscription":
+			_, _ = w.Write([]byte(`{"hard_limit_usd":100000000,"soft_limit_usd":100000000}`))
+		case "/v1/dashboard/billing/usage":
+			_, _ = w.Write([]byte(`{"total_usage":544883.83}`))
+		default:
+			w.WriteHeader(404)
+		}
+	}))
+	defer srv.Close()
+
+	me, err := fetchExternalProviderCredits(&config.Account{AccessToken: "k", BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("fetchExternalProviderCredits: %v", err)
+	}
+	if me.CreditLimit != 0 || me.CreditsRemaining != 0 {
+		t.Fatalf("limit/remaining = %v/%v, want 0/0 for an unmetered key", me.CreditLimit, me.CreditsRemaining)
+	}
+	if got := me.CreditsUsed; got < 5448.8 || got > 5448.9 {
+		t.Fatalf("used = %v, want ~5448.84 (cents converted to USD)", got)
+	}
+}
+
+// A provider that serves its SPA for every unknown path must not be mistaken
+// for a credits API: the HTML body decodes to nothing useful.
+func TestFetchExternalProviderCreditsIgnoresHTMLResponses(t *testing.T) {
+	initConfigForTests(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<!doctype html><html><body>app</body></html>`))
+	}))
+	defer srv.Close()
+
+	if _, err := fetchExternalProviderCredits(&config.Account{AccessToken: "k", BaseURL: srv.URL}); err != ErrExternalCreditsNotSupported {
+		t.Fatalf("err = %v, want ErrExternalCreditsNotSupported", err)
+	}
+}
+
+// The /v1/me dialect carries a real balance but no ceiling, so the limit is
+// derived from balance+spend and per-model token counts are summed.
+func TestFetchCreditsV1Me(t *testing.T) {
+	initConfigForTests(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/me" {
+			w.WriteHeader(404)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"key-11","balance":4,"spendLimit":null,"totalSpent":1,
+			"totalRequests":12,"modelUsage":{"a":{"inputTokens":100,"outputTokens":5}}}`))
+	}))
+	defer srv.Close()
+
+	me, err := fetchExternalProviderCredits(&config.Account{AccessToken: "k", BaseURL: srv.URL})
+	if err != nil {
+		t.Fatalf("fetchExternalProviderCredits: %v", err)
+	}
+	if me.CreditsRemaining != 4 || me.CreditsUsed != 1 || me.CreditLimit != 5 {
+		t.Fatalf("remaining/used/limit = %v/%v/%v, want 4/1/5",
+			me.CreditsRemaining, me.CreditsUsed, me.CreditLimit)
+	}
+	if me.TokensUsed != 105 || me.RequestsCount != 12 || me.KeyMasked != "key-11" {
+		t.Fatalf("tokens/requests/name = %v/%v/%q, want 105/12/\"key-11\"",
+			me.TokensUsed, me.RequestsCount, me.KeyMasked)
+	}
+}
+
+// An upstream that reports a real credit charge (Codex) keeps it; one that
+// reports none gets the pricing-derived cost so the CREDITS column is not 0.
+func TestResolveCreditsFallsBackToPricing(t *testing.T) {
+	if got := ResolveCredits("", 2.5, "claude-sonnet-5", 1000, 0, 100); got != 2.5 {
+		t.Fatalf("upstream credits = %v, want 2.5 preserved", got)
+	}
+	want := ComputeCost("claude-sonnet-5", 1000, 0, 100)
+	if want == 0 {
+		t.Fatal("pricing table lookup returned 0; test cannot detect the fallback")
+	}
+	if got := ResolveCredits("", 0, "claude-sonnet-5", 1000, 0, 100); got != want {
+		t.Fatalf("derived credits = %v, want %v", got, want)
+	}
+	if got := ResolveCredits("", 0, "unknown-model-xyz", 1000, 0, 100); got != 0 {
+		t.Fatalf("unknown model credits = %v, want 0", got)
 	}
 }

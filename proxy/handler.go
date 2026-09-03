@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -36,15 +37,18 @@ var (
 )
 
 type CliToolSettings struct {
-	BaseURL       string            `json:"baseUrl,omitempty"`
-	APIKey        string            `json:"apiKey,omitempty"`
-	Model         string            `json:"model,omitempty"`
-	Models        []string          `json:"models,omitempty"`
-	ActiveModel   string            `json:"activeModel,omitempty"`
-	SubagentModel string            `json:"subagentModel,omitempty"`
-	Env           map[string]string `json:"env,omitempty"`
-	AgentModels   map[string]string `json:"agentModels,omitempty"`
-	Config        string            `json:"config,omitempty"`
+	BaseURL       string   `json:"baseUrl,omitempty"`
+	APIKey        string   `json:"apiKey,omitempty"`
+	Model         string   `json:"model,omitempty"`
+	Models        []string `json:"models,omitempty"`
+	ActiveModel   string   `json:"activeModel,omitempty"`
+	SubagentModel string   `json:"subagentModel,omitempty"`
+	// ReasoningEffort lets the UI restore the level already on disk instead of
+	// re-rendering its default and silently downgrading it on the next Apply.
+	ReasoningEffort string            `json:"reasoningEffort,omitempty"`
+	Env             map[string]string `json:"env,omitempty"`
+	AgentModels     map[string]string `json:"agentModels,omitempty"`
+	Config          string            `json:"config,omitempty"`
 }
 
 const (
@@ -67,9 +71,19 @@ func policyModelLimits(model string) (int, int, bool) {
 		return 272000, 128000, true
 	case deepResearchModel:
 		return 272000, 128000, true
-	case "claude-opus-5", "claude-sonnet-5", "claude-haiku-5":
+	// The SOTA gateway rebrands Claude models as model-S/T/O/A, which carry the
+	// same 1M window. hasCanonicalTokenLimits already claims them, so they must
+	// resolve here or the catalog publishes a zero window for them.
+	case "claude-opus-5", "claude-sonnet-5", "claude-haiku-5",
+		"model-s", "model-t", "model-o", "model-a":
 		return 1_000_000, 128_000, true
 	default:
+		// Claude 4.6+ (claude-opus-4.8, claude-sonnet-4.7, fable 5, ...) also
+		// carry a 1M window. Reuse the runtime classifier so the catalog we
+		// publish to clients cannot disagree with context accounting.
+		if strings.HasPrefix(model, "claude-") && isLargeContextModel(model) {
+			return 1_000_000, 128_000, true
+		}
 		return 0, 0, false
 	}
 }
@@ -627,7 +641,7 @@ func backupToolConfig(toolID string) string {
 			continue
 		}
 		backupPath := fmt.Sprintf("%s.omniproxy.bak.%d", p, time.Now().Unix())
-		if err := os.WriteFile(backupPath, data, 0644); err != nil {
+		if err := os.WriteFile(backupPath, data, 0600); err != nil {
 			continue
 		}
 		if firstBackup == "" {
@@ -935,6 +949,7 @@ type Handler struct {
 	startTime       int64
 	stopRefresh     chan struct{}
 	stopStatsSaver  chan struct{}
+	stopOnce        sync.Once
 	// model cache
 	webDir          string
 	cachedModels    []ModelInfo
@@ -1119,6 +1134,7 @@ func NewHandler() *Handler {
 	applyProxyConfig(config.GetProxyURL())
 	// load compression settings from config (KVSettings)
 	InitCompressionConfig()
+	adminSessions.load()
 
 	totalReq, successReq, failedReq, totalTokens, totalCredits := config.GetStats()
 	h := &Handler{
@@ -1142,12 +1158,24 @@ func NewHandler() *Handler {
 		h.webDir = "web"
 	}
 	// start background refresh
-	go h.backgroundRefresh()
+	safeGo("backgroundRefresh", h.backgroundRefresh)
 	// start background stats saver (every 30s)
-	go h.backgroundStatsSaver()
+	safeGo("backgroundStatsSaver", h.backgroundStatsSaver)
 	// clean up expired stored responses (>30 days)
-	go purgeExpiredResponses(responsesDefaultTTL)
+	safeGo("purgeExpiredResponses", func() { purgeExpiredResponses(responsesDefaultTTL) })
 	return h
+}
+
+// Shutdown stops the background loops and flushes what they were responsible
+// for. backgroundStatsSaver writes on a 30s tick, so without this the last
+// window of stats is lost on every restart. Safe to call more than once (the
+// menu and the signal handler both reach it).
+func (h *Handler) Shutdown() {
+	h.stopOnce.Do(func() {
+		close(h.stopRefresh)
+		close(h.stopStatsSaver) // its own loop saves once before returning
+		h.usageTracker.Stop()
+	})
 }
 
 // syncNineRouterAccounts imports every credentialed connection from the local
@@ -1401,10 +1429,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Debug-level request trace for fine-grained visibility
 	logger.Debugf("[HTTP] %s %s from %s", r.Method, path, r.RemoteAddr)
 
-	// CORS - full header support
-	w.Header().Set("Access-Control-Allow-Origin", "*")
+	// CORS - full header support. The admin API returns every stored upstream
+	// OAuth token, so it must never be wildcarded: any page the operator visits
+	// could otherwise read it cross-origin. Echo only same-origin/loopback there.
+	if strings.HasPrefix(path, "/admin/api") {
+		if origin := r.Header.Get("Origin"); isLocalOrSameOrigin(origin, r) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		}
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, "+adminTokenHeader)
+	} else {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, anthropic-version, anthropic-beta, x-api-key, x-stainless-os, x-stainless-lang, x-stainless-package-version, x-stainless-runtime, x-stainless-runtime-version, x-stainless-arch")
+	}
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Api-Key, anthropic-version, anthropic-beta, x-api-key, x-stainless-os, x-stainless-lang, x-stainless-package-version, x-stainless-runtime, x-stainless-runtime-version, x-stainless-arch")
 	w.Header().Set("Access-Control-Expose-Headers", "x-request-id, x-ratelimit-limit-requests, x-ratelimit-limit-tokens, x-ratelimit-remaining-requests, x-ratelimit-remaining-tokens, x-ratelimit-reset-requests, x-ratelimit-reset-tokens")
 
 	if r.Method == "OPTIONS" {
@@ -1620,6 +1658,204 @@ var canonicalClaude5ModelIDs = []string{
 	"claude-opus-5",
 }
 
+// sotaModelBehavesAs maps the SOTA gateway's rebranded Claude IDs to the model
+// whose client-side handling applies to them. Claude Code does not know these
+// IDs, and for an unknown ID it offers no Effort control at all. Publishing
+// them through discovery cannot fix that: Claude Code strips each /v1/models
+// entry down to id/display_name/description, so token limits and effort levels
+// sent there are discarded. A behavesAs mapping on the picker row is the only
+// channel that carries the capability profile.
+var sotaModelBehavesAs = map[string]string{
+	"model-s": "claude-fable-5",
+	"model-t": "claude-sonnet-5",
+	"model-o": "claude-opus-5",
+	"model-a": "claude-opus-5",
+}
+
+// sotaModelIDs is the upstream spelling of the aliases, in picker order.
+var sotaModelIDs = []string{"model-S", "model-T", "model-O", "model-A"}
+
+// mergeClaudeAvailableModels appends the IDs this gateway guarantees to whatever
+// the operator already allowed, keeping their order and dropping duplicates.
+// Comparison is case-insensitive because the settings file spells the aliases
+// model-S while everything else here is lowercase; a case-only duplicate would
+// otherwise show up twice in the picker.
+func mergeClaudeAvailableModels(existing interface{}, guaranteed []string) []string {
+	out := make([]string, 0, len(guaranteed)+4)
+	seen := make(map[string]bool, len(guaranteed)+4)
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		key := strings.ToLower(id)
+		if id == "" || seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, id)
+	}
+	if list, ok := existing.([]interface{}); ok {
+		for _, raw := range list {
+			if id, ok := raw.(string); ok {
+				add(id)
+			}
+		}
+	}
+	for _, id := range guaranteed {
+		add(id)
+	}
+	return out
+}
+
+// hasClaudeFallbackModel reports whether the settings already name a fallback.
+// The key has been written as both a string and a list across Claude Code
+// versions, so both shapes count as configured.
+func hasClaudeFallbackModel(existing interface{}) bool {
+	switch v := existing.(type) {
+	case string:
+		return strings.TrimSpace(v) != ""
+	case []interface{}:
+		for _, raw := range v {
+			if s, ok := raw.(string); ok && strings.TrimSpace(s) != "" {
+				return true
+			}
+		}
+	case []string:
+		for _, s := range v {
+			if strings.TrimSpace(s) != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// claudeEffortLevels are the effort values Claude Code's settings accept. Its
+// own picker offers exactly these, and an unrecognized value is dropped with an
+// "unrecognized effortLevel" warning instead of falling back.
+var claudeEffortLevels = []string{"low", "medium", "high", "xhigh", "max"}
+
+func normalizeClaudeEffort(effort string) (string, bool) {
+	effort = strings.ToLower(strings.TrimSpace(effort))
+	for _, level := range claudeEffortLevels {
+		if effort == level {
+			return level, true
+		}
+	}
+	return "", false
+}
+
+// applyClaudeModelEffort records the picked model and the effort to spend on it.
+// Claude Code keys modelSettings by lowercase model ID and falls back to the
+// top-level effortLevel for a model with no entry, so both are written.
+func applyClaudeModelEffort(settings map[string]interface{}, model, effort string) {
+	model = strings.TrimSpace(model)
+	if model != "" {
+		settings["model"] = model
+	}
+	level, ok := normalizeClaudeEffort(effort)
+	if !ok {
+		return
+	}
+	settings["effortLevel"] = level
+	if model == "" {
+		return
+	}
+	perModel, _ := settings["modelSettings"].(map[string]interface{})
+	if perModel == nil {
+		perModel = map[string]interface{}{}
+	}
+	key := strings.ToLower(stripClaudeContextSuffix(model))
+	entry, _ := perModel[key].(map[string]interface{})
+	if entry == nil {
+		entry = map[string]interface{}{}
+	}
+	entry["effortLevel"] = level
+	perModel[key] = entry
+	settings["modelSettings"] = perModel
+}
+
+// sotaSlotCapabilities is what a SOTA alias supports once it routes through this
+// gateway: an effort ladder up to max, plus the thinking modes the translator
+// forwards. Claude Code reads this from ANTHROPIC_DEFAULT_<slot>_MODEL_SUPPORTED_CAPABILITIES,
+// but only when the paired ANTHROPIC_DEFAULT_<slot>_MODEL names the same model.
+const sotaSlotCapabilities = "effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking"
+
+// sotaCapabilitySlots are the model/capability env pairs Claude Code consults.
+var sotaCapabilitySlots = []string{"OPUS", "SONNET", "HAIKU", "FABLE"}
+
+func sotaBehavesAsTarget(model string) (string, bool) {
+	model = stripClaudeContextSuffix(strings.TrimSpace(model))
+	target, ok := sotaModelBehavesAs[strings.ToLower(model)]
+	return target, ok
+}
+
+// applySotaSlotCapabilities declares the effort and thinking support for any
+// tier slot pointed at a SOTA alias. Without it the alias is an unknown ID and
+// Claude Code hides Effort entirely for that slot.
+func applySotaSlotCapabilities(env map[string]string) {
+	for _, slot := range sotaCapabilitySlots {
+		modelVar := "ANTHROPIC_DEFAULT_" + slot + "_MODEL"
+		if _, ok := sotaBehavesAsTarget(env[modelVar]); !ok {
+			continue
+		}
+		capVar := modelVar + "_SUPPORTED_CAPABILITIES"
+		if strings.TrimSpace(env[capVar]) == "" {
+			env[capVar] = sotaSlotCapabilities
+		}
+	}
+}
+
+// sotaModelLabels name the aliases in the picker. Without a label the row shows
+// the bare id, which reads as a placeholder rather than a model.
+var sotaModelLabels = map[string]string{
+	"model-S": "SOTA model-S",
+	"model-T": "SOTA model-T",
+	"model-O": "SOTA model-O",
+	"model-A": "SOTA model-A",
+}
+
+// applySotaPickerRows gives every SOTA alias a picker row carrying behavesAs.
+// availableModels alone does not make an id selectable once the settings declare
+// a modelPicker, so an alias without a row is routable but unreachable from the
+// UI, and a row without behavesAs is selectable but has no Effort control. An
+// existing row keeps the operator's label and description; only a missing
+// behavesAs is filled in.
+func applySotaPickerRows(settings map[string]interface{}) {
+	picker, _ := settings["modelPicker"].(map[string]interface{})
+	if picker == nil {
+		picker = map[string]interface{}{}
+	}
+	options, _ := picker["options"].([]interface{})
+	listed := make(map[string]bool, len(options))
+	for _, raw := range options {
+		row, _ := raw.(map[string]interface{})
+		if row == nil {
+			continue
+		}
+		id, _ := row["model"].(string)
+		listed[strings.ToLower(strings.TrimSpace(id))] = true
+		target, ok := sotaBehavesAsTarget(id)
+		if !ok {
+			continue
+		}
+		if existing, _ := row["behavesAs"].(string); strings.TrimSpace(existing) == "" {
+			row["behavesAs"] = target
+		}
+	}
+	for _, id := range sotaModelIDs {
+		if listed[strings.ToLower(id)] {
+			continue
+		}
+		target, _ := sotaBehavesAsTarget(id)
+		options = append(options, map[string]interface{}{
+			"model":     id,
+			"label":     sotaModelLabels[id],
+			"behavesAs": target,
+		})
+	}
+	picker["options"] = options
+	settings["modelPicker"] = picker
+}
+
 func canonicalClaude5Models() []map[string]interface{} {
 	models := make([]map[string]interface{}, 0, len(canonicalClaude5ModelIDs))
 	for _, id := range canonicalClaude5ModelIDs {
@@ -1700,6 +1936,31 @@ func (h *Handler) handleModelByID(w http.ResponseWriter, r *http.Request, modelI
 			json.NewEncoder(w).Encode(model)
 			return
 		}
+	}
+
+	// A model this gateway actually routes must resolve here as well. Claude
+	// Code requests /v1/models/{id} for the model it is configured with and
+	// treats 404 as an unknown model, then falls back to its built-in defaults
+	// for the context window and tool support. The list response stays the
+	// conservative canonical catalog; only the by-ID lookup widens.
+	//
+	// Codex's own namespace is excluded: those entries are served by the
+	// subscription branch above and only when a Codex account is enabled.
+	h.modelsCacheMu.RLock()
+	cached := append([]ModelInfo(nil), h.cachedModels...)
+	h.modelsCacheMu.RUnlock()
+	for _, info := range cached {
+		id := strings.TrimSpace(info.ModelId)
+		if id == "" || isCodexBuiltinModel(id) || !strings.EqualFold(id, modelID) {
+			continue
+		}
+		ownedBy := strings.TrimSpace(info.Provider)
+		if ownedBy == "" {
+			ownedBy = "external"
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(buildModelInfoWithTokenLimits(id, ownedBy, modelSupportsImage(info.InputTypes), &info))
+		return
 	}
 
 	h.sendClaudeError(w, 404, "not_found_error", "Model not found: "+modelID)
@@ -1791,6 +2052,11 @@ func buildModelInfoWithTokenLimits(id, ownedBy string, supportsImage bool, sourc
 			"streaming":    map[string]bool{"supported": true},
 			"tool_use":     map[string]bool{"supported": true},
 			"reasoning":    map[string]interface{}{"supported": true, "type": "adaptive"},
+		},
+		"runtime": map[string]interface{}{
+			"effort_levels":  []string{"low", "medium", "high", "xhigh", "max"},
+			"default_effort": "high",
+			"capabilities":   []string{"effort", "xhigh_effort", "max_effort", "adaptive_thinking", "interleaved_thinking"},
 		},
 		"info": map[string]interface{}{
 			"meta": map[string]interface{}{
@@ -1942,6 +2208,9 @@ func (h *Handler) refreshModelsCache() {
 				aggregated = mergeUniqueModels(aggregated, h.cachedModels)
 				h.modelsCacheMu.RUnlock()
 			}
+			// refreshAllAccounts skips external accounts entirely, so this is the
+			// only periodic pass that can re-read a gateway's price list.
+			refreshAccountPricing(account)
 			continue
 		}
 		if err := h.ensureValidToken(account); err != nil {
@@ -2123,10 +2392,10 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 	return nil
 }
 
-// refreshExternalCredits fetches the external provider's /api/me endpoint and
+// refreshExternalCredits probes the external provider's billing dialects and
 // persists the credit/usage snapshot onto the account so the admin UI can
-// render remaining credits. Non-fatal: returns error when the provider does
-// not implement /api/me (caller decides whether to surface it).
+// render remaining credits. Non-fatal: returns ErrExternalCreditsNotSupported
+// when no dialect answers (caller decides whether to surface it).
 func (h *Handler) refreshExternalCredits(account *config.Account) error {
 	me, err := fetchExternalProviderCredits(account)
 	if err != nil {
@@ -2728,32 +2997,37 @@ func mergeModelInfo(base ModelInfo, extra ModelInfo) ModelInfo {
 }
 
 // modelInfoTokenLimits resolves token limits for model discovery and CLI config.
-// Claude 5/Fable 5 limits are canonical because stale cache entries for these
-// models were the source of the incorrect context-window configuration. Other
-// models retain catalog metadata as the authority, with policy values filling
-// only missing fields.
+// Claude 5 and the SOTA families have canonical limits because stale cache
+// entries for these models were the source of the incorrect context-window
+// configuration. Other models retain catalog metadata as the authority, with
+// policy values filling only missing fields.
 func modelInfoTokenLimits(info ModelInfo) (int, int, bool) {
 	policyInput, policyOutput, hasPolicy := policyModelLimits(info.ModelId)
 	input, output := policyInput, policyOutput
-	if info.TokenLimits != nil {
+	if info.TokenLimits != nil && !hasCanonicalTokenLimits(info.ModelId) {
 		if info.TokenLimits.MaxInputTokens > 0 {
-			if !isCanonicalClaude5Model(info.ModelId) {
-				input = info.TokenLimits.MaxInputTokens
-			}
+			input = info.TokenLimits.MaxInputTokens
 		}
 		if info.TokenLimits.MaxOutputTokens > 0 {
-			if !isCanonicalClaude5Model(info.ModelId) {
-				output = info.TokenLimits.MaxOutputTokens
-			}
+			output = info.TokenLimits.MaxOutputTokens
 		}
 	}
 	return input, output, input > 0 || output > 0 || hasPolicy
 }
 
-func isCanonicalClaude5Model(model string) bool {
+// hasCanonicalTokenLimits reports whether policyModelLimits owns a model's
+// limits outright. A gateway that lists these families without a real window
+// reports Anthropic's legacy 200K default; publishing that truncates a 1M model
+// mid-task, so the catalog entry is ignored rather than merged.
+func hasCanonicalTokenLimits(model string) bool {
 	model, _ = ParseModelAndThinking(model, "-thinking")
 	model = strings.ToLower(strings.TrimSpace(model))
-	return model == "claude-opus-5" || model == "claude-sonnet-5" || model == "claude-haiku-5"
+	switch model {
+	case "claude-opus-5", "claude-sonnet-5", "claude-haiku-5",
+		"model-s", "model-t", "model-o", "model-a":
+		return true
+	}
+	return false
 }
 
 func modelTokenLimitsFromCatalog(catalog []ModelInfo, model string) (int, int, bool) {
@@ -2783,6 +3057,12 @@ func (h *Handler) contextWindowForModel(model string) int {
 	h.modelsCacheMu.RUnlock()
 
 	if input, _, ok := modelTokenLimitsFromCatalog(cached, baseLower); ok && input > 0 {
+		return input
+	}
+	// A configured model the discovery cache reports without token metadata
+	// still has a known window. Consult the policy table before the version
+	// heuristic, which cannot classify non-Claude ids and returns 200K for them.
+	if input, _, ok := policyModelLimits(baseLower); ok && input > 0 {
 		return input
 	}
 	return getContextWindowSize(model)
@@ -2953,6 +3233,27 @@ func mergeStringLists(base []string, extra []string) []string {
 	return merged
 }
 
+// maxInferenceBodyBytes caps request bodies on the inference paths. A large
+// context with inline images legitimately runs to several MB, so the cap is
+// generous — but io.ReadAll with no limit lets one request buffer until the
+// process is killed, and ReadTimeout is 15m to allow slow uploads.
+const maxInferenceBodyBytes = 64 << 20
+
+// readInferenceBody reads the whole body under maxInferenceBodyBytes. The
+// rejected size is logged so the cap can be tuned from real traffic.
+func readInferenceBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxInferenceBodyBytes))
+	if bodyTooLarge(err) {
+		logger.Warnf("[HTTP] %s body exceeds the %d-byte cap — rejected", r.URL.Path, maxInferenceBodyBytes)
+	}
+	return body, err
+}
+
+func bodyTooLarge(err error) bool {
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr)
+}
+
 // handleCountTokens counts tokens (called by Claude Code)
 func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
@@ -2960,8 +3261,12 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := readInferenceBody(w, r)
 	if err != nil {
+		if bodyTooLarge(err) {
+			h.sendClaudeError(w, 413, "request_too_large", "Request body too large")
+			return
+		}
 		h.sendClaudeError(w, 400, "invalid_request_error", "Failed to read request body")
 		return
 	}
@@ -3002,8 +3307,12 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	}
 
 	// read request
-	body, err := io.ReadAll(r.Body)
+	body, err := readInferenceBody(w, r)
 	if err != nil {
+		if bodyTooLarge(err) {
+			h.sendClaudeError(w, 413, "request_too_large", "Request body too large")
+			return
+		}
 		h.sendClaudeError(w, 400, "invalid_request_error", "Failed to read request body")
 		return
 	}
@@ -3052,14 +3361,14 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	// Stream or non-stream
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	if req.Stream {
-		h.handleClaudeStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
+		h.handleClaudeStream(r.Context(), w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
 	} else {
-		h.handleClaudeNonStream(w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
+		h.handleClaudeNonStream(r.Context(), w, kiroPayload, req.Model, thinking, thinkingResponseOpts, estimatedInputTokens, cacheProfile, apiKeyID)
 	}
 }
 
 // handleClaudeStream handles Claude streaming response
-func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
+func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -3533,9 +3842,13 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		if isCodexAccount(account) {
 			effectiveCallback = newCodexCoalescer(callback)
 		}
-		err := dispatchChat(account, payload, effectiveCallback)
+		err := dispatchChat(ctx, account, payload, effectiveCallback)
 		if err != nil {
 			lastErr = err
+			if clientGone(ctx, err) {
+				h.usageTracker.RemoveActive(account.ID)
+				return
+			}
 			if upstreamProduced {
 				// The response is already visible to the client. Retrying would
 				// replay the prefix, so terminate this SSE turn in place. The
@@ -3560,7 +3873,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			}
 			// Transient upstream errors (5xx, overload, timeout) are retried
 			// in-place with backoff before rotating to a different account.
-			if h.tryTransientRetry(account, payload, effectiveCallback, err) {
+			if h.tryTransientRetry(ctx, account, payload, effectiveCallback, err) {
 				h.pool.RecordSuccess(account.ID, model)
 				if cacheKey != "" {
 					h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
@@ -3568,7 +3881,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 				goto skipAccountHandling
 			}
 			//  try refresh+retry before rotating accounts
-			if h.tryRefreshAndRetry(account, payload, effectiveCallback, err) {
+			if h.tryRefreshAndRetry(ctx, account, payload, effectiveCallback, err) {
 				h.pool.RecordSuccess(account.ID, model)
 				if cacheKey != "" {
 					h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
@@ -3630,7 +3943,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 			CacheReadInputTokens:     realCacheRead,
 			CacheCreationInputTokens: realCacheCreate,
 		}
-		h.recordUsageWithCache(apiKeyID, account.ID, model, endpointClaude, inputTokens, outputTokens, credits, cacheUsageTelemetry{
+		charged := h.recordUsageWithCache(apiKeyID, account.ID, model, endpointClaude, inputTokens, outputTokens, credits, cacheUsageTelemetry{
 			ReadTokens:            realCacheRead,
 			CreateTokens:          realCacheCreate,
 			EstimatedReadTokens:   cacheUsage.CacheReadInputTokens,
@@ -3640,7 +3953,7 @@ func (h *Handler) handleClaudeStream(w http.ResponseWriter, payload *KiroPayload
 		if cacheKey != "" {
 			h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
 		}
-		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, charged)
 		// Keep the tracker as a prediction/affinity aid. Its values are never
 		// used as client-facing or billed cache usage.
 		h.promptCache.Update(account.ID, cacheProfile)
@@ -3942,10 +4255,15 @@ func (h *Handler) recordUsage(apiKeyID, accountID, model, endpoint string, input
 	})
 }
 
-func (h *Handler) recordUsageWithCache(apiKeyID, accountID, model, endpoint string, inputTokens, outputTokens int, credits float64, cache cacheUsageTelemetry) {
+// recordUsageWithCache books one successful request and returns the credit
+// figure actually charged, which the caller passes on to pool.UpdateStats so
+// the per-account CREDITS column and the usage record agree. Providers that
+// report no upstream credit get the pricing-derived cost instead of 0.
+func (h *Handler) recordUsageWithCache(apiKeyID, accountID, model, endpoint string, inputTokens, outputTokens int, credits float64, cache cacheUsageTelemetry) float64 {
+	credits = ResolveCredits(accountID, credits, model, inputTokens, maxInt(cache.ReadTokens, cache.CachedTokens), outputTokens)
 	h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
 	if h.usageTracker == nil {
-		return
+		return credits
 	}
 	provider, accountName := resolveAccountMeta(accountID)
 	rec := RequestRecord{
@@ -3971,6 +4289,7 @@ func (h *Handler) recordUsageWithCache(apiKeyID, accountID, model, endpoint stri
 		rec.CacheSource = "estimated"
 	}
 	h.usageTracker.Append(rec)
+	return credits
 }
 
 // resolveAccountMeta looks up the upstream provider (BuilderId/ExternalIdp) and a
@@ -4032,7 +4351,7 @@ func (h *Handler) recordError(apiKeyID, accountID, model, endpoint, errMsg strin
 }
 
 // handleClaudeNonStream handles Claude non-streaming response
-func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
+func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
 	excluded := make(map[string]bool)
 	var lastErr error
 	// lastAccountID attributes the final failure to a concrete account in Usage.
@@ -4121,12 +4440,16 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointClaude, model)
-		err := dispatchChat(account, payload, callback)
+		err := dispatchChat(ctx, account, payload, callback)
 		if err != nil {
 			lastErr = err
+			if clientGone(ctx, err) {
+				h.usageTracker.RemoveActive(account.ID)
+				return
+			}
 			// Transient upstream errors (5xx, overload, timeout) are retried
 			// in-place with backoff before rotating to a different account.
-			if h.tryTransientRetry(account, payload, callback, err) {
+			if h.tryTransientRetry(ctx, account, payload, callback, err) {
 				h.pool.RecordSuccess(account.ID, model)
 				if cacheKey != "" {
 					h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
@@ -4134,7 +4457,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 				goto skipNonStreamHandling
 			}
 			// try refresh+retry before rotating accounts
-			if h.tryRefreshAndRetry(account, payload, callback, err) {
+			if h.tryRefreshAndRetry(ctx, account, payload, callback, err) {
 				goto skipNonStreamHandling
 			}
 			if pool.IsContentBlockedError(err) {
@@ -4180,7 +4503,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 			CacheReadInputTokens:     realCacheRead,
 			CacheCreationInputTokens: realCacheCreate,
 		}
-		h.recordUsageWithCache(apiKeyID, account.ID, model, endpointClaude, inputTokens, outputTokens, credits, cacheUsageTelemetry{
+		charged := h.recordUsageWithCache(apiKeyID, account.ID, model, endpointClaude, inputTokens, outputTokens, credits, cacheUsageTelemetry{
 			ReadTokens:            realCacheRead,
 			CreateTokens:          realCacheCreate,
 			EstimatedReadTokens:   cacheUsage.CacheReadInputTokens,
@@ -4190,7 +4513,7 @@ func (h *Handler) handleClaudeNonStream(w http.ResponseWriter, payload *KiroPayl
 		if cacheKey != "" {
 			h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
 		}
-		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, charged)
 		h.promptCache.Update(account.ID, cacheProfile)
 
 		responseThinkingContent := rawThinkingContent
@@ -4284,8 +4607,12 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := readInferenceBody(w, r)
 	if err != nil {
+		if bodyTooLarge(err) {
+			h.sendOpenAIError(w, 413, "request_too_large", "Request body too large")
+			return
+		}
 		h.sendOpenAIError(w, 400, "invalid_request_error", "Failed to read request body")
 		return
 	}
@@ -4326,14 +4653,14 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 
 	apiKeyID := apiKeyIDFromContext(r.Context())
 	if req.Stream {
-		h.handleOpenAIStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
+		h.handleOpenAIStream(r.Context(), w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
 	} else {
-		h.handleOpenAINonStream(w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
+		h.handleOpenAINonStream(r.Context(), w, kiroPayload, req.Model, thinking, estimatedInputTokens, apiKeyID)
 	}
 }
 
 // handleOpenAIStream handles OpenAI streaming response
-func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
+func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -4682,16 +5009,20 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		if isCodexAccount(account) {
 			effectiveCallback = newCodexCoalescer(callback)
 		}
-		err := dispatchChat(account, payload, effectiveCallback)
+		err := dispatchChat(ctx, account, payload, effectiveCallback)
 		if err != nil {
 			lastErr = err
+			if clientGone(ctx, err) {
+				h.usageTracker.RemoveActive(account.ID)
+				return
+			}
 			// Transient upstream errors (5xx, overload, timeout) are retried
 			// in-place with backoff before rotating to a different account.
 			// A stream cannot be retried once any output has been produced. The
 			// client may already have received the prefix (or the Codex
 			// coalescer may still hold it), so retrying would replay that prefix
 			// and leave Claude CLI waiting for a continuation.
-			if !responseStarted && h.tryTransientRetry(account, payload, effectiveCallback, err) {
+			if !responseStarted && h.tryTransientRetry(ctx, account, payload, effectiveCallback, err) {
 				h.pool.RecordSuccess(account.ID, model)
 				if cacheKey != "" {
 					h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
@@ -4699,7 +5030,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 				goto skipOpenAIStreamHandling
 			}
 			//  try refresh+retry before rotating accounts
-			if !responseStarted && h.tryRefreshAndRetry(account, payload, effectiveCallback, err) {
+			if !responseStarted && h.tryRefreshAndRetry(ctx, account, payload, effectiveCallback, err) {
 				h.pool.RecordSuccess(account.ID, model)
 				if cacheKey != "" {
 					h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
@@ -4764,7 +5095,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 			}
 		}
 
-		h.recordUsageWithCache(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits, cacheUsageTelemetry{
+		charged := h.recordUsageWithCache(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits, cacheUsageTelemetry{
 			CreateTokens: realCacheCreate,
 			CachedTokens: realCacheRead,
 		})
@@ -4772,7 +5103,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 		if cacheKey != "" {
 			h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
 		}
-		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, charged)
 
 		finishReason := "stop"
 		if len(toolCalls) > 0 {
@@ -4823,7 +5154,7 @@ func (h *Handler) handleOpenAIStream(w http.ResponseWriter, payload *KiroPayload
 }
 
 // handleOpenAINonStream handles OpenAI non-streaming response
-func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
+func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, estimatedInputTokens int, apiKeyID string) {
 	excluded := make(map[string]bool)
 	var lastErr error
 	// lastAccountID attributes the final failure to a concrete account in Usage.
@@ -4901,12 +5232,16 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointOpenAI, model)
-		err := dispatchChat(account, payload, callback)
+		err := dispatchChat(ctx, account, payload, callback)
 		if err != nil {
 			lastErr = err
+			if clientGone(ctx, err) {
+				h.usageTracker.RemoveActive(account.ID)
+				return
+			}
 			// Transient upstream errors (5xx, overload, timeout) are retried
 			// in-place with backoff before rotating to a different account.
-			if h.tryTransientRetry(account, payload, callback, err) {
+			if h.tryTransientRetry(ctx, account, payload, callback, err) {
 				h.pool.RecordSuccess(account.ID, model)
 				if cacheKey != "" {
 					h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
@@ -4914,7 +5249,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 				goto skipOpenAINonStreamHandling
 			}
 			// try refresh+retry before rotating accounts
-			if h.tryRefreshAndRetry(account, payload, callback, err) {
+			if h.tryRefreshAndRetry(ctx, account, payload, callback, err) {
 				goto skipOpenAINonStreamHandling
 			}
 			if pool.IsContentBlockedError(err) {
@@ -4951,7 +5286,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 			outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 		}
 
-		h.recordUsageWithCache(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits, cacheUsageTelemetry{
+		charged := h.recordUsageWithCache(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits, cacheUsageTelemetry{
 			CreateTokens: realCacheCreate,
 			CachedTokens: realCacheRead,
 		})
@@ -4959,7 +5294,7 @@ func (h *Handler) handleOpenAINonStream(w http.ResponseWriter, payload *KiroPayl
 		if cacheKey != "" {
 			h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
 		}
-		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, charged)
 
 		thinkingFormat := config.GetThinkingConfig().OpenAIFormat
 		resp := KiroToOpenAIResponseWithReasoning(finalContent, reasoningContent, toolUses, inputTokens, outputTokens, model, thinkingFormat, realCacheRead)
@@ -4991,7 +5326,7 @@ func (h *Handler) sendOpenAIError(w http.ResponseWriter, status int, errType, me
 // tryRefreshAndRetry attempts to refresh the account token and retry the API call
 // on 401/403 auth errors. Returns true if the retry succeeded, false otherwise.
 // Call this from the retry loops BEFORE marking the account as failed.
-func (h *Handler) tryRefreshAndRetry(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback, err error) bool {
+func (h *Handler) tryRefreshAndRetry(ctx context.Context, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback, err error) bool {
 	if err == nil {
 		return false
 	}
@@ -5044,7 +5379,7 @@ func (h *Handler) tryRefreshAndRetry(account *config.Account, payload *KiroPaylo
 	if callback != nil && callback.OnReset != nil {
 		callback.OnReset()
 	}
-	retryErr := dispatchChat(account, payload, callback)
+	retryErr := dispatchChat(ctx, account, payload, callback)
 	if retryErr != nil {
 		if callback != nil && callback.HasOutput != nil && callback.HasOutput() {
 			logger.Warnf("[AuthRetry] Retry after refresh produced partial output for %s; not retrying again", account.Email)
@@ -5073,7 +5408,7 @@ const transientRetryBaseDelay = 500 * time.Millisecond
 //
 // This is called BEFORE tryRefreshAndRetry in the retry loops so transient
 // upstream issues are retried in-place without churning through accounts.
-func (h *Handler) tryTransientRetry(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback, err error) bool {
+func (h *Handler) tryTransientRetry(ctx context.Context, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback, err error) bool {
 	// This retry policy is intentionally limited to external OpenAI-compatible
 	// providers. Native Kiro/AWS and Codex have separate upstream semantics and
 	// must not inherit this external-provider failover behavior.
@@ -5108,7 +5443,7 @@ func (h *Handler) tryTransientRetry(account *config.Account, payload *KiroPayloa
 		if callback != nil && callback.OnReset != nil {
 			callback.OnReset()
 		}
-		retryErr := dispatchChat(account, payload, callback)
+		retryErr := dispatchChat(ctx, account, payload, callback)
 		if retryErr == nil {
 			logger.Infof("[TransientRetry] %s: succeeded on attempt %d", account.Email, attempt)
 			return true
@@ -5263,26 +5598,25 @@ func tokenNeedsRefresh(account *config.Account, now int64) bool {
 // ==================== Admin API ====================
 
 func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
-	// verify password
-	password := r.Header.Get("X-Admin-Password")
-	if password == "" {
-		password = r.URL.Query().Get("pwd")
-	}
-	if password == "" {
-		cookie, _ := r.Cookie("admin_password")
-		if cookie != nil {
-			password = cookie.Value
-		}
-	}
+	path := strings.TrimPrefix(r.URL.Path, "/admin/api")
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 
-	if password != config.GetPassword() {
+	// Login exchanges the password for a short-lived session token; every other
+	// route requires that token. The password is never accepted as a query
+	// parameter, so it cannot leak via referrers or access logs.
+	if path == "/login" && r.Method == "POST" {
+		h.apiAdminLogin(w, r)
+		return
+	}
+	if !adminSessions.valid(adminRequestToken(r, path)) {
 		w.WriteHeader(401)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Unauthorized"})
 		return
 	}
-
-	path := strings.TrimPrefix(r.URL.Path, "/admin/api")
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	if path == "/logout" && r.Method == "POST" {
+		h.apiAdminLogout(w, r)
+		return
+	}
 
 	switch {
 	case path == "/accounts" && r.Method == "GET":
@@ -5611,7 +5945,7 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 	switch toolID {
 	case "claude":
 		settingsPath := filepath.Join(homeDir, ".claude", "settings.json")
-		if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0700); err != nil {
 			http.Error(w, `{"error":"cannot create config directory"}`, 500)
 			return
 		}
@@ -5655,25 +5989,40 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 		delete(env, "ANTHROPIC_AUTH_TOKEN")
 		current["hasCompletedOnboarding"] = true
 		current["env"] = env
-		// Apply is an endpoint/credential operation. Model selection belongs to
-		// Claude Code settings and must survive UI refreshes or older callers.
-		// Replace stale UI state rather than merging it: this installation exposes
-		// only model IDs backed by a working upstream route.
-		current["availableModels"] = []string{
-			"claude-sonnet-5",
-			"claude-opus-5",
+		// availableModels is an allowlist: an ID missing from it is refused even
+		// when the gateway routes it. Merge rather than replace — an operator's
+		// list may name context variants (claude-opus-5[1m]) and other routable
+		// families this handler knows nothing about, and dropping them would make
+		// models that work today start being refused.
+		current["availableModels"] = mergeClaudeAvailableModels(
+			current["availableModels"],
+			append([]string{"claude-sonnet-5", "claude-opus-5"}, sotaModelIDs...),
+		)
+		// Claude Code decides a model's Effort and thinking support from its own
+		// catalog, so a rebranded ID it does not know gets no Effort control. These
+		// two channels are the only ones that carry a capability profile for such an
+		// ID: behavesAs on the picker row, and the per-slot capabilities variable.
+		applySotaPickerRows(current)
+		applySotaSlotCapabilities(env)
+		applyClaudeModelEffort(current, strings.TrimSpace(req.Model), req.ReasoningEffort)
+		// Claude Code's automatic high-demand fallback uses its Haiku tier. Route
+		// that tier to Sonnet because this installation has no Haiku route, unless
+		// the operator already pointed the slot at a model that does route.
+		if strings.TrimSpace(env["ANTHROPIC_DEFAULT_HAIKU_MODEL"]) == "" {
+			env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "claude-sonnet-5"
+			env["ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"] = "Claude Sonnet 5"
+			env["ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION"] = "Claude Sonnet 5 via the local gateway"
 		}
-		// Claude Code's automatic high-demand fallback uses its Haiku tier.
-		// Route that tier to Sonnet because this installation has no Haiku route.
-		env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = "claude-sonnet-5"
-		env["ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"] = "Claude Sonnet 5"
-		env["ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION"] = "Claude Sonnet 5 via the local gateway"
-		current["fallbackModel"] = []string{"claude-sonnet-5"}
+		// fallbackModel is the operator's choice of what to degrade to. Only seed
+		// it when unset; overwriting would silently retarget a deliberate pick.
+		if !hasClaudeFallbackModel(current["fallbackModel"]) {
+			current["fallbackModel"] = []string{"claude-sonnet-5"}
+		}
 		// `fallbackModels` was an older, non-standard key that caused the
 		// advisor fallback to be confused with the primary model fallback.
 		delete(current, "fallbackModels")
 		data, _ := json.MarshalIndent(current, "", "  ")
-		if err := os.WriteFile(settingsPath, data, 0644); err != nil {
+		if err := os.WriteFile(settingsPath, data, 0600); err != nil {
 			http.Error(w, `{"error":"failed to write config file"}`, 500)
 			return
 		}
@@ -5681,7 +6030,7 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 
 	case "opencode":
 		configPath := filepath.Join(homeDir, ".config", "opencode", "opencode.json")
-		if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
 			http.Error(w, `{"error":"cannot create config directory"}`, 500)
 			return
 		}
@@ -5740,7 +6089,7 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 			}
 		}
 		data, _ := json.MarshalIndent(current, "", "  ")
-		if err := os.WriteFile(configPath, data, 0644); err != nil {
+		if err := os.WriteFile(configPath, data, 0600); err != nil {
 			http.Error(w, `{"error":"failed to write config file"}`, 500)
 			return
 		}
@@ -5748,7 +6097,7 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 
 	case "cline":
 		secretsDir := filepath.Join(homeDir, ".cline", "data")
-		if err := os.MkdirAll(secretsDir, 0755); err != nil {
+		if err := os.MkdirAll(secretsDir, 0700); err != nil {
 			http.Error(w, `{"error":"cannot create config directory"}`, 500)
 			return
 		}
@@ -5765,13 +6114,13 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 			"planModeOpenAiModelId": model,
 		}
 		globalData, _ := json.MarshalIndent(global, "", "  ")
-		if err := os.WriteFile(filepath.Join(secretsDir, "globalState.json"), globalData, 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(secretsDir, "globalState.json"), globalData, 0600); err != nil {
 			http.Error(w, `{"error":"failed to write globalState.json"}`, 500)
 			return
 		}
 		secrets := map[string]string{"openAiApiKey": req.APIKey}
 		secretsData, _ := json.MarshalIndent(secrets, "", "  ")
-		if err := os.WriteFile(filepath.Join(secretsDir, "secrets.json"), secretsData, 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(secretsDir, "secrets.json"), secretsData, 0600); err != nil {
 			http.Error(w, `{"error":"failed to write secrets.json"}`, 500)
 			return
 		}
@@ -5779,7 +6128,7 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 
 	case "codex":
 		codexDir := filepath.Join(homeDir, ".codex")
-		if err := os.MkdirAll(codexDir, 0755); err != nil {
+		if err := os.MkdirAll(codexDir, 0700); err != nil {
 			http.Error(w, `{"error":"cannot create config directory"}`, 500)
 			return
 		}
@@ -5792,21 +6141,21 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 			subagent = model
 		}
 		bpURL := ensureV1(req.BaseURL)
-		effort := strings.TrimSpace(req.ReasoningEffort)
-		if effort != "low" && effort != "medium" && effort != "high" {
-			effort = "medium"
-		}
+		desktopModels, familyEfforts := h.codexDesktopModels(model, subagent)
+		// Clamp against the configured model's own effort ladder so the value
+		// written here is always selectable in the picker for that model.
+		effort := clampCodexReasoningEffort(req.ReasoningEffort, familyEfforts[codexModelFamily(openClawModelID(model))])
 		if err := MergeCodexConfig(homeDir, model, bpURL, subagent, effort); err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"failed to merge config: %v"}`, err), 500)
 			return
 		}
 		auth := map[string]string{"auth_mode": "apikey", "OPENAI_API_KEY": req.APIKey}
 		authData, _ := json.MarshalIndent(auth, "", "  ")
-		if err := os.WriteFile(filepath.Join(codexDir, "auth.json"), authData, 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(codexDir, "auth.json"), authData, 0600); err != nil {
 			http.Error(w, `{"error":"failed to write auth.json"}`, 500)
 			return
 		}
-		if err := syncCodexModelCatalog(homeDir, codexCatalogModels(h.omniProxyModelCatalog(model, subagent))); err != nil {
+		if err := syncCodexModelCatalog(homeDir, codexCatalogModels(desktopModels, familyEfforts)); err != nil {
 			// The proxy config and credentials are already usable. A catalog
 			// failure should not prevent the user from configuring Codex CLI.
 			logger.Warnf("[CodexCatalog] Failed to update desktop model catalog: %v", err)
@@ -5815,7 +6164,7 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 
 	case "kilocode":
 		kiloDir := filepath.Join(homeDir, ".local", "share", "kilo")
-		if err := os.MkdirAll(kiloDir, 0755); err != nil {
+		if err := os.MkdirAll(kiloDir, 0700); err != nil {
 			http.Error(w, `{"error":"cannot create config directory"}`, 500)
 			return
 		}
@@ -5833,7 +6182,7 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 			},
 		}
 		data, _ := json.MarshalIndent(auth, "", "  ")
-		if err := os.WriteFile(filepath.Join(kiloDir, "auth.json"), data, 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(kiloDir, "auth.json"), data, 0600); err != nil {
 			http.Error(w, `{"error":"failed to write auth.json"}`, 500)
 			return
 		}
@@ -5841,7 +6190,7 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 
 	case "deepseek":
 		deepseekDir := filepath.Join(homeDir, ".deepseek")
-		if err := os.MkdirAll(deepseekDir, 0755); err != nil {
+		if err := os.MkdirAll(deepseekDir, 0700); err != nil {
 			http.Error(w, `{"error":"cannot create config directory"}`, 500)
 			return
 		}
@@ -5857,7 +6206,7 @@ base_url = "%s"
 api_key = "%s"
 model = "%s"
 `, bpURL, req.APIKey, model)
-		if err := os.WriteFile(filepath.Join(deepseekDir, "config.toml"), []byte(tomlContent), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(deepseekDir, "config.toml"), []byte(tomlContent), 0600); err != nil {
 			http.Error(w, `{"error":"failed to write config.toml"}`, 500)
 			return
 		}
@@ -5865,7 +6214,7 @@ model = "%s"
 
 	case "jcode":
 		jcodeDir := filepath.Join(homeDir, ".jcode")
-		if err := os.MkdirAll(jcodeDir, 0755); err != nil {
+		if err := os.MkdirAll(jcodeDir, 0700); err != nil {
 			http.Error(w, `{"error":"cannot create config directory"}`, 500)
 			return
 		}
@@ -5893,19 +6242,19 @@ env_file = "provider-9router.env"
 default_model = "%s"
 requires_api_key = true
 %s`, jcodeBPURL, jcodeDefaultModel, jcodeModelsToml)
-		if err := os.WriteFile(filepath.Join(jcodeDir, "config.toml"), []byte(jcodeTOML), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(jcodeDir, "config.toml"), []byte(jcodeTOML), 0600); err != nil {
 			http.Error(w, `{"error":"failed to write config.toml"}`, 500)
 			return
 		}
 		envDir := filepath.Join(homeDir, ".config", "jcode")
-		os.MkdirAll(envDir, 0755)
+		os.MkdirAll(envDir, 0700)
 		envContent := fmt.Sprintf("# jcode provider environment variables\nJCODE_9ROUTER_API_KEY=\"%s\"\n", req.APIKey)
-		os.WriteFile(filepath.Join(envDir, "provider-9router.env"), []byte(envContent), 0644)
+		os.WriteFile(filepath.Join(envDir, "provider-9router.env"), []byte(envContent), 0600)
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
 	case "hermes":
 		hermesDir := filepath.Join(homeDir, ".hermes")
-		if err := os.MkdirAll(hermesDir, 0755); err != nil {
+		if err := os.MkdirAll(hermesDir, 0700); err != nil {
 			http.Error(w, `{"error":"cannot create config directory"}`, 500)
 			return
 		}
@@ -5940,17 +6289,17 @@ requires_api_key = true
 		}
 		yamlContent = upsertYAMLProviderBlock(yamlContent, "omniproxy", providerBlock)
 		yamlContent = upsertYAMLAuxiliaryModels(yamlContent, hermesBPURL, req.APIKey)
-		if err := os.WriteFile(filepath.Join(hermesDir, "config.yaml"), []byte(yamlContent), 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(hermesDir, "config.yaml"), []byte(yamlContent), 0600); err != nil {
 			http.Error(w, `{"error":"failed to write config.yaml"}`, 500)
 			return
 		}
 		envContent2 := fmt.Sprintf("OPENAI_API_KEY=%s\n", req.APIKey)
-		os.WriteFile(filepath.Join(hermesDir, ".env"), []byte(envContent2), 0644)
+		os.WriteFile(filepath.Join(hermesDir, ".env"), []byte(envContent2), 0600)
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
 	case "droid":
 		droidDir := filepath.Join(homeDir, ".factory")
-		if err := os.MkdirAll(droidDir, 0755); err != nil {
+		if err := os.MkdirAll(droidDir, 0700); err != nil {
 			http.Error(w, `{"error":"cannot create config directory"}`, 500)
 			return
 		}
@@ -6010,7 +6359,7 @@ requires_api_key = true
 		}
 		currentDroid["customModels"] = customModels
 		droidData, _ := json.MarshalIndent(currentDroid, "", "  ")
-		if err := os.WriteFile(filepath.Join(droidDir, "settings.json"), droidData, 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(droidDir, "settings.json"), droidData, 0600); err != nil {
 			http.Error(w, `{"error":"failed to write settings.json"}`, 500)
 			return
 		}
@@ -6018,7 +6367,7 @@ requires_api_key = true
 
 	case "openclaw":
 		ocDir := filepath.Join(homeDir, ".openclaw")
-		if err := os.MkdirAll(ocDir, 0755); err != nil {
+		if err := os.MkdirAll(ocDir, 0700); err != nil {
 			http.Error(w, `{"error":"cannot create config directory"}`, 500)
 			return
 		}
@@ -6090,7 +6439,7 @@ requires_api_key = true
 			currentOC["agents"] = agentConfig
 		}
 		ocData, _ := json.MarshalIndent(currentOC, "", "  ")
-		if err := os.WriteFile(filepath.Join(ocDir, "openclaw.json"), ocData, 0644); err != nil {
+		if err := os.WriteFile(filepath.Join(ocDir, "openclaw.json"), ocData, 0600); err != nil {
 			http.Error(w, `{"error":"failed to write openclaw.json"}`, 500)
 			return
 		}
@@ -6160,7 +6509,7 @@ func (h *Handler) apiResetCliToolSettings(w http.ResponseWriter, r *http.Request
 						cfg["customModels"] = kept
 					}
 					out, _ := json.MarshalIndent(cfg, "", "  ")
-					os.WriteFile(droidPath, out, 0644)
+					os.WriteFile(droidPath, out, 0600)
 				}
 			}
 		}
@@ -6172,7 +6521,7 @@ func (h *Handler) apiResetCliToolSettings(w http.ResponseWriter, r *http.Request
 				delete(cfg, "models")
 				delete(cfg, "agents")
 				out, _ := json.MarshalIndent(cfg, "", "  ")
-				os.WriteFile(ocPath, out, 0644)
+				os.WriteFile(ocPath, out, 0600)
 			}
 		}
 	default:
@@ -6351,11 +6700,15 @@ func readCliToolSettingsFromFile(toolID string) *CliToolSettings {
 				envMap[k] = s
 			}
 		}
+		model, _ := cfg["model"].(string)
+		effort, _ := cfg["effortLevel"].(string)
 		return &CliToolSettings{
-			BaseURL: baseUrl,
-			APIKey:  apiKey,
-			Env:     envMap,
-			Config:  raw,
+			BaseURL:         baseUrl,
+			APIKey:          apiKey,
+			Model:           model,
+			ReasoningEffort: effort,
+			Env:             envMap,
+			Config:          raw,
 		}
 
 	case "cline":
@@ -7210,11 +7563,12 @@ func (h *Handler) apiAddAccount(w http.ResponseWriter, r *http.Request) {
 	h.pool.Reload()
 	// if new account is enabled with token, immediately fetch and cache model list
 	if account.Enabled && account.AccessToken != "" {
-		go func(acc config.Account) {
+		acc := account
+		safeGo("fetchAndCacheAccountModels/new", func() {
 			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
 				logger.Warnf("[ModelsCache] Auto-refresh failed for new account %s: %v", acc.Email, err)
 			}
-		}(account)
+		})
 	}
 	json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "id": account.ID})
 }
@@ -7341,11 +7695,12 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	h.pool.Reload()
 	// when account goes from disabled to enabled, auto-fetch and cache model list
 	if !oldEnabled && existing.Enabled && existing.AccessToken != "" {
-		go func(acc config.Account) {
+		acc := *existing
+		safeGo("fetchAndCacheAccountModels/reEnabled", func() {
 			if err := h.fetchAndCacheAccountModels(&acc); err != nil {
 				logger.Warnf("[ModelsCache] Auto-refresh failed for re-enabled account %s: %v", acc.Email, err)
 			}
-		}(*existing)
+		})
 	}
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }
@@ -7506,12 +7861,13 @@ func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 		h.pool.Reload()
 		// Asynchronously fetches model cache for newly enabled accounts
 		for _, acc := range toRefreshModels {
-			go func(a config.Account) {
+			a := acc
+			safeGo("fetchAndCacheAccountModels/batch", func() {
 				a.Enabled = true
 				if err := h.fetchAndCacheAccountModels(&a); err != nil {
 					logger.Warnf("[ModelsCache] Auto-refresh failed for batch-enabled account %s: %v", a.Email, err)
 				}
-			}(acc)
+			})
 		}
 		json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "count": len(req.IDs)})
 
@@ -7538,10 +7894,12 @@ func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 				successCount++
 				continue
 			}
-			// External OpenAI-compatible providers: refresh models + credits
+			// External OpenAI-compatible providers: refresh models, credits and
+			// the gateway's own price list.
 			if isExternalAccount(account) {
 				h.fetchAndCacheAccountModels(account)
 				h.refreshExternalCredits(account)
+				refreshAccountPricing(account)
 				successCount++
 				continue
 			}
@@ -9821,11 +10179,12 @@ func (h *Handler) apiImportExternalProvider(w http.ResponseWriter, r *http.Reque
 	}
 	h.pool.Reload()
 	// Fetch & cache the provider's model list so routing picks it correctly.
-	go func(acc config.Account) {
+	acc := account
+	safeGo("fetchAndCacheAccountModels/externalProvider", func() {
 		if err := h.fetchAndCacheAccountModels(&acc); err != nil {
 			logger.Warnf("[ExternalProvider] Auto model-list fetch failed for %s: %v", acc.Email, err)
 		}
-	}(account)
+	})
 
 	resp := map[string]interface{}{
 		"success": true,
@@ -9902,38 +10261,45 @@ func resolveKskProfile(apiKey, region string) (string, error) {
 		regions = []string{"eu-central-1", "us-east-1"}
 	}
 	for _, r := range regions {
-		endpoint := fmt.Sprintf("https://management.%s.kiro.dev/", r)
-		req, err := http.NewRequest("POST", endpoint, strings.NewReader(`{}`))
-		if err != nil {
-			continue
-		}
-		req.Header.Set("Content-Type", "application/x-amz-json-1.0")
-		req.Header.Set("X-Amz-Target", "AmazonCodeWhispererService.GetProfile")
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-		req.Header.Set("tokentype", "API_KEY")
-		req.Header.Set("Accept", "*/*")
-		client := auth.GetAuthClientForProxy(config.GetProxyURL())
-		resp, err := client.Do(req)
-		if err != nil {
-			continue
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != 200 {
-			continue
-		}
-		var result struct {
-			Profile struct {
-				Arn string `json:"arn"`
-			} `json:"profile"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			continue
-		}
-		if result.Profile.Arn != "" {
-			return result.Profile.Arn, nil
+		if arn := kskProfileInRegion(apiKey, r); arn != "" {
+			return arn, nil
 		}
 	}
 	return "", fmt.Errorf("could not resolve profile for ksk_ key")
+}
+
+// kskProfileInRegion is one GetProfile attempt. It is a separate function so the
+// response body closes when the attempt ends; a deferred Close inside the
+// caller's loop would hold every response open until the whole loop returned.
+func kskProfileInRegion(apiKey, region string) string {
+	endpoint := fmt.Sprintf("https://management.%s.kiro.dev/", region)
+	req, err := http.NewRequest("POST", endpoint, strings.NewReader(`{}`))
+	if err != nil {
+		return ""
+	}
+	req.Header.Set("Content-Type", "application/x-amz-json-1.0")
+	req.Header.Set("X-Amz-Target", "AmazonCodeWhispererService.GetProfile")
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("tokentype", "API_KEY")
+	req.Header.Set("Accept", "*/*")
+	client := auth.GetAuthClientForProxy(config.GetProxyURL())
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return ""
+	}
+	var result struct {
+		Profile struct {
+			Arn string `json:"arn"`
+		} `json:"profile"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return ""
+	}
+	return result.Profile.Arn
 }
 
 func extractEmailFromJWT(token string) string {
@@ -10437,6 +10803,13 @@ func (h *Handler) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A password rotation is usually a response to suspected compromise, so every
+	// outstanding token dies with the old password rather than surviving for the
+	// rest of its 12h TTL. The dashboard re-exchanges immediately afterwards.
+	if strings.TrimSpace(req.Password) != "" {
+		adminSessions.revokeAll()
+	}
+
 	// update overage settings
 	if req.AllowOverUsage != nil {
 		if err := config.UpdateAllowOverUsage(*req.AllowOverUsage); err != nil {
@@ -10495,8 +10868,9 @@ func (h *Handler) apiGenerateMachineId(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiRefreshAccountCredits POST /admin/api/accounts/{id}/credits
-// Refreshes the external provider's credit balance via /api/me. Only meaningful
-// for external_openai accounts; native Kiro accounts return a friendly error.
+// Refreshes the external provider's credit balance via whichever billing dialect
+// it speaks. Only meaningful for external accounts; native Kiro accounts return
+// a friendly error.
 func (h *Handler) apiRefreshAccountCredits(w http.ResponseWriter, r *http.Request, id string) {
 	accounts := config.GetAccounts()
 	var account *config.Account
@@ -10519,7 +10893,7 @@ func (h *Handler) apiRefreshAccountCredits(w http.ResponseWriter, r *http.Reques
 	if err := h.refreshExternalCredits(account); err != nil {
 		if err == ErrExternalCreditsNotSupported {
 			w.WriteHeader(404)
-			json.NewEncoder(w).Encode(map[string]string{"error": "Provider does not expose /api/me — credits API not supported"})
+			json.NewEncoder(w).Encode(map[string]string{"error": "Provider exposes no known credits API"})
 			return
 		}
 		w.WriteHeader(502)
@@ -10705,7 +11079,7 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		OnContextUsage: func(pct float64) {},
 	}
 
-	err := dispatchChat(account, kiroPayload, callback)
+	err := dispatchChat(r.Context(), account, kiroPayload, callback)
 	if err != nil {
 		errMsg := err.Error()
 		// Codex accounts: OpenAI returns 401/403 both for a dead session and
@@ -11188,15 +11562,41 @@ func setNoCacheHeaders(w http.ResponseWriter) {
 	w.Header().Set("Expires", "0")
 }
 
+// setAdminSecurityHeaders restricts what the dashboard may load. script-src and
+// style-src keep 'unsafe-inline' because the templates carry ~90 inline onclick
+// handlers and two inline <script> blocks; the value is still that no *external*
+// origin can supply script, and that exfiltration targets are limited to
+// connect-src. Tightening to nonces requires removing those handlers first.
+func setAdminSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; "+
+			"script-src 'self' 'unsafe-inline'; "+
+			"style-src 'self' 'unsafe-inline'; "+
+			"img-src 'self' data:; "+
+			"font-src 'self'; "+
+			"connect-src 'self' https://raw.githubusercontent.com; "+
+			"frame-ancestors 'none'; "+
+			"base-uri 'none'; "+
+			"form-action 'none'; "+
+			"object-src 'none'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Frame-Options", "DENY")
+}
+
 func (h *Handler) serveAdminPage(w http.ResponseWriter, r *http.Request) {
 	setNoCacheHeaders(w)
+	setAdminSecurityHeaders(w)
 	http.ServeFile(w, r, filepath.Join(h.webDir, "index.html"))
 }
 
+// serveStaticFile serves web assets under webDir. http.Dir refuses any path
+// that escapes its root, so a crafted request cannot join its way out — unlike
+// a hand-rolled TrimPrefix + filepath.Join.
 func (h *Handler) serveStaticFile(w http.ResponseWriter, r *http.Request) {
 	setNoCacheHeaders(w)
-	path := strings.TrimPrefix(r.URL.Path, "/admin/")
-	http.ServeFile(w, r, filepath.Join(h.webDir, path))
+	setAdminSecurityHeaders(w)
+	http.StripPrefix("/admin/", http.FileServer(http.Dir(h.webDir))).ServeHTTP(w, r)
 }
 
 // apiGetThinkingConfig gets the thinking config
@@ -11541,7 +11941,6 @@ func (h *Handler) apiUsageStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	listener := h.usageTracker.SubscribeSSE()
 	defer h.usageTracker.UnsubscribeSSE(listener)
@@ -11595,7 +11994,6 @@ func (h *Handler) apiLogsStream(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	// Resume cursor. Browsers send Last-Event-ID automatically on their own
 	// reconnect; a client that constructs a fresh EventSource has to pass
@@ -11827,13 +12225,26 @@ func (h *Handler) apiGetPricing(w http.ResponseWriter, r *http.Request) {
 		}
 		return true
 	})
+	// Reseller gateways publish their own price list, and that — not the
+	// vendor rate above — is what those accounts are billed against. Report it
+	// per account so the UI can explain a CREDITS figure that does not match
+	// the vendor table.
+	gateways := make(map[string]interface{})
+	for accountID, models := range accountPricingSnapshot() {
+		_, name := resolveAccountMeta(accountID)
+		gateways[accountID] = map[string]interface{}{
+			"account": name,
+			"pricing": models,
+		}
+	}
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"pricing": combined,
+		"pricing":  combined,
+		"gateways": gateways,
 		"sources": map[string]string{
 			"openai":    "https://developers.openai.com/api/docs/pricing",
 			"anthropic": "https://platform.claude.com/docs/en/about-claude/pricing",
 		},
-		"note": "Prices are USD per 1M tokens, sourced from official provider pricing pages. RealCost = (input-cached)*InputPerM + cached*CachedPerM + output*OutputPerM, divided by 1M.",
+		"note": "Prices are USD per 1M tokens, sourced from official provider pricing pages. RealCost = (input-cached)*InputPerM + cached*CachedPerM + output*OutputPerM, divided by 1M. A gateway entry with perCallUsd is billed flat per request instead, and takes precedence over the vendor rate for that account.",
 	})
 }
 

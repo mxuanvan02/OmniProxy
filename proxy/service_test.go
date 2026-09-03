@@ -352,7 +352,7 @@ func TestAdminTestAccountCodexImageUsesNativeImageRoute(t *testing.T) {
 	}
 	h := &Handler{pool: getServiceTestPool(t)}
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/accounts/codex-admin-image/test", strings.NewReader(`{"capability":"image","prompt":"a tree"}`))
-	req.Header.Set("X-Admin-Password", "admin-test-password")
+	req.Header.Set(adminTokenHeader, issueAdminTestToken(t))
 	rec := httptest.NewRecorder()
 	h.handleAdminAPI(rec, req)
 
@@ -510,7 +510,7 @@ func TestAdminRestoreCodexRefreshTokenPersistsOnlyValidatedAccount(t *testing.T)
 			pool := getServiceTestPool(t)
 			h := &Handler{pool: pool}
 			req := httptest.NewRequest(http.MethodPost, "/admin/api/accounts/"+accountID+"/restore-refresh-token", strings.NewReader(`{"refreshToken":"`+backupToken+`"}`))
-			req.Header.Set("X-Admin-Password", "admin-test-password")
+			req.Header.Set(adminTokenHeader, issueAdminTestToken(t))
 			rec := httptest.NewRecorder()
 			h.handleAdminAPI(rec, req)
 
@@ -584,7 +584,7 @@ func TestAdminTestAccountExternalImageUsesOpenAIImagesRoute(t *testing.T) {
 	}
 	h := &Handler{pool: getServiceTestPool(t)}
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/accounts/external-admin-image/test", strings.NewReader(`{"capability":"image","prompt":"a mountain"}`))
-	req.Header.Set("X-Admin-Password", "admin-test-password")
+	req.Header.Set(adminTokenHeader, issueAdminTestToken(t))
 	rec := httptest.NewRecorder()
 	h.handleAdminAPI(rec, req)
 
@@ -614,7 +614,7 @@ func TestAdminTestAccountKiroImageReportsUnsupportedWithoutChat(t *testing.T) {
 	}
 	h := &Handler{pool: getServiceTestPool(t)}
 	req := httptest.NewRequest(http.MethodPost, "/admin/api/accounts/kiro-admin-image/test", strings.NewReader(`{"capability":"image","prompt":"a mountain"}`))
-	req.Header.Set("X-Admin-Password", "admin-test-password")
+	req.Header.Set(adminTokenHeader, issueAdminTestToken(t))
 	rec := httptest.NewRecorder()
 	h.handleAdminAPI(rec, req)
 

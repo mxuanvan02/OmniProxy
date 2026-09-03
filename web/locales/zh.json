@@ -868,6 +868,7 @@
   "external.testFailed": "测试失败",
   "kirocli.uploadHint": "如果 Kiro CLI 在其他机器上，请上传 SQLite 文件",
   "kirocli.uploadLabel": "上传 SQLite 文件",
+  "kirocli.browse": "浏览...",
   "kirocli.fileTooLarge": "文件过大（最大 50 MB）",
   "accounts.extCredits": "外部额度",
   "accounts.refreshCredits": "刷新额度",

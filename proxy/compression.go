@@ -44,6 +44,33 @@ var globalCompression = &CompressionConfig{
 	ponytailEnabled:   false,
 }
 
+// compressionSnapshot is an immutable copy of the compression settings. Readers
+// take one snapshot at request entry and pass it down, so a concurrent
+// apiUpdateCompressionConfig cannot tear a string field mid-request or make one
+// request observe two different settings generations.
+type compressionSnapshot struct {
+	toolOutputEnabled bool
+	headroomEnabled   bool
+	headroomURL       string
+	cavemanEnabled    bool
+	cavemanLevel      string
+	ponytailEnabled   bool
+}
+
+// snapshot returns the current settings under the read lock.
+func (c *CompressionConfig) snapshot() compressionSnapshot {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return compressionSnapshot{
+		toolOutputEnabled: c.toolOutputEnabled,
+		headroomEnabled:   c.headroomEnabled,
+		headroomURL:       c.headroomURL,
+		cavemanEnabled:    c.cavemanEnabled,
+		cavemanLevel:      c.cavemanLevel,
+		ponytailEnabled:   c.ponytailEnabled,
+	}
+}
+
 // InitCompressionConfig loads compression settings from config.
 func InitCompressionConfig() {
 	globalCompression.mu.Lock()
@@ -75,7 +102,7 @@ var (
 //
 // Returns the compressed content and whether compression was applied.
 func compressToolOutput(content string) (string, bool) {
-	if !globalCompression.toolOutputEnabled {
+	if !globalCompression.snapshot().toolOutputEnabled {
 		return content, false
 	}
 	if len(content) < 500 {
@@ -292,11 +319,11 @@ var cavemanPromptLight = `
 `
 
 // cavemanSuffix returns the system prompt suffix for Caveman mode.
-func cavemanSuffix() string {
-	if !globalCompression.cavemanEnabled {
+func cavemanSuffix(snap compressionSnapshot) string {
+	if !snap.cavemanEnabled {
 		return ""
 	}
-	switch globalCompression.cavemanLevel {
+	switch snap.cavemanLevel {
 	case "light":
 		return cavemanPromptLight
 	case "full":
@@ -315,8 +342,8 @@ var ponytailPrompt = `
 - Smallest correct change. Touch only what needs to change.
 `
 
-func ponytailSuffix() string {
-	if !globalCompression.ponytailEnabled {
+func ponytailSuffix(snap compressionSnapshot) string {
+	if !snap.ponytailEnabled {
 		return ""
 	}
 	return ponytailPrompt
@@ -324,12 +351,13 @@ func ponytailSuffix() string {
 
 // ApplySystemPromptSuffix appends Caveman + Ponytail suffixes to a system prompt.
 func ApplySystemPromptSuffix(systemPrompt string) string {
-	suffix := cavemanSuffix() + ponytailSuffix()
+	snap := globalCompression.snapshot()
+	suffix := cavemanSuffix(snap) + ponytailSuffix(snap)
 	if suffix == "" {
 		return systemPrompt
 	}
 	globalCompression.stats.mu.Lock()
-	if globalCompression.cavemanEnabled {
+	if snap.cavemanEnabled {
 		globalCompression.stats.cavemanReqs++
 	}
 	globalCompression.stats.mu.Unlock()
@@ -341,13 +369,14 @@ func ApplySystemPromptSuffix(systemPrompt string) string {
 // compressViaHeadroom sends the request body to Headroom's /v1/compress
 // endpoint and returns the compressed body. Returns original on any error.
 func compressViaHeadroom(body []byte) ([]byte, bool) {
-	if !globalCompression.headroomEnabled || globalCompression.headroomURL == "" {
+	snap := globalCompression.snapshot()
+	if !snap.headroomEnabled || snap.headroomURL == "" {
 		return body, false
 	}
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Post(
-		globalCompression.headroomURL+"/v1/compress",
+		snap.headroomURL+"/v1/compress",
 		"application/json",
 		strings.NewReader(string(body)),
 	)
@@ -361,9 +390,9 @@ func compressViaHeadroom(body []byte) ([]byte, bool) {
 	}
 
 	var result struct {
-		Messages []json.RawMessage `json:"messages"`
-		TokensBefore int `json:"tokens_before"`
-		TokensAfter  int `json:"tokens_after"`
+		Messages     []json.RawMessage `json:"messages"`
+		TokensBefore int               `json:"tokens_before"`
+		TokensAfter  int               `json:"tokens_after"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return body, false
@@ -404,11 +433,11 @@ func (h *Handler) apiGetCompressionStats(w http.ResponseWriter, r *http.Request)
 		"cavemanLevel":      globalCompression.cavemanLevel,
 		"ponytailEnabled":   globalCompression.ponytailEnabled,
 		"stats": map[string]int{
-			"toolCompressed":  globalCompression.stats.toolCompressed,
-			"toolTokensIn":    globalCompression.stats.toolTokensIn,
-			"toolTokensOut":   globalCompression.stats.toolTokensOut,
-			"headroomReqs":    globalCompression.stats.headroomReqs,
-			"cavemanReqs":     globalCompression.stats.cavemanReqs,
+			"toolCompressed": globalCompression.stats.toolCompressed,
+			"toolTokensIn":   globalCompression.stats.toolTokensIn,
+			"toolTokensOut":  globalCompression.stats.toolTokensOut,
+			"headroomReqs":   globalCompression.stats.headroomReqs,
+			"cavemanReqs":    globalCompression.stats.cavemanReqs,
 		},
 	}
 	globalCompression.stats.mu.Unlock()
@@ -432,32 +461,50 @@ func (h *Handler) apiUpdateCompressionConfig(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Apply in memory first, release the lock, then persist. Each config setter
+	// holds cfgLock across a full marshal + fsync of config.json, and readers
+	// take mu.RLock via snapshot() — Go's RWMutex blocks new readers once a
+	// writer is waiting, so persisting under mu would stall every in-flight
+	// request for six fsyncs.
 	globalCompression.mu.Lock()
 	if req.ToolOutputEnabled != nil {
 		globalCompression.toolOutputEnabled = *req.ToolOutputEnabled
-		config.SetBoolSetting("compressToolOutput", *req.ToolOutputEnabled)
 	}
 	if req.HeadroomEnabled != nil {
 		globalCompression.headroomEnabled = *req.HeadroomEnabled
-		config.SetBoolSetting("headroomEnabled", *req.HeadroomEnabled)
 	}
 	if req.HeadroomURL != nil {
 		globalCompression.headroomURL = *req.HeadroomURL
-		config.SetStringSetting("headroomURL", *req.HeadroomURL)
 	}
 	if req.CavemanEnabled != nil {
 		globalCompression.cavemanEnabled = *req.CavemanEnabled
-		config.SetBoolSetting("cavemanEnabled", *req.CavemanEnabled)
 	}
 	if req.CavemanLevel != nil {
 		globalCompression.cavemanLevel = *req.CavemanLevel
-		config.SetStringSetting("cavemanLevel", *req.CavemanLevel)
 	}
 	if req.PonytailEnabled != nil {
 		globalCompression.ponytailEnabled = *req.PonytailEnabled
-		config.SetBoolSetting("ponytailEnabled", *req.PonytailEnabled)
 	}
 	globalCompression.mu.Unlock()
+
+	if req.ToolOutputEnabled != nil {
+		config.SetBoolSetting("compressToolOutput", *req.ToolOutputEnabled)
+	}
+	if req.HeadroomEnabled != nil {
+		config.SetBoolSetting("headroomEnabled", *req.HeadroomEnabled)
+	}
+	if req.HeadroomURL != nil {
+		config.SetStringSetting("headroomURL", *req.HeadroomURL)
+	}
+	if req.CavemanEnabled != nil {
+		config.SetBoolSetting("cavemanEnabled", *req.CavemanEnabled)
+	}
+	if req.CavemanLevel != nil {
+		config.SetStringSetting("cavemanLevel", *req.CavemanLevel)
+	}
+	if req.PonytailEnabled != nil {
+		config.SetBoolSetting("ponytailEnabled", *req.PonytailEnabled)
+	}
 
 	json.NewEncoder(w).Encode(map[string]bool{"success": true})
 }

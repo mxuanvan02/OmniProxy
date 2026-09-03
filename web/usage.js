@@ -212,7 +212,7 @@ function connectUsageSSE() {
   }
   const generation = usageState.sseGeneration;
   try {
-    const es = new EventSource('/admin/api/usage/stream?pwd=' + encodeURIComponent(password));
+    const es = new EventSource('/admin/api/usage/stream?token=' + encodeURIComponent(adminToken));
     usageState.eventSource = es;
 
     es.onopen = function () {

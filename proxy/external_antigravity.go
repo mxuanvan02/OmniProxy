@@ -20,6 +20,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1002,7 +1003,7 @@ func parseAntigravityJSON(body io.Reader, payload *KiroPayload, callback *KiroSt
 // replays the response through callback. It mirrors CallKiroAPI's contract: nil
 // on success, error on failure, with 401/403 surfaced so the caller can refresh
 // or disable the account.
-func CallExternalAntigravity(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+func CallExternalAntigravity(ctx context.Context, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
 	if account == nil {
 		return fmt.Errorf("antigravity call: account is nil")
 	}
@@ -1024,7 +1025,7 @@ func CallExternalAntigravity(account *config.Account, payload *KiroPayload, call
 	}
 
 	endpoint := antigravityEndpoint(account) + antigravityStreamAction
-	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(reqBody))
 	if err != nil {
 		return fmt.Errorf("antigravity call new request: %w", err)
 	}

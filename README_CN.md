@@ -89,7 +89,7 @@ go build -o omniproxy .
 docker compose up -d
 ```
 
-> 默认配置不强制要求 API Key。在将端口暴露到回环地址之外前，请设置 `requireApiKey: true` 并修改 `password`。
+> 全新安装会绑定 `127.0.0.1`，并在首次启动时生成随机管理员密码，仅向 stderr 打印一次 —— 请及时保存。客户端请求默认不校验 API Key：请设置 `requireApiKey: true`；只有确实需要时才把 `host` 改为 `0.0.0.0`（管理 API 会暴露所有已保存的上游令牌）。
 
 ---
 

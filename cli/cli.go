@@ -46,7 +46,16 @@ func RunDaemon(configPath string) {
 	logger.SetOutput(f)
 
 	if envPassword := os.Getenv("ADMIN_PASSWORD"); envPassword != "" {
-		config.SetPassword(envPassword)
+		if err := config.SetPassword(envPassword); err != nil {
+			logger.Errorf("ADMIN_PASSWORD rejected: %v", err)
+			os.Exit(1)
+		}
+	}
+
+	// Written straight to the daemon log file, not through logger: the ring
+	// buffer behind /admin/api/logs is readable by any authenticated caller.
+	if generated := config.TakeGeneratedPassword(); generated != "" {
+		fmt.Fprintf(f, "Generated admin password: %s — save it now, it is not shown again.\n", generated)
 	}
 
 	pool.GetPool()
@@ -80,6 +89,10 @@ func RunDaemon(configPath string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	srv.Shutdown(ctx)
+	handler.Shutdown()
+	if err := config.FlushPendingSave(); err != nil {
+		logger.Errorf("flush config on shutdown: %v", err)
+	}
 }
 
 // IsTerminal reports whether stdout is a character device (terminal).

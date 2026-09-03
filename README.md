@@ -89,7 +89,7 @@ The server listens on `http://127.0.0.1:8080` (or the port in `data/config.json`
 docker compose up -d
 ```
 
-> The default configuration binds without an API key requirement. Set `requireApiKey: true` and change `password` before exposing the port beyond loopback.
+> A fresh install binds `127.0.0.1` and generates a random admin password, printed once to stderr on first start — save it. Client requests are not key-checked by default: set `requireApiKey: true`, and set `host` to `0.0.0.0` only deliberately (the admin API exposes every stored upstream token).
 
 ---
 

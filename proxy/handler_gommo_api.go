@@ -99,11 +99,12 @@ func (h *Handler) apiImportGommoProvider(w http.ResponseWriter, r *http.Request)
 
 	// The catalog call is three round-trips; run it after responding so the UI
 	// is not held open by a slow upstream.
-	go func(acc config.Account) {
+	acc := account
+	safeGo("fetchAndCacheAccountModels/gommo", func() {
 		if err := h.fetchAndCacheAccountModels(&acc); err != nil {
 			logger.Warnf("[Gommo] model catalog fetch failed for %s: %v", acc.Email, err)
 		}
-	}(account)
+	})
 
 	response := map[string]interface{}{
 		"success": true,

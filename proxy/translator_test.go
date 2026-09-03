@@ -160,45 +160,49 @@ Use the available tools when needed.`
 		t.Fatal("expected system priming message")
 	}
 	got := payload.ConversationState.History[0].UserInputMessage.Content
-	if !strings.Contains(got, claudeCodeToolExecutionGuidance) {
+	if !strings.Contains(got, toolExecutionGuidance) {
 		t.Fatalf("Claude Code tool session missing execution guidance: %q", got)
 	}
-	if strings.Count(got, claudeCodeToolExecutionGuidance) != 1 {
+	if strings.Count(got, toolExecutionGuidance) != 1 {
 		t.Fatalf("execution guidance should appear exactly once: %q", got)
 	}
 }
 
-func TestToolExecutionGuidanceIsScopedToClaudeCodeToolSessions(t *testing.T) {
-	claudeCodeSystem := `You are Claude Code, Anthropic's official CLI for Claude.
-# Doing tasks
-# Using your tools`
+// Claude Desktop (and any other tool-enabled client) sends a system prompt that
+// does not match the Claude Code fingerprint. It needs the same guidance, or the
+// upstream ends turns with narration like "running now" instead of a tool call.
+func TestToolExecutionGuidanceAppliesToAnyToolEnabledClient(t *testing.T) {
 	tool := ClaudeTool{Name: "Bash", InputSchema: map[string]interface{}{"type": "object"}}
 
-	tests := []struct {
-		name   string
-		system string
-		tools  []ClaudeTool
-	}{
-		{name: "Claude Code without tools", system: claudeCodeSystem},
-		{name: "ordinary tool client", system: "You are a concise coding assistant.", tools: []ClaudeTool{tool}},
-	}
+	payload := ClaudeToKiro(&ClaudeRequest{
+		Model:    "claude-opus-5",
+		System:   "You are Claude, a helpful assistant with access to tools.",
+		Messages: []ClaudeMessage{{Role: "user", Content: "check the repo"}},
+		Tools:    []ClaudeTool{tool},
+	}, false)
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			payload := ClaudeToKiro(&ClaudeRequest{
-				Model:    "claude-opus-5",
-				System:   tc.system,
-				Messages: []ClaudeMessage{{Role: "user", Content: "help"}},
-				Tools:    tc.tools,
-			}, false)
-			if len(payload.ConversationState.History) == 0 || payload.ConversationState.History[0].UserInputMessage == nil {
-				t.Fatal("expected system priming message")
-			}
-			got := payload.ConversationState.History[0].UserInputMessage.Content
-			if strings.Contains(got, claudeCodeToolExecutionGuidance) {
-				t.Fatalf("unexpected execution guidance: %q", got)
-			}
-		})
+	if len(payload.ConversationState.History) == 0 || payload.ConversationState.History[0].UserInputMessage == nil {
+		t.Fatal("expected system priming message")
+	}
+	got := payload.ConversationState.History[0].UserInputMessage.Content
+	if !strings.Contains(got, toolExecutionGuidance) {
+		t.Fatalf("tool-enabled client missing execution guidance: %q", got)
+	}
+}
+
+func TestToolExecutionGuidanceIsSkippedWithoutTools(t *testing.T) {
+	payload := ClaudeToKiro(&ClaudeRequest{
+		Model:    "claude-opus-5",
+		System:   "You are a concise coding assistant.",
+		Messages: []ClaudeMessage{{Role: "user", Content: "help"}},
+	}, false)
+
+	if len(payload.ConversationState.History) == 0 || payload.ConversationState.History[0].UserInputMessage == nil {
+		t.Fatal("expected system priming message")
+	}
+	got := payload.ConversationState.History[0].UserInputMessage.Content
+	if strings.Contains(got, toolExecutionGuidance) {
+		t.Fatalf("unexpected execution guidance: %q", got)
 	}
 }
 

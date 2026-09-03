@@ -82,10 +82,7 @@ function quotaStyle(remaining) {
   return { text: '#dc2626', bg: '#ef4444', bgLight: 'rgba(239,68,68,0.18)', emoji: '🔴' };
 }
 
-function escapeHtml(s) {
-  if (!s) return '';
-  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-}
+// escapeHtml lives in escape.js (loaded first in index.html).
 
 // ─── API ─────────────────────────────────────────────────
 async function loadQuotaData() {

@@ -100,13 +100,16 @@ func (r *idleTimeoutReader) Read(p []byte) (int, error) {
 	// the timer. The goroutine is bounded: it returns as soon as body.Read
 	// returns (which it will, either with data or with the error from
 	// Close below when the reader is shut down).
-	go func() {
+	// A panic inside body.Read leaves nobody to send on readCh, so the caller
+	// waits out the timer and fails over with its sentinel error instead of the
+	// process dying mid-stream.
+	safeGo("stream_idle.read", func() {
 		n, err := r.body.Read(p)
 		select {
 		case r.readCh <- readResult{n: n, err: err}:
 		case <-r.closeCh:
 		}
-	}()
+	})
 
 	select {
 	case res := <-r.readCh:

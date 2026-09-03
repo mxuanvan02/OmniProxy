@@ -273,6 +273,15 @@ let collapsedGroups = loadCollapsedGroups();
     return key ? t(key) : String(capability || '');
   }
 
+  // isExternalAuthMethod mirrors the backend's isExternalAccount: AgentRouter
+  // accounts go through the same external adapter, so they get the same credit
+  // and capability-probe surfaces. Matching on 'external_openai' alone hid the
+  // credit block for every AgentRouter account.
+  function isExternalAuthMethod(method) {
+    const m = String(method || '').toLowerCase().trim();
+    return m === 'external_openai' || m === 'agentrouter' || m === 'external_agentrouter';
+  }
+
   // accountCapabilities merges three sources: explicitly configured
   // capabilities, the legacy providerKind field, and capabilities discovered
   // from the provider's own /v1/models catalog. Configured values win on order;
@@ -577,7 +586,7 @@ let collapsedGroups = loadCollapsedGroups();
       const usageClass = usagePct > 90 ? 'critical' : usagePct > 70 ? 'high' : '';
       const trialPct = (a.trialUsagePercent || 0) * 100;
       const trialClass = trialPct > 90 ? 'critical' : trialPct > 70 ? 'high' : '';
-      const isExternal = (a.authMethod === 'external_openai');
+      const isExternal = isExternalAuthMethod(a.authMethod);
       const isCodex = (a.authMethod === 'codex');
       const isSearch = hasConfiguredCapability(a, 'search');
       const isImage = hasConfiguredCapability(a, 'image');
@@ -1177,7 +1186,7 @@ let collapsedGroups = loadCollapsedGroups();
     if (!a) return;
     const idAttr = escapeAttr(id);
     const isCodex = String(a.authMethod || '').toLowerCase() === 'codex';
-    const isExternal = String(a.authMethod || '').toLowerCase() === 'external_openai';
+    const isExternal = isExternalAuthMethod(a.authMethod);
     const isSearch = hasConfiguredCapability(a, 'search');
     const isImage = hasConfiguredCapability(a, 'image');
     const isService = isSearch || isImage;

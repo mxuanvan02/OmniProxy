@@ -1,11 +1,26 @@
 package proxy
 
 import (
+	"context"
+	"errors"
 	"omniproxy/config"
 	"omniproxy/logger"
 	"strings"
 	"time"
 )
+
+// clientGone reports whether err is the client hanging up rather than an
+// upstream fault. Every chat request now derives from r.Context(), so a
+// disconnect surfaces as "context canceled" from every account in turn — and
+// none of the classifiers recognise it, so it would be recorded as a real
+// failure against each one and lock the whole pool. Callers must break out of
+// the failover loop on this instead of calling handleAccountFailure.
+func clientGone(ctx context.Context, err error) bool {
+	if ctx != nil && ctx.Err() != nil {
+		return true
+	}
+	return errors.Is(err, context.Canceled)
+}
 
 func isQuotaErrorMessage(msg string) bool {
 	msg = strings.ToLower(msg)

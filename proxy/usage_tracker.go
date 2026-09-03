@@ -6,6 +6,7 @@ import (
 	"omniproxy/logger"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -27,6 +28,22 @@ const (
 	statusSuccess = "success"
 	statusError   = "error"
 )
+
+// safeGo runs fn in a new goroutine with a recover guard. net/http recovers
+// panics only in the goroutines it owns, so a nil-deref in any goroutine we
+// spawn ourselves takes down the whole process and drops every in-flight
+// stream. The panic is logged with its name and stack rather than swallowed —
+// an invisible panic is harder to diagnose than a crash.
+func safeGo(name string, fn func()) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Errorf("[Panic] goroutine %s: %v\n%s", name, r, debug.Stack())
+			}
+		}()
+		fn()
+	}()
+}
 
 // RequestRecord is a single usage event captured during a proxy request.
 type RequestRecord struct {
@@ -157,6 +174,8 @@ type UsageTracker struct {
 	historyPath string
 	dailyPath   string
 	eventSeq    uint64 // monotonic process-local sequence for live request events
+	stop        chan struct{}
+	stopOnce    sync.Once
 }
 
 var globalTracker *UsageTracker
@@ -172,10 +191,11 @@ func GetUsageTracker() *UsageTracker {
 			dailyData:   make(map[string]*PeriodSummary),
 			historyPath: filepath.Join(dataDir, "usage_history.json"),
 			dailyPath:   filepath.Join(dataDir, "usage_daily.json"),
+			stop:        make(chan struct{}),
 		}
 		globalTracker.loadFromDisk()
 		// Periodically flush to disk
-		go globalTracker.periodicFlush()
+		safeGo("usage.periodicFlush", globalTracker.periodicFlush)
 	})
 	return globalTracker
 }
@@ -196,7 +216,7 @@ func (t *UsageTracker) loadFromDisk() {
 					r.EffectiveTokens = EffectiveTokens(r.InputTokens, cached, r.OutputTokens)
 				}
 				if r.RealCost == 0 {
-					bd := ComputeCostBreakdown(r.Model, r.InputTokens, cached, r.OutputTokens)
+					bd := ComputeCostBreakdownForAccount(r.AccountID, r.Model, r.InputTokens, cached, r.OutputTokens)
 					r.RealCost = bd.Total
 					r.InputCost = bd.InputCost
 					r.CachedCost = bd.CachedCost
@@ -251,6 +271,9 @@ func backfillDaySummary(day *PeriodSummary) {
 		if s.EffectiveTokens == 0 {
 			s.EffectiveTokens = EffectiveTokens(s.PromptTokens, cached, s.CompletionTokens)
 		}
+		// Vendor rate, not the account-aware one: a ByModel bucket aggregates
+		// every account that served the model, so there is no single gateway
+		// price list to charge this legacy row against.
 		bd := ComputeCostBreakdown(model, s.PromptTokens, cached, s.CompletionTokens)
 		if s.RealCost == 0 {
 			s.RealCost = bd.Total
@@ -275,21 +298,68 @@ func backfillDaySummary(day *PeriodSummary) {
 func (t *UsageTracker) periodicFlush() {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		t.mu.RLock()
-		dirty := t.dirty
-		t.mu.RUnlock()
-		if dirty {
-			t.flushToDisk()
+	for {
+		select {
+		case <-t.stop:
+			return
+		case <-ticker.C:
+			t.mu.RLock()
+			dirty := t.dirty
+			t.mu.RUnlock()
+			if dirty {
+				t.flushToDisk()
+			}
 		}
 	}
 }
 
-func (t *UsageTracker) flushToDisk() {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
+// Stop ends the periodic flush loop and writes one final snapshot, so the last
+// (up to 30 s) window of usage is not lost on shutdown. Safe to call more than
+// once and from any goroutine.
+func (t *UsageTracker) Stop() {
+	if t == nil {
+		return
+	}
+	t.stopOnce.Do(func() {
+		if t.stop != nil {
+			close(t.stop)
+		}
+		t.flushToDisk()
+	})
+}
 
-	// Flush ring buffer
+// writeJSONAtomic writes data to a unique temp file in the same directory and
+// renames it over path, so a crash mid-write cannot leave a truncated JSON file
+// that fails to parse on the next start. The name must be unique, not
+// path+".tmp": Stop() can flush concurrently with periodicFlush's ticker, and
+// two writers sharing one temp path interleave into a spliced file that
+// loadFromDisk then silently discards.
+func writeJSONAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0o600); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return atomicRename(tmpName, path)
+}
+
+func (t *UsageTracker) flushToDisk() {
+	// Clear dirty inside the same critical section as the snapshot: any record
+	// written while we are on disk sets it again, so nothing is lost. On failure
+	// it is restored below, so the next tick retries instead of dropping data.
+	t.mu.Lock()
 	records := make([]RequestRecord, 0, t.ringCap)
 	if t.ringFull {
 		for i := t.ringIdx; i < t.ringCap; i++ {
@@ -299,14 +369,23 @@ func (t *UsageTracker) flushToDisk() {
 	for i := 0; i < t.ringIdx; i++ {
 		records = append(records, t.ring[i])
 	}
-
-	data, _ := json.MarshalIndent(records, "", "  ")
-	os.WriteFile(t.historyPath, data, 0644)
-
-	dailyData, _ := json.MarshalIndent(t.dailyData, "", "  ")
-	os.WriteFile(t.dailyPath, dailyData, 0644)
-
+	data, err := json.MarshalIndent(records, "", "  ")
+	dailyData, dailyErr := json.MarshalIndent(t.dailyData, "", "  ")
 	t.dirty = false
+	t.mu.Unlock()
+
+	if err == nil {
+		err = writeJSONAtomic(t.historyPath, data)
+	}
+	if err == nil && dailyErr == nil {
+		dailyErr = writeJSONAtomic(t.dailyPath, dailyData)
+	}
+	if err != nil || dailyErr != nil {
+		logger.Errorf("[Usage] flush failed (history=%v daily=%v); will retry", err, dailyErr)
+		t.mu.Lock()
+		t.dirty = true
+		t.mu.Unlock()
+	}
 }
 
 func (t *UsageTracker) pushToRing(r RequestRecord) {
@@ -335,7 +414,7 @@ func (t *UsageTracker) Append(r RequestRecord) {
 		r.EffectiveTokens = EffectiveTokens(r.InputTokens, cached, r.OutputTokens)
 	}
 	if r.RealCost == 0 {
-		bd := ComputeCostBreakdown(r.Model, r.InputTokens, cached, r.OutputTokens)
+		bd := ComputeCostBreakdownForAccount(r.AccountID, r.Model, r.InputTokens, cached, r.OutputTokens)
 		r.RealCost = bd.Total
 		r.InputCost = bd.InputCost
 		r.CachedCost = bd.CachedCost
@@ -412,18 +491,18 @@ func (t *UsageTracker) Append(r RequestRecord) {
 	t.eventSeq++
 	eventID := t.eventSeq
 	completed := r
-	go func(active []ActiveRequest, recent []RequestRecord, request RequestRecord, id uint64) {
+	safeGo("usage.broadcastCompleted", func() {
 		payload := map[string]interface{}{
 			"type":             "request.completed",
-			"eventId":          id,
-			"requestCompleted": request,
-			"activeRequests":   active,
-			"recentRequests":   recent,
+			"eventId":          eventID,
+			"requestCompleted": completed,
+			"activeRequests":   activeSnapshot,
+			"recentRequests":   recentSnapshot,
 		}
 		if data, err := json.Marshal(payload); err == nil {
 			broadcastSSEUnsafe(data)
 		}
-	}(activeSnapshot, recentSnapshot, completed, eventID)
+	})
 }
 
 // TrackActive marks a request as in-flight. endpoint is the client-facing API
@@ -538,12 +617,15 @@ func (t *UsageTracker) TokensForAccountSince(accountID string, since time.Time) 
 	return tokens
 }
 
-// GetChartData produces time-bucketed chart data.
+// GetChartData produces time-bucketed chart data. Buckets are UTC because
+// dailyData is keyed by UTC date and record timestamps are stored UTC — reading
+// them in local time made the "today" column empty between local and UTC
+// midnight at positive offsets while /usage?period=today showed the UTC total.
 func (t *UsageTracker) GetChartData(period string) []ChartDataPoint {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
-	now := time.Now()
+	now := time.Now().UTC()
 	switch period {
 	case "today":
 		return t.bucketByHour(now, true)
@@ -560,10 +642,15 @@ func (t *UsageTracker) GetChartData(period string) []ChartDataPoint {
 
 func (t *UsageTracker) bucketByHour(now time.Time, today bool) []ChartDataPoint {
 	buckets := 24
-	if today {
-		now = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	}
+	now = now.UTC()
+	// "today" runs from the current UTC midnight forward; "24h" is the rolling
+	// window ending now. Anchoring "today" at midnight minus 24h (as this did)
+	// labelled the buckets 00:00-23:00 but filled them from the previous UTC day,
+	// so the chart disagreed with the UTC-keyed period totals.
 	startTime := now.Add(-time.Duration(buckets) * time.Hour)
+	if today {
+		startTime = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	}
 	points := make([]ChartDataPoint, buckets)
 	for i := 0; i < buckets; i++ {
 		ts := startTime.Add(time.Duration(i) * time.Hour)
@@ -589,6 +676,7 @@ func (t *UsageTracker) bucketByHour(now time.Time, today bool) []ChartDataPoint 
 }
 
 func (t *UsageTracker) bucketByDay(now time.Time, days int) []ChartDataPoint {
+	now = now.UTC()
 	points := make([]ChartDataPoint, days)
 	for i := 0; i < days; i++ {
 		d := now.Add(-time.Duration(days-1-i) * 24 * time.Hour)
@@ -835,13 +923,15 @@ func (t *UsageTracker) UnsubscribeSSE(l *sseListener) {
 	}
 }
 
+// getPeriodCutoff returns the oldest record timestamp to include. UTC, to match
+// the UTC record timestamps and the UTC dailyData keys used by dailyCutoffDate.
 func getPeriodCutoff(period string) time.Time {
-	now := time.Now()
+	now := time.Now().UTC()
 	switch period {
 	case "all":
 		return time.Time{} // zero time includes all records
 	case "today":
-		return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+		return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	case "24h":
 		return now.Add(-24 * time.Hour)
 	case "7d":

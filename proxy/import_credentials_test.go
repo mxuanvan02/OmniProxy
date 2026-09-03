@@ -38,6 +38,7 @@ func TestApiImportCredentialsRejectsWhenRefreshFails(t *testing.T) {
 		t.Fatalf("config.Init: %v", err)
 	}
 	defer installCleanAuthClient(t)()
+	auth.ResetRotationMapForTest()
 
 	// Stand up a fake OIDC endpoint that always 400s, simulating an unreachable
 	// or invalid refresh.
@@ -86,6 +87,7 @@ func TestApiImportCredentialsUsesUpstreamExpiresAt(t *testing.T) {
 		t.Fatalf("config.Init: %v", err)
 	}
 	defer installCleanAuthClient(t)()
+	auth.ResetRotationMapForTest()
 
 	const upstreamExpiresIn = 3600
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

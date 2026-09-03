@@ -22,6 +22,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	cryptoRand "crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -200,7 +201,10 @@ func markCodexAuthFailure(account *config.Account, err error) {
 	account.BanReason = truncateErrBody([]byte(err.Error()))
 	account.BanTime = time.Now().Unix()
 	account.Enabled = false
-	if persistErr := config.UpdateAccountPreservingCredentials(account.ID, *account); persistErr != nil {
+	// Field-scoped: a wholesale write would restore every counter from the
+	// snapshot this account was read into, discarding whatever live requests
+	// recorded via UpdateAccountStats while the refresh pass was running.
+	if persistErr := config.UpdateAccountBanStatus(account.ID, account.BanStatus, account.BanReason, account.BanTime, account.Enabled); persistErr != nil {
 		logger.Errorf("[Codex] Failed to persist %s status for %s: %v", status, account.Email, persistErr)
 		return
 	}
@@ -284,7 +288,7 @@ func codexSessionKey(conversationID string) string {
 // Token refresh + chatgpt-account-id re-extraction is handled here (not in
 // ensureValidToken) because the account_id is JWT-bound and may rotate
 // when OpenAI re-issues the access token.
-func CallExternalCodex(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+func CallExternalCodex(ctx context.Context, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
 	if account == nil {
 		return fmt.Errorf("codex call: account is nil")
 	}
@@ -335,7 +339,7 @@ func CallExternalCodex(account *config.Account, payload *KiroPayload, callback *
 	}
 
 	endpoint := codexBaseURL(account) + "/backend-api/codex/responses"
-	req, err := http.NewRequest("POST", endpoint, bytes.NewReader(reqBody))
+	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(reqBody))
 	if err != nil {
 		return fmt.Errorf("codex call new request: %w", err)
 	}
@@ -1235,11 +1239,11 @@ func (c *coalescer) flush() {
 // a ChatGPT-subscription Codex account, otherwise falls through to the
 // existing external/Kiro dispatch. Called from the same dispatchChat site
 // the handlers already use.
-func dispatchCodex(account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
+func dispatchCodex(ctx context.Context, account *config.Account, payload *KiroPayload, callback *KiroStreamCallback) error {
 	if isCodexAccount(account) {
-		return CallExternalCodex(account, payload, callback)
+		return CallExternalCodex(ctx, account, payload, callback)
 	}
-	return dispatchChat(account, payload, callback)
+	return dispatchChat(ctx, account, payload, callback)
 }
 
 // ==================== Admin: import / refresh ====================

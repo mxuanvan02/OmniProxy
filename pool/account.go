@@ -261,13 +261,15 @@ func accountSupportsCapability(account config.Account, capability string) bool {
 // image credentials to the normal model pool. provider is optional; when it is
 // empty, all accounts with the requested capability participate in failover.
 func (p *AccountPool) GetNextForCapability(capability, provider string, excluded map[string]bool) *config.Account {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	// Read config before taking p.mu: holding the pool lock across a cfgLock
+	// acquisition serialises all capability routing against chat routing.
+	allowOverUsage := config.GetAllowOverUsage()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	if len(p.serviceAccounts) == 0 {
 		return nil
 	}
 	now := time.Now()
-	allowOverUsage := config.GetAllowOverUsage()
 	for i := 0; i < len(p.serviceAccounts); i++ {
 		idx := int(atomic.AddUint64(&p.serviceIndex, 1) % uint64(len(p.serviceAccounts)))
 		account := &p.serviceAccounts[idx]
@@ -288,7 +290,8 @@ func (p *AccountPool) GetNextForCapability(capability, provider string, excluded
 				continue
 			}
 		}
-		return account
+		selected := *account
+		return &selected
 	}
 	return nil
 }
@@ -297,13 +300,16 @@ func (p *AccountPool) GetNextForCapability(capability, provider string, excluded
 // requests such as image generation. Codex accounts remain in the normal chat
 // pool, so they must not be selected through serviceAccounts.
 func (p *AccountPool) GetNextCodex(excluded map[string]bool) *config.Account {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	// Read config before taking p.mu, for the same reason as
+	// GetNextForCapability: selection is read-only and must not serialise
+	// against chat routing through cfgLock.
+	allowOverUsage := config.GetAllowOverUsage()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	if len(p.accounts) == 0 {
 		return nil
 	}
 	now := time.Now()
-	allowOverUsage := config.GetAllowOverUsage()
 	seen := make(map[string]bool)
 	for i := 0; i < len(p.accounts); i++ {
 		idx := int(atomic.AddUint64(&p.currentIndex, 1) % uint64(len(p.accounts)))
@@ -324,7 +330,11 @@ func (p *AccountPool) GetNextCodex(excluded map[string]bool) *config.Account {
 				continue
 			}
 		}
-		return account
+		// Return a copy: callers mutate token fields on the account they get
+		// back, and a pointer into p.accounts would race UpdateToken/other
+		// selectors and be orphaned by Reload replacing the slice.
+		selected := *account
+		return &selected
 	}
 	return nil
 }
@@ -373,7 +383,8 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 			continue
 		}
 
-		return acc
+		selected := *acc
+		return &selected
 	}
 
 	// no available accounts, return the one with shortest cooldown (exclude exhausted unless overage allowed)
@@ -393,10 +404,15 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 				earliest = cooldown
 			}
 		} else {
-			return acc
+			selected := *acc
+			return &selected
 		}
 	}
-	return best
+	if best == nil {
+		return nil
+	}
+	selected := *best
+	return &selected
 }
 
 // SetModelList caches the model set for an account (called by handler after refresh).
@@ -649,7 +665,8 @@ func (p *AccountPool) GetNextForModelExcluding(model string, excluded map[string
 			allCandidates = append(allCandidates, *acc)
 			continue
 		}
-		return acc
+		selected := *acc
+		return &selected
 	}
 
 	// Strategy mode: pick the best-scoring candidate from Phase 2.
@@ -713,7 +730,8 @@ func (p *AccountPool) getAccountIfAvailable(accountID, model string) *config.Acc
 		if isQuotaBlocked(*acc, allowOverUsage) {
 			return nil
 		}
-		return acc
+		selected := *acc
+		return &selected
 	}
 	return nil
 }
@@ -952,12 +970,14 @@ func (p *AccountPool) GetByID(id string) *config.Account {
 	defer p.mu.RUnlock()
 	for i := range p.accounts {
 		if p.accounts[i].ID == id {
-			return &p.accounts[i]
+			selected := p.accounts[i]
+			return &selected
 		}
 	}
 	for i := range p.serviceAccounts {
 		if p.serviceAccounts[i].ID == id {
-			return &p.serviceAccounts[i]
+			selected := p.serviceAccounts[i]
+			return &selected
 		}
 	}
 	return nil

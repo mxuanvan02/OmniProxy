@@ -65,13 +65,18 @@ func (h *Handler) refreshAccountFull(account *config.Account) (accountRefreshRes
 	}
 
 	// External OpenAI-compatible providers have no Kiro usage/subscription to
-	// refresh. Refresh their model list and credit balance (via /api/me) so
-	// the admin UI shows real data.
+	// refresh. Refresh their model list and credit balance (via whichever
+	// billing dialect they speak) so the admin UI shows real data.
 	if isExternalAccount(account) {
 		modelsErr := h.fetchAndCacheAccountModels(account)
 		creditsErr := h.refreshExternalCredits(account)
-		// 404 from /api/me means the provider doesn't expose a credits API —
-		// not a failure.
+		// The gateway's own price list, when it publishes one. Absent is the
+		// common case and costs nothing: pricing falls back to the vendor rate.
+		if err := refreshAccountPricing(account); err != nil && err != ErrExternalCreditsNotSupported {
+			logger.Warnf("[ProviderPricing] %s: price list refresh failed: %v", account.Email, err)
+		}
+		// No known billing dialect answered — the provider simply has no
+		// credits API, which is not a failure.
 		if creditsErr == ErrExternalCreditsNotSupported {
 			creditsErr = nil
 		}
@@ -180,13 +185,13 @@ func (h *Handler) refreshAccountFull(account *config.Account) (accountRefreshRes
 		account.BanReason = ""
 		account.BanTime = 0
 		account.Enabled = true
-		if err := config.UpdateAccount(account.ID, *account); err != nil {
+		if err := config.UpdateAccountBanStatus(account.ID, account.BanStatus, account.BanReason, account.BanTime, account.Enabled); err != nil {
 			logger.Errorf("[RefreshAccount] Failed to persist unban for %s: %v", account.Email, err)
 		}
 	} else if !account.Enabled {
 		// Inconsistent state: BanStatus=ACTIVE but Enabled=false. Re-enable.
 		account.Enabled = true
-		if err := config.UpdateAccount(account.ID, *account); err != nil {
+		if err := config.UpdateAccountBanStatus(account.ID, account.BanStatus, account.BanReason, account.BanTime, account.Enabled); err != nil {
 			logger.Errorf("[RefreshAccount] Failed to re-enable %s: %v", account.Email, err)
 		}
 	}
@@ -203,7 +208,7 @@ func (h *Handler) refreshAccountFull(account *config.Account) (accountRefreshRes
 		account.BanReason = truncateErrBody([]byte(errMsg))
 		account.BanTime = time.Now().Unix()
 		account.Enabled = false
-		if updateErr := config.UpdateAccount(account.ID, *account); updateErr != nil {
+		if updateErr := config.UpdateAccountBanStatus(account.ID, account.BanStatus, account.BanReason, account.BanTime, account.Enabled); updateErr != nil {
 			logger.Errorf("[RefreshAccount] Failed to persist BANNED status for %s: %v", account.Email, updateErr)
 		} else {
 			logger.Warnf("[RefreshAccount] Marked %s as BANNED (%s): %s", account.Email, reason, errMsg)
@@ -243,7 +248,7 @@ func (h *Handler) refreshAccountFull(account *config.Account) (accountRefreshRes
 			account.BanReason = "Persistent 403 after token refresh: " + truncateErrBody([]byte(err.Error()))
 			account.BanTime = time.Now().Unix()
 			account.Enabled = false
-			if updateErr := config.UpdateAccount(account.ID, *account); updateErr != nil {
+			if updateErr := config.UpdateAccountBanStatus(account.ID, account.BanStatus, account.BanReason, account.BanTime, account.Enabled); updateErr != nil {
 				logger.Errorf("[RefreshAccount] Failed to persist BANNED status for %s: %v", account.Email, updateErr)
 			} else {
 				logger.Warnf("[RefreshAccount] Marked %s as BANNED (persistent 403 after token refresh)", account.Email)
@@ -298,12 +303,12 @@ func (h *Handler) refreshAllAccountsFull() []accountRefreshOutcome {
 
 	for i := range accounts {
 		wg.Add(1)
-		go func(idx int) {
+		safeGo("refreshAll/account", func() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			account := &accounts[idx]
+			account := &accounts[i]
 			label := account.Nickname
 			if label == "" {
 				label = account.Email
@@ -318,7 +323,7 @@ func (h *Handler) refreshAllAccountsFull() []accountRefreshOutcome {
 			// provider credentials and are still refreshable.
 			if account.AccessToken == "" && !isServiceAccount(account) {
 				out.Skipped = true
-				outcomes[idx] = out
+				outcomes[i] = out
 				return
 			}
 
@@ -340,8 +345,8 @@ func (h *Handler) refreshAllAccountsFull() []accountRefreshOutcome {
 				}
 				break
 			}
-			outcomes[idx] = out
-		}(i)
+			outcomes[i] = out
+		})
 	}
 
 	wg.Wait()

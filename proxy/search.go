@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"omniproxy/config"
 	"strings"
 )
@@ -114,6 +113,11 @@ func (h *Handler) handleSearch(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		lastErr = err
+		// A rejected client URL is not an account fault: failing over would
+		// retry the same bad input and penalize healthy accounts.
+		if isBlockedURLError(err) {
+			break
+		}
 		excluded[account.ID] = true
 		isQuota := false
 		if httpErr, ok := err.(*serviceHTTPError); ok {
@@ -236,9 +240,8 @@ func callJinaReader(r *http.Request, account *config.Account, in searchRequest) 
 	if target == "" {
 		target = strings.TrimSpace(in.Query)
 	}
-	u, err := url.Parse(target)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		return normalizedSearchResponse{}, fmt.Errorf("jina-reader requires a valid http(s) URL in url or query")
+	if err := validateOutboundURL(target); err != nil {
+		return normalizedSearchResponse{}, err
 	}
 	// Jina Reader's native endpoint is /{target URL}; keep the target scheme
 	// because both http:// and https:// are meaningful to the reader.
@@ -373,6 +376,9 @@ func serviceURL(account *config.Account, defaultBase, path string) string {
 func serviceErrorStatus(err error) int {
 	if _, ok := err.(*unsupportedCapabilityError); ok {
 		return http.StatusNotImplemented
+	}
+	if isBlockedURLError(err) {
+		return http.StatusBadRequest
 	}
 	if e, ok := err.(*serviceHTTPError); ok {
 		if e.Status == http.StatusTooManyRequests || e.Status >= 500 {

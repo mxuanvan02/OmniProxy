@@ -1,9 +1,9 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"omniproxy/config"
 	"omniproxy/logger"
@@ -20,8 +20,12 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := readInferenceBody(w, r)
 	if err != nil {
+		if bodyTooLarge(err) {
+			h.sendOpenAIError(w, 413, "request_too_large", "Request body too large")
+			return
+		}
 		h.sendOpenAIError(w, 400, "invalid_request_error", "Failed to read request body")
 		return
 	}
@@ -138,17 +142,17 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	respID := generateResponseID()
 
 	if req.Stream {
-		h.handleResponsesStream(w, kiroPayload, actualModel, thinking, estimatedInputTokens,
+		h.handleResponsesStream(r.Context(), w, kiroPayload, actualModel, thinking, estimatedInputTokens,
 			apiKeyID, respID, &req, storedInputCopy, storeResponse)
 		return
 	}
 
-	h.handleResponsesNonStream(w, kiroPayload, actualModel, thinking, estimatedInputTokens,
+	h.handleResponsesNonStream(r.Context(), w, kiroPayload, actualModel, thinking, estimatedInputTokens,
 		apiKeyID, respID, &req, storedInputCopy, storeResponse)
 }
 
 func (h *Handler) handleResponsesNonStream(
-	w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
+	ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
 ) {
@@ -233,12 +237,16 @@ func (h *Handler) handleResponsesNonStream(
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointOpenAIResponses, model)
-		err := dispatchChat(account, payload, callback)
+		err := dispatchChat(ctx, account, payload, callback)
 		if err != nil {
 			lastErr = err
+			if clientGone(ctx, err) {
+				h.usageTracker.RemoveActive(account.ID)
+				return
+			}
 			// Transient upstream errors (5xx, overload, timeout) are retried
 			// in-place with backoff before rotating to a different account.
-			if h.tryTransientRetry(account, payload, callback, err) {
+			if h.tryTransientRetry(ctx, account, payload, callback, err) {
 				h.pool.RecordSuccess(account.ID, model)
 				if cacheKey != "" {
 					h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
@@ -277,7 +285,7 @@ func (h *Handler) handleResponsesNonStream(
 			outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 		}
 
-		h.recordUsageWithCache(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits, cacheUsageTelemetry{
+		charged := h.recordUsageWithCache(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits, cacheUsageTelemetry{
 			CreateTokens: realCacheCreate,
 			CachedTokens: realCacheRead,
 		})
@@ -285,7 +293,7 @@ func (h *Handler) handleResponsesNonStream(
 		if cacheKey != "" {
 			h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
 		}
-		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, charged)
 
 		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, realCacheRead, req)
 		respObj.StoredInput = storedInput
@@ -373,7 +381,7 @@ func buildResponsesObject(
 }
 
 func (h *Handler) handleResponsesStream(
-	w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
+	ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool,
 	estimatedInputTokens int, apiKeyID, respID string,
 	req *ResponsesRequest, storedInput json.RawMessage, storeResponse bool,
 ) {
@@ -603,15 +611,19 @@ func (h *Handler) handleResponsesStream(
 		if isCodexAccount(account) {
 			effectiveCallback = newCodexCoalescer(callback)
 		}
-		err := dispatchChat(account, payload, effectiveCallback)
+		err := dispatchChat(ctx, account, payload, effectiveCallback)
 		var finalContent string
 		var reasoning string
 		if err != nil {
+			if clientGone(ctx, err) {
+				h.usageTracker.RemoveActive(account.ID)
+				return
+			}
 			// Transient upstream errors (5xx, overload, timeout) are retried
 			// in-place with backoff before rotating. Only safe if we haven't
 			// started streaming the response yet (otherwise we'd duplicate
 			// the response.created event).
-			if !responseStarted && h.tryTransientRetry(account, payload, effectiveCallback, err) {
+			if !responseStarted && h.tryTransientRetry(ctx, account, payload, effectiveCallback, err) {
 				h.pool.RecordSuccess(account.ID, model)
 				if cacheKey != "" {
 					h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
@@ -698,7 +710,7 @@ func (h *Handler) handleResponsesStream(
 			outputTokens = estimateOpenAIOutputTokens(finalContent, reasoning, toolUses)
 		}
 
-		h.recordUsageWithCache(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits, cacheUsageTelemetry{
+		charged := h.recordUsageWithCache(apiKeyID, account.ID, model, endpointOpenAIResponses, inputTokens, outputTokens, credits, cacheUsageTelemetry{
 			CreateTokens: realCacheCreate,
 			CachedTokens: realCacheRead,
 		})
@@ -706,7 +718,7 @@ func (h *Handler) handleResponsesStream(
 		if cacheKey != "" {
 			h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
 		}
-		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, credits)
+		h.pool.UpdateStats(account.ID, inputTokens+outputTokens, charged)
 
 		respObj := buildResponsesObject(respID, model, finalContent, toolUses, inputTokens, outputTokens, realCacheRead, req)
 		respObj.CreatedAt = createdAt
