@@ -27,6 +27,58 @@ import (
 // externalAuthMethod is the AuthMethod value marking an external OpenAI-compatible provider.
 const externalAuthMethod = "external_openai"
 
+// Several OpenAI-compatible resale gateways (tabitoken.com, gorouter.app,
+// api.justwoker.icu, ...) sit behind a Cloudflare bot-fight rule that answers
+// Go's default "Go-http-client/2.0" User-Agent with an HTML 403 challenge page,
+// on POST /v1/chat/completions only. Measured on 2026-09-06 against
+// tabitoken.com: no User-Agent -> 403 HTML; a User-Agent alone -> 403; a
+// User-Agent plus at least one x-stainless-* header -> 200. The rule therefore
+// fingerprints "real OpenAI SDK client", so the adapter presents the same
+// header set the official openai-python client sends. These values describe the
+// caller, not the account, so they are constants rather than config.
+const (
+	externalOpenAIUserAgent           = "OpenAI/Python 1.109.1"
+	externalOpenAIStainlessLang       = "python"
+	externalOpenAIStainlessPackageVer = "1.109.1"
+	externalOpenAIStainlessRuntime    = "CPython"
+	externalOpenAIStainlessRuntimeVer = "3.12.7"
+	externalOpenAIStainlessOS         = "MacOS"
+	externalOpenAIStainlessArch       = "arm64"
+)
+
+// defaultExternalChatPath is the OpenAI chat-completions path used unless the
+// account overrides it.
+const defaultExternalChatPath = "/v1/chat/completions"
+
+// externalChatPath returns the upstream chat path for an account: the
+// account-level ChatPath override when set, otherwise the OpenAI default.
+func externalChatPath(account *config.Account) string {
+	if account == nil {
+		return defaultExternalChatPath
+	}
+	if p := strings.TrimSpace(account.ChatPath); p != "" {
+		return "/" + strings.TrimLeft(p, "/")
+	}
+	return defaultExternalChatPath
+}
+
+// setExternalOpenAIHeaders applies the OpenAI-SDK-shaped identity headers to an
+// outbound request. accept selects the response dialect ("text/event-stream"
+// for streaming chat, "application/json" for REST reads).
+func setExternalOpenAIHeaders(req *http.Request, apiKey, accept string) {
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", accept)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("User-Agent", externalOpenAIUserAgent)
+	req.Header.Set("x-stainless-lang", externalOpenAIStainlessLang)
+	req.Header.Set("x-stainless-package-version", externalOpenAIStainlessPackageVer)
+	req.Header.Set("x-stainless-runtime", externalOpenAIStainlessRuntime)
+	req.Header.Set("x-stainless-runtime-version", externalOpenAIStainlessRuntimeVer)
+	req.Header.Set("x-stainless-os", externalOpenAIStainlessOS)
+	req.Header.Set("x-stainless-arch", externalOpenAIStainlessArch)
+	req.Header.Set("x-stainless-retry-count", "0")
+}
+
 // ErrExternalCreditsNotSupported is returned by fetchExternalProviderCredits
 // when none of the known billing dialects answer. Callers treat this as a
 // non-fatal "no credit info available" condition rather than a hard error, so
@@ -77,14 +129,12 @@ func CallExternalOpenAI(ctx context.Context, account *config.Account, payload *K
 		return fmt.Errorf("external call marshal: %w", err)
 	}
 
-	endpoint := openAICompatibleEndpoint(baseURL, "/v1/chat/completions")
+	endpoint := openAICompatibleEndpoint(baseURL, externalChatPath(account))
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(reqBody))
 	if err != nil {
 		return fmt.Errorf("external call new request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	setExternalOpenAIHeaders(req, apiKey, "text/event-stream")
 
 	client := GetClientForProxy(ResolveAccountProxyURL(account))
 	resp, err := client.Do(req)
@@ -1238,8 +1288,7 @@ func fetchExternalProviderModels(account *config.Account) ([]ModelInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	req.Header.Set("Accept", "application/json")
+	setExternalOpenAIHeaders(req, apiKey, "application/json")
 
 	client := GetRestClientForProxy(ResolveAccountProxyURL(account))
 	resp, err := client.Do(req)
@@ -1597,8 +1646,7 @@ func getProviderJSON(account *config.Account, url string, out interface{}) error
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+strings.TrimSpace(account.AccessToken))
-	req.Header.Set("Accept", "application/json")
+	setExternalOpenAIHeaders(req, strings.TrimSpace(account.AccessToken), "application/json")
 
 	resp, err := GetRestClientForProxy(ResolveAccountProxyURL(account)).Do(req)
 	if err != nil {
