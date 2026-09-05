@@ -130,3 +130,23 @@ func TestCustomPricingFlatPerCallOverride(t *testing.T) {
 		t.Fatalf("flat per-call override on a tiny request: got $%.4f, want $0.4200", got)
 	}
 }
+
+// The SOTA gateway publishes per-effort ids. Keyed only by the bare alias, the
+// exact-match lookup misses them and the request is billed at $0.
+func TestSotaEffortSuffixResolvesToFamilyPricing(t *testing.T) {
+	for model, want := range map[string]string{
+		"model-s-max":   "model-s",
+		"model-t-high":  "model-t",
+		"model-o-low":   "model-o",
+		"model-a-xhigh": "model-a",
+	} {
+		got, ok := LookupPricing(model)
+		if !ok {
+			t.Errorf("LookupPricing(%q) found no rate, so the request bills $0", model)
+			continue
+		}
+		if got != pricingTable[want] {
+			t.Errorf("LookupPricing(%q) = %+v, want the %s rate %+v", model, got, want, pricingTable[want])
+		}
+	}
+}

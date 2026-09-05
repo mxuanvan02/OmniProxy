@@ -161,10 +161,14 @@ func (h *Handler) handleResponsesNonStream(
 	// lastAccountID attributes the final failure to a concrete account in Usage.
 	var lastAccountID string
 	cacheKey := payloadCacheKey(payload)
+	recoveryWave := 0
 
 	for attempt := 0; ; attempt++ {
 		account := h.pool.GetNextForModelWithCacheKey(model, excluded, cacheKey)
 		if account == nil {
+			if h.waitForPoolRecovery(ctx, model, excluded, lastErr, &recoveryWave) {
+				continue
+			}
 			break
 		}
 		h.logCacheRouting("responses-nonstream", model, cacheKey, payload, account)
@@ -429,10 +433,14 @@ func (h *Handler) handleResponsesStream(
 	realCacheRead := 0
 	realCacheCreate := 0
 	cacheKey := payloadCacheKey(payload)
+	recoveryWave := 0
 
 	for attempt := 0; ; attempt++ {
 		account := h.pool.GetNextForModelWithCacheKey(model, excluded, cacheKey)
 		if account == nil {
+			if h.waitForPoolRecovery(ctx, model, excluded, lastErr, &recoveryWave) {
+				continue
+			}
 			break
 		}
 		h.logCacheRouting("responses-stream", model, cacheKey, payload, account)

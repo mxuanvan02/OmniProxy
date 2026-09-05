@@ -71,11 +71,7 @@ func policyModelLimits(model string) (int, int, bool) {
 		return 272000, 128000, true
 	case deepResearchModel:
 		return 272000, 128000, true
-	// The SOTA gateway rebrands Claude models as model-S/T/O/A, which carry the
-	// same 1M window. hasCanonicalTokenLimits already claims them, so they must
-	// resolve here or the catalog publishes a zero window for them.
-	case "claude-opus-5", "claude-sonnet-5", "claude-haiku-5",
-		"model-s", "model-t", "model-o", "model-a":
+	case "claude-opus-5", "claude-sonnet-5", "claude-haiku-5":
 		return 1_000_000, 128_000, true
 	default:
 		// Claude 4.6+ (claude-opus-4.8, claude-sonnet-4.7, fable 5, ...) also
@@ -1658,13 +1654,8 @@ var canonicalClaude5ModelIDs = []string{
 	"claude-opus-5",
 }
 
-// sotaModelBehavesAs maps the SOTA gateway's rebranded Claude IDs to the model
-// whose client-side handling applies to them. Claude Code does not know these
-// IDs, and for an unknown ID it offers no Effort control at all. Publishing
-// them through discovery cannot fix that: Claude Code strips each /v1/models
-// entry down to id/display_name/description, so token limits and effort levels
-// sent there are discarded. A behavesAs mapping on the picker row is the only
-// channel that carries the capability profile.
+// sotaModelBehavesAs maps SOTA aliases to Claude capability profiles supported
+// by the Desktop request translator.
 var sotaModelBehavesAs = map[string]string{
 	"model-s": "claude-fable-5",
 	"model-t": "claude-sonnet-5",
@@ -1773,37 +1764,6 @@ func applyClaudeModelEffort(settings map[string]interface{}, model, effort strin
 	settings["modelSettings"] = perModel
 }
 
-// sotaSlotCapabilities is what a SOTA alias supports once it routes through this
-// gateway: an effort ladder up to max, plus the thinking modes the translator
-// forwards. Claude Code reads this from ANTHROPIC_DEFAULT_<slot>_MODEL_SUPPORTED_CAPABILITIES,
-// but only when the paired ANTHROPIC_DEFAULT_<slot>_MODEL names the same model.
-const sotaSlotCapabilities = "effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking"
-
-// sotaCapabilitySlots are the model/capability env pairs Claude Code consults.
-var sotaCapabilitySlots = []string{"OPUS", "SONNET", "HAIKU", "FABLE"}
-
-func sotaBehavesAsTarget(model string) (string, bool) {
-	model = stripClaudeContextSuffix(strings.TrimSpace(model))
-	target, ok := sotaModelBehavesAs[strings.ToLower(model)]
-	return target, ok
-}
-
-// applySotaSlotCapabilities declares the effort and thinking support for any
-// tier slot pointed at a SOTA alias. Without it the alias is an unknown ID and
-// Claude Code hides Effort entirely for that slot.
-func applySotaSlotCapabilities(env map[string]string) {
-	for _, slot := range sotaCapabilitySlots {
-		modelVar := "ANTHROPIC_DEFAULT_" + slot + "_MODEL"
-		if _, ok := sotaBehavesAsTarget(env[modelVar]); !ok {
-			continue
-		}
-		capVar := modelVar + "_SUPPORTED_CAPABILITIES"
-		if strings.TrimSpace(env[capVar]) == "" {
-			env[capVar] = sotaSlotCapabilities
-		}
-	}
-}
-
 // sotaModelLabels name the aliases in the picker. Without a label the row shows
 // the bare id, which reads as a placeholder rather than a model.
 var sotaModelLabels = map[string]string{
@@ -1813,12 +1773,20 @@ var sotaModelLabels = map[string]string{
 	"model-A": "SOTA model-A",
 }
 
-// applySotaPickerRows gives every SOTA alias a picker row carrying behavesAs.
-// availableModels alone does not make an id selectable once the settings declare
-// a modelPicker, so an alias without a row is routable but unreachable from the
-// UI, and a row without behavesAs is selectable but has no Effort control. An
-// existing row keeps the operator's label and description; only a missing
-// behavesAs is filled in.
+// sotaModelLabel resolves the generated picker label for an alias, accepting any
+// spelling of the id: the settings file writes model-S while every lookup here
+// normalises to lowercase.
+func sotaModelLabel(id string) string {
+	for alias, label := range sotaModelLabels {
+		if strings.EqualFold(alias, strings.TrimSpace(id)) {
+			return label
+		}
+	}
+	return ""
+}
+
+// applySotaPickerRows adds the Desktop capability profile for rows OmniProxy owns.
+// Existing operator rows remain untouched.
 func applySotaPickerRows(settings map[string]interface{}) {
 	picker, _ := settings["modelPicker"].(map[string]interface{})
 	if picker == nil {
@@ -1832,12 +1800,17 @@ func applySotaPickerRows(settings map[string]interface{}) {
 			continue
 		}
 		id, _ := row["model"].(string)
-		listed[strings.ToLower(strings.TrimSpace(id))] = true
-		target, ok := sotaBehavesAsTarget(id)
-		if !ok {
+		key := strings.ToLower(strings.TrimSpace(id))
+		listed[key] = true
+		// Only a SOTA alias has a profile to publish. Matching on the label
+		// alone would also claim unrelated rows whose label happens to be
+		// blank, and writing an empty behavesAs there strips whatever profile
+		// the operator had chosen.
+		target, isSota := sotaModelBehavesAs[key]
+		if !isSota {
 			continue
 		}
-		if existing, _ := row["behavesAs"].(string); strings.TrimSpace(existing) == "" {
+		if label, _ := row["label"].(string); label == sotaModelLabel(id) {
 			row["behavesAs"] = target
 		}
 	}
@@ -1845,15 +1818,47 @@ func applySotaPickerRows(settings map[string]interface{}) {
 		if listed[strings.ToLower(id)] {
 			continue
 		}
-		target, _ := sotaBehavesAsTarget(id)
 		options = append(options, map[string]interface{}{
 			"model":     id,
 			"label":     sotaModelLabels[id],
-			"behavesAs": target,
+			"behavesAs": sotaModelBehavesAs[strings.ToLower(id)],
 		})
 	}
 	picker["options"] = options
 	settings["modelPicker"] = picker
+}
+
+const sotaSlotCapabilities = "effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking"
+
+func applySotaSlotCapabilities(env map[string]string) {
+	for _, slot := range []string{"OPUS", "SONNET", "HAIKU", "FABLE"} {
+		modelVar := "ANTHROPIC_DEFAULT_" + slot + "_MODEL"
+		if _, ok := sotaModelBehavesAs[strings.ToLower(stripClaudeContextSuffix(strings.TrimSpace(env[modelVar])))]; !ok {
+			continue
+		}
+		capVar := modelVar + "_SUPPORTED_CAPABILITIES"
+		if strings.TrimSpace(env[capVar]) == "" {
+			env[capVar] = sotaSlotCapabilities
+		}
+	}
+}
+
+// removeSotaSlotMetadata drops NAME/DESCRIPTION/SUPPORTED_CAPABILITIES that an
+// older Apply wrote for SOTA aliases. Matching is per-key so a custom name is
+// kept when only the capability string is ours.
+func removeSotaSlotMetadata(env map[string]string) {
+	for _, slot := range []string{"OPUS", "SONNET", "HAIKU", "FABLE"} {
+		prefix := "ANTHROPIC_DEFAULT_" + slot + "_MODEL"
+		if strings.HasPrefix(env[prefix+"_NAME"], "SOTA model-") {
+			delete(env, prefix+"_NAME")
+		}
+		if strings.HasPrefix(env[prefix+"_DESCRIPTION"], "SOTA model-") {
+			delete(env, prefix+"_DESCRIPTION")
+		}
+		if env[prefix+"_SUPPORTED_CAPABILITIES"] == sotaSlotCapabilities {
+			delete(env, prefix+"_SUPPORTED_CAPABILITIES")
+		}
+	}
 }
 
 func canonicalClaude5Models() []map[string]interface{} {
@@ -2997,10 +3002,8 @@ func mergeModelInfo(base ModelInfo, extra ModelInfo) ModelInfo {
 }
 
 // modelInfoTokenLimits resolves token limits for model discovery and CLI config.
-// Claude 5 and the SOTA families have canonical limits because stale cache
-// entries for these models were the source of the incorrect context-window
-// configuration. Other models retain catalog metadata as the authority, with
-// policy values filling only missing fields.
+// Canonical Claude limits override stale gateway metadata; other models retain
+// catalog metadata as the authority, with policy values filling only gaps.
 func modelInfoTokenLimits(info ModelInfo) (int, int, bool) {
 	policyInput, policyOutput, hasPolicy := policyModelLimits(info.ModelId)
 	input, output := policyInput, policyOutput
@@ -3023,8 +3026,7 @@ func hasCanonicalTokenLimits(model string) bool {
 	model, _ = ParseModelAndThinking(model, "-thinking")
 	model = strings.ToLower(strings.TrimSpace(model))
 	switch model {
-	case "claude-opus-5", "claude-sonnet-5", "claude-haiku-5",
-		"model-s", "model-t", "model-o", "model-a":
+	case "claude-opus-5", "claude-sonnet-5", "claude-haiku-5":
 		return true
 	}
 	return false
@@ -3283,7 +3285,7 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 
 	thinkingCfg := config.GetThinkingConfig()
 	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
-	req.Model = actualModel
+	req.Model = rewriteClaudeDesktopModelToSOTA(r, actualModel)
 	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
 
 	estimatedTokens := estimateClaudeRequestInputTokens(effectiveReq)
@@ -3348,7 +3350,14 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	thinkingCfg := config.GetThinkingConfig()
 	originalModel := stripThinkingSuffix(req.Model, thinkingCfg.Suffix)
 	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
-	req.Model = actualModel
+	publicModel := actualModel
+	routeModel := rewriteClaudeDesktopModelToSOTA(r, actualModel)
+	if routeModel != actualModel {
+		// The alias is the ID the upstream gateway knows; the client keeps the
+		// public ID it asked for.
+		originalModel = routeModel
+	}
+	req.Model = routeModel
 	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
 	thinkingResponseOpts := resolveClaudeThinkingResponseOptions(req.Thinking, thinkingCfg.ClaudeFormat)
 	estimatedInputTokens := estimateClaudeRequestInputTokens(effectiveReq)
@@ -3357,6 +3366,7 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	// transform request
 	kiroPayload := ClaudeToKiro(&req, thinking)
 	kiroPayload.OriginalModel = originalModel
+	kiroPayload.PublicModel = publicModel
 
 	// Stream or non-stream
 	apiKeyID := apiKeyIDFromContext(r.Context())
@@ -3369,6 +3379,10 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 
 // handleClaudeStream handles Claude streaming response
 func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
+	responseModel := payload.PublicModel
+	if responseModel == "" {
+		responseModel = model
+	}
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
@@ -3408,7 +3422,7 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 				"type":          "message",
 				"role":          "assistant",
 				"content":       []interface{}{},
-				"model":         model,
+				"model":         responseModel,
 				"stop_reason":   nil,
 				"stop_sequence": nil,
 				"usage":         buildClaudeUsageMap(startInputTokens, 0, promptCacheUsage{}, false),
@@ -3418,11 +3432,15 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 	}
 
 	cacheKey := payloadCacheKey(payload)
+	recoveryWave := 0
 	for attempt := 0; ; attempt++ {
 		logger.Warnf("[CLAUDE-STREAM] model=%s attempt=%d pool_accounts=%d excluded=%v",
 			model, attempt, h.pool.Count(), excluded)
 		account := h.pool.GetNextForModelWithCacheKey(model, excluded, cacheKey)
 		if account == nil {
+			if h.waitForPoolRecovery(ctx, model, excluded, lastErr, &recoveryWave) {
+				continue
+			}
 			logger.Warnf("[CLAUDE-STREAM] model=%s no account found after %d attempts",
 				model, attempt)
 			break
@@ -4352,15 +4370,23 @@ func (h *Handler) recordError(apiKeyID, accountID, model, endpoint, errMsg strin
 
 // handleClaudeNonStream handles Claude non-streaming response
 func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWriter, payload *KiroPayload, model string, thinking bool, thinkingOpts claudeThinkingResponseOptions, estimatedInputTokens int, cacheProfile *promptCacheProfile, apiKeyID string) {
+	responseModel := payload.PublicModel
+	if responseModel == "" {
+		responseModel = model
+	}
 	excluded := make(map[string]bool)
 	var lastErr error
 	// lastAccountID attributes the final failure to a concrete account in Usage.
 	var lastAccountID string
 	cacheKey := payloadCacheKey(payload)
+	recoveryWave := 0
 
 	for attempt := 0; ; attempt++ {
 		account := h.pool.GetNextForModelWithCacheKey(model, excluded, cacheKey)
 		if account == nil {
+			if h.waitForPoolRecovery(ctx, model, excluded, lastErr, &recoveryWave) {
+				continue
+			}
 			break
 		}
 		h.logCacheRouting("claude-nonstream", model, cacheKey, payload, account)
@@ -4534,7 +4560,7 @@ func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWrit
 			}
 		}
 
-		resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, model)
+		resp := KiroToClaudeResponse(finalContent, responseThinkingContent, includeEmptyThinkingBlock, toolUses, inputTokens, outputTokens, responseModel)
 		resp.Usage.InputTokens = billedClaudeInputTokens(inputTokens, upstreamCacheUsage)
 		resp.Usage.CacheCreationInputTokens = upstreamCacheUsage.CacheCreationInputTokens
 		resp.Usage.CacheReadInputTokens = upstreamCacheUsage.CacheReadInputTokens
@@ -4687,11 +4713,15 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 	realCacheCreate := 0
 
 	cacheKey := payloadCacheKey(payload)
+	recoveryWave := 0
 	for attempt := 0; ; attempt++ {
 		logger.Warnf("[OPENAI-STREAM] model=%s attempt=%d pool_accounts=%d excluded=%v",
 			model, attempt, h.pool.Count(), excluded)
 		account := h.pool.GetNextForModelWithCacheKey(model, excluded, cacheKey)
 		if account == nil {
+			if h.waitForPoolRecovery(ctx, model, excluded, lastErr, &recoveryWave) {
+				continue
+			}
 			logger.Warnf("[OPENAI-STREAM] model=%s no account found after %d attempts",
 				model, attempt)
 			break
@@ -5160,10 +5190,14 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 	// lastAccountID attributes the final failure to a concrete account in Usage.
 	var lastAccountID string
 	cacheKey := payloadCacheKey(payload)
+	recoveryWave := 0
 
 	for attempt := 0; ; attempt++ {
 		account := h.pool.GetNextForModelWithCacheKey(model, excluded, cacheKey)
 		if account == nil {
+			if h.waitForPoolRecovery(ctx, model, excluded, lastErr, &recoveryWave) {
+				continue
+			}
 			break
 		}
 		h.logCacheRouting("openai-nonstream", model, cacheKey, payload, account)
@@ -5987,6 +6021,8 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 			env["ANTHROPIC_API_KEY"] = env["ANTHROPIC_AUTH_TOKEN"]
 		}
 		delete(env, "ANTHROPIC_AUTH_TOKEN")
+		removeSotaSlotMetadata(env)
+		applySotaSlotCapabilities(env)
 		current["hasCompletedOnboarding"] = true
 		current["env"] = env
 		// availableModels is an allowlist: an ID missing from it is refused even
@@ -5998,12 +6034,7 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 			current["availableModels"],
 			append([]string{"claude-sonnet-5", "claude-opus-5"}, sotaModelIDs...),
 		)
-		// Claude Code decides a model's Effort and thinking support from its own
-		// catalog, so a rebranded ID it does not know gets no Effort control. These
-		// two channels are the only ones that carry a capability profile for such an
-		// ID: behavesAs on the picker row, and the per-slot capabilities variable.
 		applySotaPickerRows(current)
-		applySotaSlotCapabilities(env)
 		applyClaudeModelEffort(current, strings.TrimSpace(req.Model), req.ReasoningEffort)
 		// Claude Code's automatic high-demand fallback uses its Haiku tier. Route
 		// that tier to Sonnet because this installation has no Haiku route, unless
@@ -6143,8 +6174,13 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 		bpURL := ensureV1(req.BaseURL)
 		desktopModels, familyEfforts := h.codexDesktopModels(model, subagent)
 		// Clamp against the configured model's own effort ladder so the value
-		// written here is always selectable in the picker for that model.
-		effort := clampCodexReasoningEffort(req.ReasoningEffort, familyEfforts[codexModelFamily(openClawModelID(model))])
+		// written here is always selectable in the picker for that model. A blank
+		// request field means "leave it alone": clamping it would resolve to
+		// medium and silently downgrade whatever config.toml already names.
+		effort := ""
+		if raw := strings.TrimSpace(req.ReasoningEffort); raw != "" {
+			effort = clampCodexReasoningEffort(raw, familyEfforts[codexModelFamily(openClawModelID(model))])
+		}
 		if err := MergeCodexConfig(homeDir, model, bpURL, subagent, effort); err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":"failed to merge config: %v"}`, err), 500)
 			return

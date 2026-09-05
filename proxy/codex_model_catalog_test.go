@@ -532,12 +532,10 @@ func TestCodexDesktopModelsExcludesGenerativeModels(t *testing.T) {
 	}
 }
 
-// A gateway may list a model without token metadata. Published as-is, the entry
-// carries no context_window and the client falls back to its own smaller
-// default, truncating a 1M-window model mid-task. The routing policy table is
-// the authority for those families, so it fills the gap for every published
-// row rather than only the configured one.
-func TestCodexDesktopModelsFillsMissingTokenLimits(t *testing.T) {
+// A gateway may list a model without token metadata. The routing policy fills
+// only documented model families; aliases without upstream limits must remain
+// unset rather than inheriting an unrelated context window.
+func TestCodexDesktopModelsFillsOnlyDocumentedTokenLimits(t *testing.T) {
 	h := &Handler{cachedModels: []ModelInfo{
 		{ModelId: "claude-opus-5"},
 		{ModelId: "model-A"},
@@ -551,15 +549,13 @@ func TestCodexDesktopModelsFillsMissingTokenLimits(t *testing.T) {
 			limits[model.ModelId] = model.TokenLimits.MaxInputTokens
 		}
 	}
-	for _, id := range []string{"claude-opus-5", "model-A"} {
-		if limits[id] != 1_000_000 {
-			t.Errorf("%s max input tokens = %d, want 1000000", id, limits[id])
-		}
+	if limits["claude-opus-5"] != 1_000_000 {
+		t.Errorf("claude-opus-5 max input tokens = %d, want 1000000", limits["claude-opus-5"])
 	}
-	// An unrecognized id has no known window, and inventing one would be worse
-	// than letting the client apply its default.
-	if got, ok := limits["mystery-model-9"]; ok {
-		t.Errorf("unknown model was given invented token limits: %d", got)
+	for _, id := range []string{"model-A", "mystery-model-9"} {
+		if got, ok := limits[id]; ok {
+			t.Errorf("%s was given invented token limits: %d", id, got)
+		}
 	}
 
 	// The window has to survive the conversion into catalog entries, which is

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"omniproxy/config"
 	"regexp"
 	"strings"
@@ -148,6 +149,44 @@ func isClaudeThinkingRequested(thinkingCfg *ClaudeThinkingConfig) bool {
 func MapModel(model string) string {
 	mapped, _ := ParseModelAndThinking(model, "-thinking")
 	return mapped
+}
+
+// claudeDesktopIAPHeader is the request header Claude Desktop injects on
+// inference traffic. Presence (any value) is the only reliable fingerprint
+// that is unique to Desktop and not shared with Claude Code.
+const claudeDesktopIAPHeader = "X-Claude-Desktop-No-IAP-Inject"
+
+// desktopPublicToSOTA is the Desktop-only public-slot → SOTA alias map.
+// Every SOTA alias is reachable only through a canonical public ID: Desktop
+// grants the effort/thinking selector by matching the model name against its
+// own built-in table, so a gateway-flavoured spelling (model-S, anthropic/…)
+// gets no selector. The config therefore advertises the canonical IDs and the
+// rewrite happens here.
+var desktopPublicToSOTA = map[string]string{
+	"claude-opus-5":   "model-O",
+	"claude-sonnet-5": "model-T",
+	"claude-fable-5":  "model-S",
+	"claude-mythos-5": "model-A",
+}
+
+func isClaudeDesktopRequest(r *http.Request) bool {
+	return r != nil && strings.TrimSpace(r.Header.Get(claudeDesktopIAPHeader)) != ""
+}
+
+// rewriteClaudeDesktopModelToSOTA rewrites a normalised public Claude ID to
+// the matching SOTA alias when the request came from Claude Desktop. Other
+// clients (Claude Code, OpenAI-compatible SDKs) are left unchanged so their
+// picker IDs keep routing as-is. The public ID is still what the client
+// asked for; callers must keep it for the response body.
+func rewriteClaudeDesktopModelToSOTA(r *http.Request, model string) string {
+	if !isClaudeDesktopRequest(r) {
+		return model
+	}
+	key := strings.ToLower(strings.TrimSpace(model))
+	if mapped := desktopPublicToSOTA[key]; mapped != "" {
+		return mapped
+	}
+	return model
 }
 
 // stripThinkingSuffix removes the configured thinking suffix (e.g. "-thinking")

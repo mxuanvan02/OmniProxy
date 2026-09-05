@@ -306,9 +306,9 @@ var cavemanPromptFull = `
 - Explanations: one sentence max. Use bullet points only if >2 items.
 - No markdown headers unless the response is >500 words.
 - No code comments unless they encode non-obvious business logic.
-- No "Let me...", "I'll...", "Now...", "Next..." narration.
 - Prefer symbols over words: → not "leads to", = not "equals", × not "times".
 - If a list, use inline format: a, b, c — not bulleted.
+- Brevity applies to prose only, never to actions. If the task needs a tool, call it in this same turn; a short sentence describing the action is not a substitute for performing it.
 `
 
 var cavemanPromptLight = `
@@ -316,6 +316,7 @@ var cavemanPromptLight = `
 - Be concise. No preamble or restating the question.
 - Code: show only changed lines unless full context is needed.
 - Explanations: 1-2 sentences max.
+- Brevity applies to prose only, never to actions. If the task needs a tool, call it in this same turn; a short sentence describing the action is not a substitute for performing it.
 `
 
 // cavemanSuffix returns the system prompt suffix for Caveman mode.

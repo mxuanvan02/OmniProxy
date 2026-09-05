@@ -162,6 +162,16 @@ func prefixFallbackPricing(model string) (ModelPricing, bool) {
 		return pricingTable["gpt-5.6-luna"], true
 	case strings.HasPrefix(model, "gpt-5.1"):
 		return pricingTable["gpt-5.1"], true
+	// The SOTA gateway publishes per-effort ids (model-s-max). Without these the
+	// exact-match lookup misses and the request bills $0.
+	case strings.HasPrefix(model, "model-s"):
+		return pricingTable["model-s"], true
+	case strings.HasPrefix(model, "model-t"):
+		return pricingTable["model-t"], true
+	case strings.HasPrefix(model, "model-o"):
+		return pricingTable["model-o"], true
+	case strings.HasPrefix(model, "model-a"):
+		return pricingTable["model-a"], true
 	}
 	return ModelPricing{}, false
 }

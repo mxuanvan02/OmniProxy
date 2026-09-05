@@ -17,6 +17,7 @@ All notable changes to OmniProxy are documented here. The format follows [Keep a
 - Request bodies on the inference paths are capped at 64 MiB and answered with 413 instead of being buffered unbounded.
 
 ### Fixed
+- **SOTA aliases no longer inherit fabricated Claude 5 metadata.** `model-S`/`model-T`/`model-O`/`model-A` were treated as 1M/128K Claude 5 models, and Claude Code picker rows were given `behavesAs` profiles they never advertised. Catalog metadata from the gateway now wins; missing metadata stays unset.
 - **Concurrent map read/write crash.** `SetBoolSetting` / `SetStringSetting` released `cfgLock` before calling `Save()`, so a concurrent setting write could race the marshal and kill the process with an unrecoverable runtime throw.
 - **Account pool handed out pointers into its own slice.** Every selector now returns a copy; callers writing `AccessToken` / `ExpiresAt` through the returned account could previously corrupt a token mid-refresh or lose the update entirely when `Reload()` replaced the slice.
 - **A panic in any spawned goroutine took down the whole proxy**, dropping every in-flight stream. `net/http` only recovers its own handler goroutines; all 14 self-spawned goroutines now run under a `safeGo` recover guard that logs the panic and its stack.

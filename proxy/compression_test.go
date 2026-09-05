@@ -95,7 +95,7 @@ func TestCompressGrep(t *testing.T) {
 
 	var sb strings.Builder
 	// Pad to exceed 500-byte threshold
-	sb.WriteString(strings.Repeat("# header padding line " + strings.Repeat("x", 30) + "\n", 10))
+	sb.WriteString(strings.Repeat("# header padding line "+strings.Repeat("x", 30)+"\n", 10))
 	for i := 0; i < 10; i++ {
 		sb.WriteString("file.go:10:identical match with some longer content here\n")
 	}
@@ -198,5 +198,20 @@ func TestCavemanDisabled(t *testing.T) {
 	result := ApplySystemPromptSuffix(original)
 	if result != original {
 		t.Errorf("expected no suffix when disabled, got: %s", result)
+	}
+}
+
+// TestCavemanKeepsActionCarveOut guards the fix for turns that ended with a
+// short sentence describing an action instead of calling the tool. Both terse
+// levels must scope brevity to prose only, otherwise the style suffix competes
+// with toolExecutionGuidance and the model answers "reading the file now."
+func TestCavemanKeepsActionCarveOut(t *testing.T) {
+	for _, level := range []string{"light", "full"} {
+		if !strings.Contains(cavemanSuffix(compressionSnapshot{
+			cavemanEnabled: true,
+			cavemanLevel:   level,
+		}), "never to actions") {
+			t.Errorf("level %q lost the action carve-out", level)
+		}
 	}
 }

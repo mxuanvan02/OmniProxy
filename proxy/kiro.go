@@ -196,13 +196,13 @@ type KiroPayload struct {
 	// Not serialized to the Kiro API request body.
 	ToolNameMap map[string]string `json:"-"`
 
-	// OriginalModel preserves the client-supplied model name (after thinking
-	// suffix stripping, but BEFORE Kiro alias mapping). External OpenAI-compatible
-	// providers receive this so they route to the model the client actually
-	// requested (e.g. "gpt-4o") rather than the Kiro-aliased equivalent
-	// (e.g. "claude-sonnet-4.5"). Empty for native Kiro routing, which uses
-	// ConversationState.CurrentMessage.UserInputMessage.ModelID.
+	// OriginalModel preserves the model ID sent to external providers. It may differ
+	// from the client-visible model when a request is routed through an internal alias.
 	OriginalModel string `json:"-"`
+
+	// PublicModel is the model ID returned to the client. Empty falls back to the
+	// routing model for callers that do not need an alias.
+	PublicModel string `json:"-"`
 }
 
 type KiroUserInputMessage struct {

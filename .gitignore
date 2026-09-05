@@ -31,5 +31,8 @@ scripts/sync-*.sh
 # Local rollback snapshots (contain data/config.json with live credentials)
 .rollback/
 
+# Pre-sync snapshots pulled from a remote host (full account credentials)
+.sync-backups/
+
 # Local Go build cache (GOCACHE=$PWD/.gocache)
 .gocache/

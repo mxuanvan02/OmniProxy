@@ -5,9 +5,49 @@ import (
 	"errors"
 	"omniproxy/config"
 	"omniproxy/logger"
+	"omniproxy/pool"
 	"strings"
 	"time"
 )
+
+// poolRecoveryWaves is how many times a request re-scans the pool after every
+// eligible account has been excluded. Without this a burst of transient
+// upstream errors across a small pool ends the SSE turn immediately, which the
+// client renders as the assistant stopping mid-answer.
+const poolRecoveryWaves = 2
+
+// poolRecoveryDelay is the wait before each recovery wave. Cooldowns recorded
+// by RecordError are short, so a few seconds is enough for a pool that failed
+// on transient errors to become eligible again. A variable rather than a
+// constant so tests can exercise the waves without sleeping for real.
+var poolRecoveryDelay = 3 * time.Second
+
+// waitForPoolRecovery reports whether the caller should re-scan the pool after
+// exhausting every eligible account. It waits out the short cooldowns and then
+// clears the per-request exclusion set — account health itself stays with the
+// pool (cooldowns, disabled flags), so a genuinely broken account is not handed
+// back. Only transient upstream failures are retried; auth errors, quota
+// exhaustion and content refusals fail identically after a wait.
+func (h *Handler) waitForPoolRecovery(ctx context.Context, model string, excluded map[string]bool, lastErr error, wave *int) bool {
+	if *wave >= poolRecoveryWaves || len(excluded) == 0 || lastErr == nil {
+		return false
+	}
+	if clientGone(ctx, lastErr) || !pool.IsTransientError(lastErr) {
+		return false
+	}
+	*wave++
+	logger.Warnf("[PoolRecovery] model=%s pool exhausted (%d excluded) — wave %d/%d after %v (last err: %s)",
+		model, len(excluded), *wave, poolRecoveryWaves, poolRecoveryDelay, truncateForLog(lastErr.Error()))
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(poolRecoveryDelay):
+	}
+	for id := range excluded {
+		delete(excluded, id)
+	}
+	return true
+}
 
 // clientGone reports whether err is the client hanging up rather than an
 // upstream fault. Every chat request now derives from r.Context(), so a

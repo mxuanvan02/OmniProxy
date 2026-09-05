@@ -462,6 +462,28 @@ func TestModelInfoTokenLimitsFillsOnlyMissingMetadata(t *testing.T) {
 	}
 }
 
+// SOTA aliases are gateway IDs, not Claude families. Inventing a 1M window for
+// them made Claude Code compact and bill against the wrong profile.
+func TestSotaAliasesKeepGatewayTokenLimits(t *testing.T) {
+	input, output, ok := modelInfoTokenLimits(ModelInfo{
+		ModelId: "model-A",
+		TokenLimits: &struct {
+			MaxInputTokens  int `json:"maxInputTokens"`
+			MaxOutputTokens int `json:"maxOutputTokens"`
+		}{MaxInputTokens: 200_000, MaxOutputTokens: 100_000},
+	})
+	if !ok || input != 200_000 || output != 100_000 {
+		t.Fatalf("SOTA catalog limits = (%d, %d, %v), want (200000, 100000, true)", input, output, ok)
+	}
+
+	if _, _, found := policyModelLimits("model-S"); found {
+		t.Fatal("policyModelLimits still invents limits for a SOTA alias")
+	}
+	if hasCanonicalTokenLimits("model-T") {
+		t.Fatal("hasCanonicalTokenLimits still claims a SOTA alias")
+	}
+}
+
 // claudeSettingsAfterApply runs Apply against a redirected HOME and returns the
 // settings file it wrote.
 func claudeSettingsAfterApply(t *testing.T, seed string, body string) map[string]interface{} {
@@ -511,10 +533,7 @@ func claudePickerRow(t *testing.T, settings map[string]interface{}, model string
 	return nil
 }
 
-// A SOTA alias is an ID Claude Code does not know, so it offers no Effort
-// control for it. behavesAs on the picker row is the channel that supplies the
-// capability profile; without a row the alias routes but cannot be selected.
-func TestApplyClaudeCliSettingsPublishesSotaPickerRowsWithBehavesAs(t *testing.T) {
+func TestApplyClaudeCliSettingsPublishesSotaPickerRows(t *testing.T) {
 	got := claudeSettingsAfterApply(t, "", `{"env":{"ANTHROPIC_BASE_URL":"http://proxy/v1","ANTHROPIC_API_KEY":"key"}}`)
 	for model, want := range map[string]string{
 		"model-S": "claude-fable-5",
@@ -571,8 +590,6 @@ func TestApplyClaudeCliSettingsRejectsUnknownEffort(t *testing.T) {
 	}
 }
 
-// A tier slot pointed at a SOTA alias needs its capabilities declared, or Claude
-// Code hides Effort for that slot.
 func TestApplyClaudeCliSettingsDeclaresSotaSlotCapabilities(t *testing.T) {
 	seed := `{"env":{"ANTHROPIC_DEFAULT_SONNET_MODEL":"model-T","ANTHROPIC_DEFAULT_HAIKU_MODEL":"model-T","ANTHROPIC_DEFAULT_OPUS_MODEL":"claude-opus-5"}}`
 	got := claudeSettingsAfterApply(t, seed, `{"env":{"ANTHROPIC_BASE_URL":"http://proxy/v1","ANTHROPIC_API_KEY":"key"}}`)
@@ -580,12 +597,90 @@ func TestApplyClaudeCliSettingsDeclaresSotaSlotCapabilities(t *testing.T) {
 	if env["ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES"] != sotaSlotCapabilities {
 		t.Fatalf("sonnet slot capabilities = %#v", env["ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES"])
 	}
-	// The Haiku slot already routes to a real model, so Apply must not stomp it.
+	if env["ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES"] != sotaSlotCapabilities {
+		t.Fatalf("haiku slot capabilities = %#v", env["ANTHROPIC_DEFAULT_HAIKU_MODEL_SUPPORTED_CAPABILITIES"])
+	}
 	if env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] != "model-T" {
 		t.Fatalf("haiku slot = %#v, want the operator's model-T", env["ANTHROPIC_DEFAULT_HAIKU_MODEL"])
 	}
-	// A model Claude Code already knows needs no override.
 	if _, found := env["ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES"]; found {
 		t.Fatalf("known model got a capability override: %#v", env)
+	}
+}
+
+func TestApplyClaudeCliSettingsRemovesLegacySotaMetadata(t *testing.T) {
+	seed := `{"model":"model-S","fallbackModel":["claude-opus-5"],"advisorModel":"model-O","env":{"ANTHROPIC_DEFAULT_SONNET_MODEL":"model-T","ANTHROPIC_DEFAULT_SONNET_MODEL_NAME":"SOTA model-T","ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION":"SOTA model-T via the local gateway","ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES":"effort,xhigh_effort,max_effort,thinking,adaptive_thinking,interleaved_thinking"}}`
+	got := claudeSettingsAfterApply(t, seed, `{"env":{"ANTHROPIC_BASE_URL":"http://proxy/v1","ANTHROPIC_API_KEY":"key"}}`)
+	env, _ := got["env"].(map[string]interface{})
+	if _, found := env["ANTHROPIC_DEFAULT_SONNET_MODEL_NAME"]; found {
+		t.Fatalf("legacy SOTA name remains: %#v", env)
+	}
+	if _, found := env["ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION"]; found {
+		t.Fatalf("legacy SOTA description remains: %#v", env)
+	}
+	if env["ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES"] != sotaSlotCapabilities {
+		t.Fatalf("SOTA slot lost effort capabilities: %#v", env)
+	}
+	if env["ANTHROPIC_DEFAULT_SONNET_MODEL"] != "model-T" || got["model"] != "model-S" || got["advisorModel"] != "model-O" {
+		t.Fatalf("model routing changed: %#v", got)
+	}
+}
+
+func TestApplyClaudeCliSettingsPreservesCustomSlotMetadata(t *testing.T) {
+	seed := `{"env":{"ANTHROPIC_DEFAULT_OPUS_MODEL":"claude-opus-5","ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":"Production Opus","ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":"Operator routing","ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES":"custom"}}`
+	got := claudeSettingsAfterApply(t, seed, `{"env":{"ANTHROPIC_BASE_URL":"http://proxy/v1","ANTHROPIC_API_KEY":"key"}}`)
+	env, _ := got["env"].(map[string]interface{})
+	for key, want := range map[string]string{
+		"ANTHROPIC_DEFAULT_OPUS_MODEL_NAME":                   "Production Opus",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION":            "Operator routing",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL_SUPPORTED_CAPABILITIES": "custom",
+	} {
+		if env[key] != want {
+			t.Fatalf("%s = %#v, want %q", key, env[key], want)
+		}
+	}
+}
+
+func TestApplyClaudeCliSettingsPreservesCustomSotaCapabilities(t *testing.T) {
+	seed := `{"env":{"ANTHROPIC_DEFAULT_SONNET_MODEL":"model-T","ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES":"effort,thinking"}}`
+	got := claudeSettingsAfterApply(t, seed, `{"env":{"ANTHROPIC_BASE_URL":"http://proxy/v1","ANTHROPIC_API_KEY":"key"}}`)
+	env, _ := got["env"].(map[string]interface{})
+	if env["ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES"] != "effort,thinking" {
+		t.Fatalf("custom SOTA capabilities = %#v", env["ANTHROPIC_DEFAULT_SONNET_MODEL_SUPPORTED_CAPABILITIES"])
+	}
+}
+
+// Apply without a reasoningEffort field must leave the configured level alone.
+// Clamping a blank value resolved to medium, silently downgrading an operator's
+// high/xhigh/max on every unrelated Apply.
+func TestApplyCodexCliSettingsKeepsConfiguredEffortWhenRequestOmitsIt(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	configPath := filepath.Join(homeDir, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatalf("create Codex directory: %v", err)
+	}
+	if err := os.WriteFile(configPath, []byte("model_reasoning_effort = \"xhigh\"\n"), 0o644); err != nil {
+		t.Fatalf("seed config.toml: %v", err)
+	}
+
+	h := &Handler{}
+	req := httptest.NewRequest(http.MethodPost, "/cli-tools/codex", strings.NewReader(`{"baseUrl":"http://proxy","apiKey":"key","model":"claude-opus-5"}`))
+	rec := httptest.NewRecorder()
+	h.apiApplyCliToolSettings(rec, req, "codex")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply Codex settings status = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("read config.toml: %v", err)
+	}
+	got := string(data)
+	if !strings.Contains(got, `model_reasoning_effort = "xhigh"`) {
+		t.Fatalf("configured effort was not preserved:\n%s", got)
+	}
+	if strings.Contains(got, `model_reasoning_effort = "medium"`) {
+		t.Fatalf("Apply downgraded the configured effort to medium:\n%s", got)
 	}
 }
