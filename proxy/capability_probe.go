@@ -197,6 +197,12 @@ func (h *Handler) probeAccountCapability(account *config.Account, capability str
 	}
 
 	endpoint := openAICompatibleEndpoint(account.BaseURL, path)
+	if capability == capabilityChat {
+		// Honour the account's chat-path override so a provider whose canonical
+		// /v1/chat/completions is unreachable is not reported as a dead chat
+		// endpoint while its configured path works.
+		endpoint = openAICompatibleEndpoint(account.BaseURL, externalChatPath(account))
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))

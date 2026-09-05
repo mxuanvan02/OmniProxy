@@ -133,6 +133,20 @@ type Account struct {
 	// Bearer key. Empty for native Kiro/AWS accounts.
 	BaseURL string `json:"baseUrl,omitempty"`
 
+	// ChatPath overrides the upstream chat-completion path for this account.
+	// Empty means the OpenAI default "/v1/chat/completions".
+	//
+	// It exists because some gateways serve a working OpenAI-shaped chat route
+	// at a non-standard path while the canonical one is unreachable. Measured
+	// on api.justwoker.icu (2026-09-06): POST /v1/chat/completions is answered
+	// by a Cloudflare HTML 403 for every client fingerprint tried (Go, curl
+	// h1/h2, openai-python headers), while POST /v1/completions returns a
+	// normal chat.completion — same request body, same auth, same models,
+	// including SSE streaming and OpenAI-style tool calls. The block is on the
+	// path, not the credential, so a per-account path override recovers the
+	// provider without weakening anything for the accounts that don't set it.
+	ChatPath string `json:"chatPath,omitempty"`
+
 	// ModelMappings translates public model IDs to provider-specific IDs for
 	// this account. Routing and usage continue to use the public ID; only the
 	// outbound external-provider request is rewritten.
