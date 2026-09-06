@@ -3954,10 +3954,10 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 				closeActiveBlock()
 				ensureMessageStart()
 				h.recordFailure()
-				h.sendSSE(w, flusher, "error", map[string]interface{}{
-					"type":  "error",
-					"error": map[string]string{"type": "api_error", "message": err.Error()},
-				})
+				// Terminate the message, not just report the error: the client
+				// is mid-message and will otherwise wait for a terminator that
+				// never comes.
+				h.endClaudeSSETurnWithError(w, flusher, "api_error", err.Error())
 				return
 			}
 			// Transient upstream errors (5xx, overload, timeout) are retried
@@ -3991,10 +3991,9 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 				continue
 			}
 			h.recordFailure()
-			h.sendSSE(w, flusher, "error", map[string]interface{}{
-				"type":  "error",
-				"error": map[string]string{"type": "api_error", "message": err.Error()},
-			})
+			// message_start already went out, so the client is mid-message here
+			// too and needs a terminator, not just an error event.
+			h.endClaudeSSETurnWithError(w, flusher, "api_error", err.Error())
 			return
 		}
 	skipAccountHandling:
@@ -4066,13 +4065,26 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 		return
 	}
 
+	// The loop can fall through here with the message already open: the
+	// content-blocked branch continues without checking messageStarted, and a
+	// later attempt may exhaust the pool. A client that has seen message_start
+	// needs a terminator; one that has not must not receive a stray
+	// message_stop for a message it was never told about.
+	endTurn := func(message string) {
+		if messageStarted {
+			h.endClaudeSSETurnWithError(w, flusher, "api_error", message)
+			return
+		}
+		h.sendClaudeSSEError(w, flusher, "api_error", message)
+	}
+
 	if lastErr == nil {
-		h.sendClaudeSSEError(w, flusher, "api_error", "No available accounts")
+		endTurn("No available accounts")
 		return
 	}
 
 	h.recordError(apiKeyID, lastAccountID, model, endpointClaude, lastErr.Error())
-	h.sendClaudeSSEError(w, flusher, "api_error", lastErr.Error())
+	endTurn(lastErr.Error())
 }
 
 func (h *Handler) sendSSE(w http.ResponseWriter, flusher http.Flusher, event string, data interface{}) {
@@ -4093,6 +4105,33 @@ func (h *Handler) sendClaudeSSEError(w http.ResponseWriter, flusher http.Flusher
 			"type":    errType,
 			"message": message,
 		},
+	})
+}
+
+// endClaudeSSETurnWithError terminates an in-flight Claude SSE turn that failed
+// after output had already reached the client.
+//
+// Such a turn cannot be retried — the prefix is already visible, so replaying it
+// would corrupt the response. Previously this path emitted only an `error` event
+// and returned, leaving the message open: the client had seen `message_start`
+// and content blocks but never a terminator. Claude Code reads that as a
+// connection dropped mid-message and stops mid-task, which looks like the model
+// quitting on its own rather than an upstream failure.
+//
+// The success path closes with message_delta + message_stop; the OpenAI-side
+// equivalent of this branch already sends `data: [DONE]`. Only the Claude branch
+// was missing its terminator.
+//
+// message_delta is deliberately NOT sent. It carries stop_reason, and Anthropic
+// defines no value meaning "upstream died": sending "end_turn" would tell the
+// client the turn finished cleanly and invite it to ignore the error event —
+// converting a visible failure into a silent truncation, which is the very
+// symptom this fixes. `error` followed by `message_stop` says exactly what
+// happened: the turn failed, and it is over.
+func (h *Handler) endClaudeSSETurnWithError(w http.ResponseWriter, flusher http.Flusher, errType, message string) {
+	h.sendClaudeSSEError(w, flusher, errType, message)
+	h.sendSSE(w, flusher, "message_stop", map[string]interface{}{
+		"type": "message_stop",
 	})
 }
 
