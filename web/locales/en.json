@@ -1026,5 +1026,8 @@
   "detail.catalogFailed": "fetch failed",
   "detail.catalogUnchecked": "not checked yet",
   "detail.catalogCheckedAt": "checked",
-  "detail.catalogSource": "source"
+  "detail.catalogSource": "source",
+  "detail.catalogEmpty": "provider answered with an empty catalog",
+  "detail.catalogEmptyWarn": "still eligible for every model (routing stays optimistic)",
+  "detail.catalogEmptyRouting": "Pool keeps no catalog entry, so this account stays eligible for every model"
 }

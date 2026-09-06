@@ -1194,13 +1194,14 @@ let collapsedGroups = loadCollapsedGroups();
       case 'static': label = t('detail.catalogStatic'); break;
       case 'not_applicable': label = t('detail.catalogNotApplicable'); break;
       case 'failed': label = t('detail.catalogFailed'); break;
+      case 'empty': label = t('detail.catalogEmpty'); break;
       default: label = t('detail.catalogUnchecked');
     }
     // A failed fetch keeps whatever catalog was last known routable, so the
     // count still matters; show it next to the failure rather than instead of it.
     const badgeColor = state === 'verified' ? 'var(--success, #16a34a)'
       : state === 'failed' ? 'var(--destructive, #dc2626)'
-      : state === 'static' ? 'var(--warning, #d97706)'
+      : (state === 'static' || state === 'empty') ? 'var(--warning, #d97706)'
       : 'var(--muted-foreground, #666)';
     let value = label;
     if (state === 'verified' || state === 'static' || (state === 'failed' && count > 0)) {
@@ -1208,6 +1209,12 @@ let collapsedGroups = loadCollapsedGroups();
     }
     let rows = '<div class="detail-item"><div class="detail-label">' + escapeHtml(t('detail.catalogProvenance')) +
       '</div><div class="detail-value" style="color:' + badgeColor + ';">' + escapeHtml(value) + '</div></div>';
+    if (state === 'empty') {
+      // The dangerous half of an empty catalog: the pool stores no entry for
+      // it, and a missing entry reads as cold start, so the account stays
+      // eligible for every model instead of none.
+      rows += detailItem(t('detail.catalogProvenance'), t('detail.catalogEmptyRouting'));
+    }
     if (a.catalogError) {
       rows += detailItem(t('detail.catalogFailed'), a.catalogError);
     }

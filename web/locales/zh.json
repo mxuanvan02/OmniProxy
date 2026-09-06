@@ -1026,5 +1026,8 @@
   "detail.catalogFailed": "获取失败",
   "detail.catalogUnchecked": "尚未检查",
   "detail.catalogCheckedAt": "检查时间",
-  "detail.catalogSource": "来源"
+  "detail.catalogSource": "来源",
+  "detail.catalogEmpty": "服务商返回空目录",
+  "detail.catalogEmptyWarn": "仍可用于所有模型（路由保持乐观）",
+  "detail.catalogEmptyRouting": "池中没有目录记录，因此该账号仍会被用于所有模型"
 }

@@ -168,6 +168,72 @@ func TestCatalogStatusForgetDropsRecord(t *testing.T) {
 	}
 }
 
+// A fetch that succeeded and returned nothing has verified no model, so
+// "verified 0" must never be publishable. Observed live: four gateways
+// answered /v1/models with HTTP 200 and an empty data array, and the dashboard
+// rendered "0 — verified from provider".
+func TestVerifiedZeroIsRecordedAsEmpty(t *testing.T) {
+	s := newCatalogStatusStore()
+	s.record("acct", CatalogStatus{State: CatalogStateVerified, Count: 0, Source: "/v1/models"}, nil)
+	got, ok := s.get("acct")
+	if !ok {
+		t.Fatal("no record stored")
+	}
+	if got.State != CatalogStateEmpty {
+		t.Fatalf("state = %q, want %q — a zero-model fetch verified nothing", got.State, CatalogStateEmpty)
+	}
+	if got.Source != "/v1/models" {
+		t.Fatalf("source = %q, want the fetch path preserved", got.Source)
+	}
+}
+
+// The read path overwrites Count from the live pool, and SetModelList drops an
+// empty catalog instead of storing it — so a record written as verified can
+// read back as zero. The contradiction has to be caught on both sides.
+func TestCatalogStatusForRewritesVerifiedZeroAsEmpty(t *testing.T) {
+	h := &Handler{catalogStatus: newCatalogStatusStore()}
+	// Recorded while the provider still had a catalog.
+	h.catalogStatus.record("acct", CatalogStatus{State: CatalogStateVerified, Count: 4, Source: "/v1/models"}, nil)
+	// Pool now reports nothing cached for it.
+	got := h.catalogStatusFor("acct", 0)
+	if got.State != CatalogStateEmpty {
+		t.Fatalf("state = %q, want %q when the live pool count is zero", got.State, CatalogStateEmpty)
+	}
+}
+
+// A non-zero verified catalog must be left alone by the same guard.
+func TestCatalogStatusForKeepsVerifiedWhenCountPositive(t *testing.T) {
+	h := &Handler{catalogStatus: newCatalogStatusStore()}
+	h.catalogStatus.record("acct", CatalogStatus{State: CatalogStateVerified, Count: 4, Source: "/v1/models"}, nil)
+	got := h.catalogStatusFor("acct", 7)
+	if got.State != CatalogStateVerified {
+		t.Fatalf("state = %q, want verified preserved", got.State)
+	}
+	if got.Count != 7 {
+		t.Fatalf("count = %d, want the live pool value 7", got.Count)
+	}
+}
+
+// Empty is distinct from failed: the credential works. Conflating them would
+// send an operator hunting for a dead key that is fine.
+func TestEmptyIsNotFailed(t *testing.T) {
+	s := newCatalogStatusStore()
+	s.record("empty", CatalogStatus{State: CatalogStateVerified, Count: 0}, nil)
+	s.record("dead", CatalogStatus{}, errors.New(`HTTP 401: {"code":"invalid_api_key"}`))
+
+	empty, _ := s.get("empty")
+	dead, _ := s.get("dead")
+	if empty.State == dead.State {
+		t.Fatalf("empty and failed share state %q; they need different operator actions", empty.State)
+	}
+	if empty.Error != "" {
+		t.Fatalf("empty catalog carried an error string %q", empty.Error)
+	}
+	if dead.Error == "" {
+		t.Fatal("failed fetch lost the upstream rejection")
+	}
+}
+
 // Tests and any Handler built as a struct literal leave catalogStatus nil.
 // record/get/forget must no-op rather than panic on a live refresh path.
 func TestCatalogStatusNilReceiverIsNoop(t *testing.T) {

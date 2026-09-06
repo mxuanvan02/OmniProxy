@@ -30,6 +30,16 @@ const (
 	// CatalogStateFailed means a fetch was attempted and rejected. The error
 	// distinguishes a dead credential from an exhausted quota from a bot filter.
 	CatalogStateFailed CatalogState = "failed"
+	// CatalogStateEmpty means the provider answered with HTTP 200 and an empty
+	// catalog. This is not the same as verified-with-zero, which is a
+	// contradiction, nor the same as failed: the credential works.
+	//
+	// It matters more than it looks. SetModelList deliberately ignores an empty
+	// list to avoid letting a transient blip filter an account out, so the pool
+	// keeps no entry for it — and accountHasModel treats a missing entry as
+	// cold start and returns true. The account therefore stays eligible for
+	// *every* model while the dashboard would otherwise imply it serves none.
+	CatalogStateEmpty CatalogState = "empty"
 )
 
 // CatalogStatus is the per-account provenance record behind the model count.
@@ -73,6 +83,12 @@ func (s *catalogStatusStore) record(accountID string, status CatalogStatus, err 
 	if err != nil {
 		status.State = CatalogStateFailed
 		status.Error = truncateCatalogErr(err.Error())
+	}
+	// "Verified zero" is a contradiction: a fetch that succeeded and returned
+	// nothing has not verified any model. Normalising here rather than at each
+	// call site means no future branch can reintroduce the contradiction.
+	if status.State == CatalogStateVerified && status.Count == 0 {
+		status.State = CatalogStateEmpty
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -132,6 +148,12 @@ func (h *Handler) catalogStatusFor(accountID string, cachedCount int) CatalogSta
 	// only explains where that list came from.
 	if st.State != CatalogStateFailed || cachedCount > 0 {
 		st.Count = cachedCount
+	}
+	// Overwriting the count can reintroduce the contradiction the recorder
+	// normalised away: the pool drops an empty catalog rather than storing it
+	// (SetModelList), so a verified account can read back as zero here.
+	if st.State == CatalogStateVerified && st.Count == 0 {
+		st.State = CatalogStateEmpty
 	}
 	return st
 }

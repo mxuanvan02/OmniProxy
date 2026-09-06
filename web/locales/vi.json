@@ -1026,5 +1026,8 @@
   "detail.catalogFailed": "lấy danh mục thất bại",
   "detail.catalogUnchecked": "chưa kiểm tra",
   "detail.catalogCheckedAt": "kiểm tra lúc",
-  "detail.catalogSource": "nguồn"
+  "detail.catalogSource": "nguồn",
+  "detail.catalogEmpty": "nhà cung cấp trả về danh mục rỗng",
+  "detail.catalogEmptyWarn": "vẫn được chọn cho mọi model (định tuyến giữ trạng thái lạc quan)",
+  "detail.catalogEmptyRouting": "Pool không lưu danh mục, nên account này vẫn được chọn cho mọi model"
 }
