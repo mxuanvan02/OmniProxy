@@ -1018,5 +1018,13 @@
   "quota.inactive": "已关闭",
   "quota.expiringFirst": "即将到期",
   "quota.remainingLow": "% 配额：从低到高",
-  "quota.remainingHigh": "% 配额：从高到低"
+  "quota.remainingHigh": "% 配额：从高到低",
+  "detail.catalogProvenance": "模型目录",
+  "detail.catalogVerified": "已从服务商核实",
+  "detail.catalogStatic": "内置列表（服务商未确认）",
+  "detail.catalogNotApplicable": "该服务商没有对话目录",
+  "detail.catalogFailed": "获取失败",
+  "detail.catalogUnchecked": "尚未检查",
+  "detail.catalogCheckedAt": "检查时间",
+  "detail.catalogSource": "来源"
 }

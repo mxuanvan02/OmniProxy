@@ -1181,6 +1181,45 @@ let collapsedGroups = loadCollapsedGroups();
     const titleAttr = titleValue ? ' title="' + escapeAttr(titleValue) + '"' : '';
     return '<div class="detail-item"><div class="detail-label">' + escapeHtml(label) + '</div><div class="detail-value"' + titleAttr + '>' + escapeHtml(value) + '</div></div>';
   }
+  // catalogProvenanceSection explains the model count instead of leaving a bare
+  // number. A zero can mean "this provider sells no chat models", "the
+  // credential is dead", "the quota is spent" or "never probed" — four
+  // different operator actions that used to look identical on this screen.
+  function catalogProvenanceSection(a) {
+    const state = String(a.catalogState || '');
+    const count = a.modelCount != null ? a.modelCount : 0;
+    let label;
+    switch (state) {
+      case 'verified': label = t('detail.catalogVerified'); break;
+      case 'static': label = t('detail.catalogStatic'); break;
+      case 'not_applicable': label = t('detail.catalogNotApplicable'); break;
+      case 'failed': label = t('detail.catalogFailed'); break;
+      default: label = t('detail.catalogUnchecked');
+    }
+    // A failed fetch keeps whatever catalog was last known routable, so the
+    // count still matters; show it next to the failure rather than instead of it.
+    const badgeColor = state === 'verified' ? 'var(--success, #16a34a)'
+      : state === 'failed' ? 'var(--destructive, #dc2626)'
+      : state === 'static' ? 'var(--warning, #d97706)'
+      : 'var(--muted-foreground, #666)';
+    let value = label;
+    if (state === 'verified' || state === 'static' || (state === 'failed' && count > 0)) {
+      value = count + ' — ' + label;
+    }
+    let rows = '<div class="detail-item"><div class="detail-label">' + escapeHtml(t('detail.catalogProvenance')) +
+      '</div><div class="detail-value" style="color:' + badgeColor + ';">' + escapeHtml(value) + '</div></div>';
+    if (a.catalogError) {
+      rows += detailItem(t('detail.catalogFailed'), a.catalogError);
+    }
+    if (a.catalogSource) {
+      rows += detailItem(t('detail.catalogSource'), a.catalogSource);
+    }
+    if (a.catalogCheckedAt) {
+      rows += detailItem(t('detail.catalogCheckedAt'), new Date(a.catalogCheckedAt * 1000).toLocaleString());
+    }
+    return '<div class="detail-section"><h4>' + escapeHtml(t('detail.catalogProvenance')) +
+      '</h4><div class="detail-grid">' + rows + '</div></div>';
+  }
   function showDetail(id) {
     const a = accountsData.find(x => x.id === id);
     if (!a) return;
@@ -1386,6 +1425,10 @@ let collapsedGroups = loadCollapsedGroups();
       detailItem(t('detail.totalTokens'), formatNum(a.totalTokens || 0)) +
       detailItem(t('detail.totalCredits'), (a.totalCredits || 0).toFixed(2)) +
       '</div></div>' +
+
+      // Catalog provenance is shown for every account type, service accounts
+      // included: their zero count is the one most often misread as a fault.
+      catalogProvenanceSection(a) +
 
       (isService ? '' : '<div class="detail-section">' +
       '<h4>' + escapeHtml(t('detail.models')) +

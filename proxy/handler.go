@@ -954,6 +954,11 @@ type Handler struct {
 	promptCache     *promptCacheTracker
 	tokenRefreshMu  sync.Mutex
 	usageTracker    *UsageTracker
+	// catalogStatus records why each account's model count looks the way it
+	// does. Without it a zero count conflates "sells no chat models" with
+	// "credential is dead", and a static seed is indistinguishable from a
+	// verified catalog.
+	catalogStatus *catalogStatusStore
 }
 
 type thinkingStreamSource int
@@ -1145,6 +1150,7 @@ func NewHandler() *Handler {
 		stopStatsSaver:  make(chan struct{}),
 		promptCache:     newPromptCacheTracker(defaultPromptCacheTTL),
 		usageTracker:    GetUsageTracker(),
+		catalogStatus:   newCatalogStatusStore(),
 	}
 	// Resolve web assets dir relative to the binary so the server works
 	// regardless of the current working directory.
@@ -2186,6 +2192,15 @@ func (h *Handler) refreshModelsCache() {
 				modelIDs = append(modelIDs, m.ModelId)
 			}
 			h.pool.SetModelList(account.ID, modelIDs)
+			// This branch seeds the list inline rather than going through
+			// fetchAndCacheAccountModels, so it has to record provenance
+			// itself — otherwise a Codex account stays "never checked" no
+			// matter how many refresh passes run.
+			h.catalogStatus.record(account.ID, CatalogStatus{
+				State:  CatalogStateStatic,
+				Count:  len(codexModels),
+				Source: "codex subscription table",
+			}, nil)
 			aggregated = mergeUniqueModels(aggregated, codexModels)
 			continue
 		}
@@ -2262,10 +2277,13 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 	if isGommoAccount(account) {
 		models, err := fetchGommoModels(account)
 		if err != nil {
+			h.catalogStatus.record(account.ID, CatalogStatus{Source: "gommo catalog"}, err)
 			return err
 		}
 		if len(models) == 0 {
-			return fmt.Errorf("gommo account %s returned an empty model catalog", account.Email)
+			err = fmt.Errorf("gommo account %s returned an empty model catalog", account.Email)
+			h.catalogStatus.record(account.ID, CatalogStatus{Source: "gommo catalog"}, err)
+			return err
 		}
 		modelIDs := make([]string, 0, len(models))
 		for _, m := range models {
@@ -2276,10 +2294,21 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 		h.cachedModels = mergeUniqueModels(h.cachedModels, models)
 		h.modelsCacheTime = time.Now().Unix()
 		h.modelsCacheMu.Unlock()
+		h.catalogStatus.record(account.ID, CatalogStatus{
+			State:  CatalogStateVerified,
+			Count:  len(models),
+			Source: "gommo catalog",
+		}, nil)
 		logger.Infof("[ModelsCache] Cached %d Gommo media models for %s", len(models), account.Email)
 		return nil
 	}
 	if isServiceAccount(account) {
+		// Not a failure: a search/scrape API has no chat catalog to list. The
+		// dashboard must say so rather than showing an unexplained zero.
+		h.catalogStatus.record(account.ID, CatalogStatus{
+			State:  CatalogStateNotApplicable,
+			Source: "service provider (no chat catalog)",
+		}, nil)
 		return fmt.Errorf("service account %s does not expose chat models", account.Provider)
 	}
 	// Codex accounts expose a fixed set of subscription-tier models
@@ -2297,6 +2326,14 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 		h.cachedModels = mergeUniqueModels(h.cachedModels, models)
 		h.modelsCacheTime = time.Now().Unix()
 		h.modelsCacheMu.Unlock()
+		// Seeded, not fetched: Codex publishes no catalog endpoint, so the
+		// count reflects this build's table rather than the account's real
+		// entitlement.
+		h.catalogStatus.record(account.ID, CatalogStatus{
+			State:  CatalogStateStatic,
+			Count:  len(models),
+			Source: "codex subscription table",
+		}, nil)
 		logger.Infof("[ModelsCache] Seeded %d Codex subscription models for %s", len(models), account.Email)
 		return nil
 	}
@@ -2306,8 +2343,10 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 	// leaving the account with no routable models.
 	if isAntigravityAccount(account) {
 		models, err := fetchAntigravityModels(account)
+		fellBack := false
 		if err != nil || len(models) == 0 {
 			models = antigravityFallbackModels()
+			fellBack = true
 			if err != nil {
 				logger.Warnf("[ModelsCache] Antigravity catalog fetch failed for %s (%v); using verified fallback list", account.Email, err)
 			}
@@ -2321,6 +2360,16 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 		h.cachedModels = mergeUniqueModels(h.cachedModels, models)
 		h.modelsCacheTime = time.Now().Unix()
 		h.modelsCacheMu.Unlock()
+		// The fallback keeps the account routable, but the operator still needs
+		// to know the list was not confirmed by the provider on this pass.
+		status := CatalogStatus{State: CatalogStateVerified, Count: len(models), Source: "antigravity catalog"}
+		if fellBack {
+			status = CatalogStatus{State: CatalogStateStatic, Count: len(models), Source: "antigravity fallback list"}
+			if err != nil {
+				status.Error = truncateCatalogErr(err.Error())
+			}
+		}
+		h.catalogStatus.record(account.ID, status, nil)
 		logger.Infof("[ModelsCache] Seeded %d Antigravity models for %s", len(models), account.Email)
 		return nil
 	}
@@ -2337,6 +2386,14 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 			h.cachedModels = mergeUniqueModels(h.cachedModels, models)
 			h.modelsCacheTime = time.Now().Unix()
 			h.modelsCacheMu.Unlock()
+			// fetchAgentRouterModels has no fallback list — it returns an
+			// error on any non-200 — so reaching here means the gateway
+			// answered with a real catalog.
+			h.catalogStatus.record(account.ID, CatalogStatus{
+				State:  CatalogStateVerified,
+				Count:  len(models),
+				Source: "/v1/models",
+			}, nil)
 			logger.Infof("[ModelsCache] Refreshed %d models for AgentRouter provider %s", len(models), account.Email)
 			return nil
 		}
@@ -2344,6 +2401,7 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 	if isExternalAccount(account) {
 		models, err := fetchExternalProviderModels(account)
 		if err != nil {
+			h.catalogStatus.record(account.ID, CatalogStatus{Source: "/v1/models"}, err)
 			return err
 		}
 		modelIDs := make([]string, 0, len(models))
@@ -2366,14 +2424,22 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 		h.cachedModels = mergeUniqueModels(h.cachedModels, models)
 		h.modelsCacheTime = time.Now().Unix()
 		h.modelsCacheMu.Unlock()
+		h.catalogStatus.record(account.ID, CatalogStatus{
+			State:  CatalogStateVerified,
+			Count:  len(models),
+			Source: "/v1/models",
+		}, nil)
 		logger.Infof("[ModelsCache] Refreshed %d models for external provider %s", len(models), account.Email)
 		return nil
 	}
 	if err := h.ensureValidToken(account); err != nil {
-		return fmt.Errorf("token refresh failed: %w", err)
+		err = fmt.Errorf("token refresh failed: %w", err)
+		h.catalogStatus.record(account.ID, CatalogStatus{Source: "kiro ListAvailableModels"}, err)
+		return err
 	}
 	models, err := ListAvailableModels(account)
 	if err != nil {
+		h.catalogStatus.record(account.ID, CatalogStatus{Source: "kiro ListAvailableModels"}, err)
 		return err
 	}
 	for i := range models {
@@ -2393,6 +2459,11 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 	h.modelsCacheTime = time.Now().Unix()
 	h.modelsCacheMu.Unlock()
 
+	h.catalogStatus.record(account.ID, CatalogStatus{
+		State:  CatalogStateVerified,
+		Count:  len(models),
+		Source: "kiro ListAvailableModels",
+	}, nil)
 	logger.Infof("[ModelsCache] Refreshed %d models for account %s", len(models), account.Email)
 	return nil
 }
@@ -7478,7 +7549,16 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 	// hide sensitive info
 	result := make([]map[string]interface{}, len(accounts))
 	for i, a := range accounts {
+		// The model count alone cannot be read: a service provider with no
+		// chat catalog, a provider whose credential just died, and one that was
+		// never probed all report zero. Publish the provenance alongside it.
+		catalog := h.catalogStatusFor(a.ID, len(h.pool.GetModelList(a.ID)))
 		result[i] = map[string]interface{}{
+			"modelCount":                catalog.Count,
+			"catalogState":              string(catalog.State),
+			"catalogSource":             catalog.Source,
+			"catalogError":              catalog.Error,
+			"catalogCheckedAt":          catalog.CheckedAt,
 			"id":                        a.ID,
 			"email":                     a.Email,
 			"userId":                    a.UserId,

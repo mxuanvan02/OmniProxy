@@ -1018,5 +1018,13 @@
   "quota.inactive": "Đã tắt",
   "quota.expiringFirst": "Sắp hết hạn",
   "quota.remainingLow": "% hạn mức: thấp đến cao",
-  "quota.remainingHigh": "% hạn mức: cao đến thấp"
+  "quota.remainingHigh": "% hạn mức: cao đến thấp",
+  "detail.catalogProvenance": "Danh mục model",
+  "detail.catalogVerified": "đã xác minh từ nhà cung cấp",
+  "detail.catalogStatic": "danh sách cài sẵn (nhà cung cấp chưa xác nhận)",
+  "detail.catalogNotApplicable": "nhà cung cấp không có danh mục chat",
+  "detail.catalogFailed": "lấy danh mục thất bại",
+  "detail.catalogUnchecked": "chưa kiểm tra",
+  "detail.catalogCheckedAt": "kiểm tra lúc",
+  "detail.catalogSource": "nguồn"
 }

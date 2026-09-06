@@ -1018,5 +1018,13 @@
   "quota.inactive": "Turned off",
   "quota.expiringFirst": "Expiring first",
   "quota.remainingLow": "% quota: low to high",
-  "quota.remainingHigh": "% quota: high to low"
+  "quota.remainingHigh": "% quota: high to low",
+  "detail.catalogProvenance": "Model catalog",
+  "detail.catalogVerified": "verified from provider",
+  "detail.catalogStatic": "built-in list (not confirmed by provider)",
+  "detail.catalogNotApplicable": "provider has no chat catalog",
+  "detail.catalogFailed": "fetch failed",
+  "detail.catalogUnchecked": "not checked yet",
+  "detail.catalogCheckedAt": "checked",
+  "detail.catalogSource": "source"
 }
