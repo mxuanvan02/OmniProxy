@@ -1419,12 +1419,25 @@ func fetchCodexUsageAttempt(account *config.Account) error {
 	// which is exactly when we need them most.
 	captureCodexUsageHeaders(account, resp.Header)
 
+	// Refresh the bank-reset credit count here, BEFORE the status-code
+	// branching below, and not on the success path only.
+	//
+	// This used to sit after the 200-only path, which inverted the feature: a
+	// bank-reset credit exists precisely to rescue an account whose quota is
+	// spent, but a spent account answers this probe with 429 and the old code
+	// returned early — so the count was never read, stayed at 0, and the UI
+	// disabled the very button that would have fixed the account. Verified
+	// live: the probe POST returns 429 while GET wham/usage returns 200 with
+	// available_count=2 for the same account.
+	refreshCodexResetCreditCache(account)
+
 	if resp.StatusCode != 200 {
 		errBody, _ := io.ReadAll(resp.Body)
 		// 429 "usage_limit_reached" is not a hard error — we still captured
 		// the usage headers, so return nil to signal "usage fetched".
 		if resp.StatusCode == 429 {
-			logger.Infof("[Codex] %s rate-limited but usage headers captured", account.Email)
+			logger.Infof("[Codex] %s rate-limited but usage headers captured (bank-reset credits: %d)",
+				account.Email, account.CodexResetCreditsAvailable)
 			return nil
 		}
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateErrBody(errBody))
@@ -1433,18 +1446,32 @@ func fetchCodexUsageAttempt(account *config.Account) error {
 	// Drain the body so the connection can be reused.
 	io.Copy(io.Discard, resp.Body)
 
-	// Also fetch the bank-reset credits available count from the wham/usage
-	// endpoint. This is a separate GET (no chat cost) that returns
-	// rate_limit_reset_credits.available_count. We cache it on the account
-	// so the Quota page can display it without making per-poll upstream
-	// calls. Errors are non-fatal — we just leave the cached value as-is.
-	if avail, err := codexResetCreditsAvailable(account); err == nil {
-		if account.CodexResetCreditsAvailable != avail {
-			account.CodexResetCreditsAvailable = avail
-			_ = config.UpdateAccountPreservingCredentials(account.ID, *account)
-		}
-	}
 	return nil
+}
+
+// refreshCodexResetCreditCache reads the bank-reset credit count from the
+// upstream wham/usage endpoint and caches it on the account so the Quota page
+// can render it without a per-poll upstream call.
+//
+// Separate GET, no chat cost, and it answers even when the account is
+// rate-limited — which is the case that matters, since that is when an operator
+// goes looking for a reset credit. Failures are deliberately non-fatal: the
+// previously cached value is more useful than a zero, and a 401 here will be
+// followed by a token refresh and a second attempt by the caller.
+func refreshCodexResetCreditCache(account *config.Account) {
+	avail, err := codexResetCreditsAvailable(account)
+	if err != nil {
+		logger.Debugf("[Codex] %s bank-reset credit lookup failed (keeping cached %d): %v",
+			account.Email, account.CodexResetCreditsAvailable, err)
+		return
+	}
+	if account.CodexResetCreditsAvailable == avail {
+		return
+	}
+	account.CodexResetCreditsAvailable = avail
+	if err := config.UpdateAccountPreservingCredentials(account.ID, *account); err != nil {
+		logger.Warnf("[Codex] Failed to persist bank-reset credit count for %s: %v", account.Email, err)
+	}
 }
 
 // codexSubscriptionModels returns the canonical model list exposed by
