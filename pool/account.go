@@ -1003,16 +1003,39 @@ func (p *AccountPool) RecordSuccess(id string, model string) {
 // quota/auth failure on one model doesn't block other models on the same account.
 // model can be "" to fall back to account-level cooldown (legacy behaviour).
 func (p *AccountPool) RecordError(id string, isQuotaError bool, model string) {
+	class := CooldownTransient
+	if isQuotaError {
+		class = CooldownRateLimited
+	}
+	p.recordErrorWithClass(id, class, model)
+}
+
+// RecordErrorClass records a failure whose cause has been classified, so the
+// cooldown matches how long the account is genuinely unusable.
+//
+// The boolean RecordError takes cannot express the difference between "retry in
+// a moment" and "this credential is dead", which is why a revoked key used to
+// re-enter the rotation every minute and get dialled 768 times. Callers that
+// hold the original error should prefer this.
+func (p *AccountPool) RecordErrorClass(id string, err error, model string) CooldownClass {
+	class := ClassifyCooldown(err)
+	p.recordErrorWithClass(id, class, model)
+	return class
+}
+
+func (p *AccountPool) recordErrorWithClass(id string, class CooldownClass, model string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	var cooldown time.Duration
-	if isQuotaError {
-		cooldown = time.Hour
+	if class.immediate() {
+		// No point counting to three: waiting cannot make a dead credential
+		// or an empty wallet work, and each extra strike is a real request.
+		cooldown = class.duration()
 	} else {
 		p.errorCounts[id]++
 		if p.errorCounts[id] >= 3 {
-			cooldown = time.Minute
+			cooldown = class.duration()
 		}
 	}
 

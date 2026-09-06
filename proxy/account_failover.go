@@ -236,7 +236,12 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error, model
 		h.disableAccountOverage(account)
 		h.pool.RecordError(account.ID, false, model)
 	case isQuotaErrorMessage(errMsg):
-		h.pool.RecordError(account.ID, true, model)
+		// isQuotaErrorMessage lumps a 429 rate window together with hard credit
+		// exhaustion, and they need different waits: a rate window rolls on its
+		// own, an empty wallet needs a human. Classify so each gets its own.
+		class := h.pool.RecordErrorClass(account.ID, err, model)
+		logger.Warnf("[AccountFailover] %s: %s cooldown for model %s (quota-shaped error: %s)",
+			account.Email, class, model, truncateForLog(errMsg))
 	case isSuspensionErrorMessage(errMsg):
 		// The "temporarily suspended" / "account suspended" patterns are Kiro/
 		// AWS-specific upstream messages. External OpenAI-compatible providers
@@ -256,10 +261,25 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error, model
 		// but never auto-disable — operators can still investigate via warn logs.
 		h.pool.RecordError(account.ID, false, model)
 	case isAuthErrorMessage(errMsg):
-		// Soft cooldown only — never disable. auth.RefreshToken already tried OIDC
-		// re-registration + social fallback internally. If all paths fail, brief
-		// cooldown prevents tight loops while next cycle retries.
-		h.pool.RecordError(account.ID, false, model)
+		// Still never disable: auth.RefreshToken already tried OIDC
+		// re-registration + social fallback internally, and a provider-side auth
+		// outage must be able to heal on its own.
+		//
+		// But a "brief cooldown to prevent tight loops" was not brief enough to
+		// stop them. This branch used to record a plain transient error: three
+		// strikes, then one minute out, then straight back into rotation. A
+		// permanently revoked key therefore returned every minute forever —
+		// kiro.pix4k.com was selected and rejected 768 times in one log window,
+		// each attempt a real outbound request and one failover slot spent on
+		// someone's chat turn.
+		//
+		// Classifying the error separates "retry shortly" from "waiting cannot
+		// fix this", and also rescues the case that looks like auth but is not:
+		// several gateways report an empty wallet as HTTP 403, which the status
+		// check above reads as a dead credential.
+		class := h.pool.RecordErrorClass(account.ID, err, model)
+		logger.Warnf("[AccountFailover] %s: %s cooldown for model %s (auth-shaped error: %s)",
+			account.Email, class, model, truncateForLog(errMsg))
 	case isContentBlockedErrorMessage(errMsg):
 		// "content-blocked" is a payload/model-level refusal from upstream
 		// (typically AgentRouter). The account itself is healthy; rotating
