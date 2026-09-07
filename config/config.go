@@ -147,6 +147,11 @@ type Account struct {
 	// provider without weakening anything for the accounts that don't set it.
 	ChatPath string `json:"chatPath,omitempty"`
 
+	// ExternalHeaderProfile selects the HTTP identity used for this external
+	// OpenAI-compatible provider. Empty keeps the SDK fingerprint; "curl" uses
+	// minimal curl-shaped headers for providers that block that fingerprint.
+	ExternalHeaderProfile string `json:"externalHeaderProfile,omitempty"`
+
 	// ModelMappings translates public model IDs to provider-specific IDs for
 	// this account. Routing and usage continue to use the public ID; only the
 	// outbound external-provider request is rewritten.

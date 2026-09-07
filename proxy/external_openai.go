@@ -65,10 +65,16 @@ func externalChatPath(account *config.Account) string {
 // setExternalOpenAIHeaders applies the OpenAI-SDK-shaped identity headers to an
 // outbound request. accept selects the response dialect ("text/event-stream"
 // for streaming chat, "application/json" for REST reads).
-func setExternalOpenAIHeaders(req *http.Request, apiKey, accept string) {
+func setExternalOpenAIHeaders(req *http.Request, account *config.Account, apiKey, accept string) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", accept)
 	req.Header.Set("Authorization", "Bearer "+apiKey)
+	if account != nil && strings.EqualFold(strings.TrimSpace(account.ExternalHeaderProfile), "curl") {
+		// This is deliberately per-account: other resale gateways require the
+		// OpenAI SDK fingerprint below to pass their bot-protection checks.
+		req.Header.Set("User-Agent", "curl/8.7.1")
+		return
+	}
 	req.Header.Set("User-Agent", externalOpenAIUserAgent)
 	req.Header.Set("x-stainless-lang", externalOpenAIStainlessLang)
 	req.Header.Set("x-stainless-package-version", externalOpenAIStainlessPackageVer)
@@ -134,7 +140,7 @@ func CallExternalOpenAI(ctx context.Context, account *config.Account, payload *K
 	if err != nil {
 		return fmt.Errorf("external call new request: %w", err)
 	}
-	setExternalOpenAIHeaders(req, apiKey, "text/event-stream")
+	setExternalOpenAIHeaders(req, account, apiKey, "text/event-stream")
 
 	client := GetClientForProxy(ResolveAccountProxyURL(account))
 	resp, err := client.Do(req)
@@ -1288,7 +1294,7 @@ func fetchExternalProviderModels(account *config.Account) ([]ModelInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	setExternalOpenAIHeaders(req, apiKey, "application/json")
+	setExternalOpenAIHeaders(req, account, apiKey, "application/json")
 
 	client := GetRestClientForProxy(ResolveAccountProxyURL(account))
 	resp, err := client.Do(req)
@@ -1646,7 +1652,7 @@ func getProviderJSON(account *config.Account, url string, out interface{}) error
 	if err != nil {
 		return err
 	}
-	setExternalOpenAIHeaders(req, strings.TrimSpace(account.AccessToken), "application/json")
+	setExternalOpenAIHeaders(req, account, strings.TrimSpace(account.AccessToken), "application/json")
 
 	resp, err := GetRestClientForProxy(ResolveAccountProxyURL(account)).Do(req)
 	if err != nil {

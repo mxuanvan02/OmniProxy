@@ -89,7 +89,7 @@ func TestExternalOpenAIHeadersFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	setExternalOpenAIHeaders(req, "sk-test", "text/event-stream")
+	setExternalOpenAIHeaders(req, nil, "sk-test", "text/event-stream")
 
 	if got := req.Header.Get("User-Agent"); got != externalOpenAIUserAgent {
 		t.Errorf("User-Agent = %q, want %q", got, externalOpenAIUserAgent)
@@ -108,6 +108,28 @@ func TestExternalOpenAIHeadersFingerprint(t *testing.T) {
 		if req.Header.Get(h) == "" {
 			t.Errorf("missing %s — Cloudflare bot-fight rules reject the request without it", h)
 		}
+	}
+}
+
+func TestExternalOpenAIHeadersCurlProfile(t *testing.T) {
+	req, err := http.NewRequest("POST", "https://example.invalid/v1/chat/completions", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := &config.Account{ExternalHeaderProfile: "curl"}
+	setExternalOpenAIHeaders(req, account, "sk-test", "application/json")
+
+	if got := req.Header.Get("User-Agent"); got != "curl/8.7.1" {
+		t.Errorf("User-Agent = %q, want curl profile", got)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer sk-test" {
+		t.Errorf("Authorization = %q", got)
+	}
+	if got := req.Header.Get("Accept"); got != "application/json" {
+		t.Errorf("Accept = %q", got)
+	}
+	if got := req.Header.Get("x-stainless-lang"); got != "" {
+		t.Errorf("curl profile must omit x-stainless-lang, got %q", got)
 	}
 }
 
