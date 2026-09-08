@@ -165,3 +165,75 @@ func TestExternalWithoutUpstreamLimitDoesNotInheritPolicy(t *testing.T) {
 		t.Fatalf("external model without upstream metadata inherited token limits: %#v", entry["token_limits"])
 	}
 }
+
+func TestExternalDefaultOutputTokensByFamily(t *testing.T) {
+	cases := []struct {
+		model string
+		want  int
+	}{
+		{"claude-opus-5", 128_000},
+		{"claude-sonnet-4.6", 128_000},
+		{"claude-fable-5-1", 128_000},
+		{"gpt-5.6-luna", 128_000},
+		{"o4", 128_000},
+		{"codex-mini-latest", 128_000},
+		{"deepseek-v4-pro", 32_000},
+		{"kimi-k3", 32_000},
+		{"qwen3.8-max", 32_000},
+		{"gemini-3.1-pro", 32_000},
+		{"grok-4.6", 32_000},
+		{"muse-spark-1.1", 32_000},
+		{"anthropic/claude-opus-5", 128_000},
+		{"claude-opus-5-thinking", 128_000},
+		{"totally-unknown-model", 16_000},
+	}
+	for _, c := range cases {
+		if got := externalDefaultOutputTokens(c.model); got != c.want {
+			t.Errorf("externalDefaultOutputTokens(%q) = %d, want %d", c.model, got, c.want)
+		}
+	}
+}
+
+func TestExternalOutputFallbackFillsZeroOnly(t *testing.T) {
+	// Upstream publishes input but no output cap -> family default fills output.
+	info := ModelInfo{
+		ModelId:  "claude-opus-4-8",
+		Provider: "gpt2api",
+		External: true,
+		TokenLimits: &ModelTokenLimits{
+			MaxInputTokens: 1_000_000,
+		},
+	}
+	entry := buildModelInfoWithTokenLimits(info.ModelId, info.Provider, false, &info)
+	limits, ok := entry["token_limits"].(map[string]interface{})
+	if !ok {
+		t.Fatal("external model should publish token_limits")
+	}
+	if limits["maxInputTokens"] != 800_000 {
+		t.Fatalf("published input limit = %#v, want 800000", limits["maxInputTokens"])
+	}
+	if limits["maxOutputTokens"] != 128_000 {
+		t.Fatalf("published output limit = %#v, want 128000 (family fallback)", limits["maxOutputTokens"])
+	}
+}
+
+func TestExternalPublishedOutputAlwaysWins(t *testing.T) {
+	// Upstream explicitly published an output cap: fallback must not override it.
+	info := ModelInfo{
+		ModelId:  "deepseek-v4-pro",
+		Provider: "openai",
+		External: true,
+		TokenLimits: &ModelTokenLimits{
+			MaxInputTokens:  800_000,
+			MaxOutputTokens: 64_000,
+		},
+	}
+	entry := buildModelInfoWithTokenLimits(info.ModelId, info.Provider, false, &info)
+	limits, ok := entry["token_limits"].(map[string]interface{})
+	if !ok {
+		t.Fatal("external model should publish token_limits")
+	}
+	if limits["maxOutputTokens"] != 64_000 {
+		t.Fatalf("published output limit = %#v, want 64000 (upstream wins)", limits["maxOutputTokens"])
+	}
+}

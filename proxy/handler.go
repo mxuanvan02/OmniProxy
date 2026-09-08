@@ -3213,8 +3213,15 @@ func modelInfoTokenLimits(info ModelInfo) (int, int, bool) {
 		if info.TokenLimits == nil {
 			return 0, 0, false
 		}
-		return info.TokenLimits.MaxInputTokens, info.TokenLimits.MaxOutputTokens,
-			info.TokenLimits.MaxInputTokens > 0 || info.TokenLimits.MaxOutputTokens > 0
+		input := info.TokenLimits.MaxInputTokens
+		output := info.TokenLimits.MaxOutputTokens
+		// Gateways that omit max_output_tokens publish 0. Fill the gap from a
+		// conservative per-family default so clients can size responses, while
+		// never overriding a value the upstream did publish.
+		if output <= 0 && input > 0 {
+			output = externalDefaultOutputTokens(info.ModelId)
+		}
+		return input, output, input > 0 || output > 0
 	}
 
 	policyInput, policyOutput, hasPolicy := policyModelLimits(info.ModelId)
@@ -3244,6 +3251,29 @@ func externalEffectiveContextWindow(upstream int) int {
 		return 1
 	}
 	return effective
+}
+
+// externalDefaultOutputTokens fills the max_output_tokens gap for external
+// gateways that do not publish an output cap in /v1/models. The value is
+// derived conservatively from the model family and is only used when the
+// upstream reported output <= 0; a published output limit always wins.
+func externalDefaultOutputTokens(model string) int {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if idx := strings.IndexByte(model, '/'); idx >= 0 {
+		model = strings.TrimSpace(model[idx+1:])
+	}
+	model, _ = ParseModelAndThinking(model, "-thinking")
+	switch {
+	case strings.HasPrefix(model, "claude-"):
+		return 128_000
+	case strings.HasPrefix(model, "gpt-"), strings.HasPrefix(model, "o1"), strings.HasPrefix(model, "o3"), strings.HasPrefix(model, "o4"), strings.HasPrefix(model, "codex-"):
+		return 128_000
+	case strings.HasPrefix(model, "deepseek-"), strings.HasPrefix(model, "kimi-"), strings.HasPrefix(model, "qwen"), strings.HasPrefix(model, "gemini-"), strings.HasPrefix(model, "glm-"), strings.HasPrefix(model, "grok-"), strings.HasPrefix(model, "minimax-"), strings.HasPrefix(model, "muse-"), strings.HasPrefix(model, "step-"):
+		return 32_000
+	default:
+		// Unknown family: stay conservative rather than inventing a cap.
+		return 16_000
+	}
 }
 
 // hasCanonicalTokenLimits reports whether policyModelLimits owns a model's
