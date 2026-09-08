@@ -1534,10 +1534,7 @@ func codexSubscriptionModels() []ModelInfo {
 			RateMultiplier: 1.0,
 			Provider:       "openai-codex",
 		}
-		m.TokenLimits = &struct {
-			MaxInputTokens  int `json:"maxInputTokens"`
-			MaxOutputTokens int `json:"maxOutputTokens"`
-		}{MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens}
+		m.TokenLimits = &ModelTokenLimits{MaxInputTokens: s.MaxInputTokens, MaxOutputTokens: s.MaxOutputTokens}
 		out = append(out, m)
 	}
 	return out

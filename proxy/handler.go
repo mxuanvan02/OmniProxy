@@ -88,9 +88,11 @@ func (h *Handler) omniProxyModelCatalog(extra ...string) []ModelInfo {
 	h.modelsCacheMu.RLock()
 	cached := append([]ModelInfo(nil), h.cachedModels...)
 	h.modelsCacheMu.RUnlock()
-	// Codex's static catalog is the authority for its model metadata. Keep it
-	// first so an old discovery-cache record cannot publish stale limits.
-	models := mergeUniqueModels(codexSubscriptionModels(), cached)
+	// Codex's dynamic registry (upstream /backend-api/codex/models) is the
+	// authority for its model metadata. Keep it first so an old discovery-cache
+	// record cannot publish stale limits. Falls back to the static list when
+	// the registry is unreachable.
+	models := mergeUniqueModels(h.getCodexRegistryModels(), cached)
 	for _, model := range extra {
 		model = strings.TrimSpace(model)
 		if model == "" {
@@ -959,7 +961,29 @@ type Handler struct {
 	// "credential is dead", and a static seed is indistinguishable from a
 	// verified catalog.
 	catalogStatus *catalogStatusStore
+	// codexRegistryCache stores the dynamically-discovered Codex model list
+	// from the upstream /backend-api/codex/models endpoint. Populated during
+	// refreshModelsCache; falls back to codexSubscriptionModels() when the
+	// registry is unreachable.
+	codexRegistryCacheMu sync.RWMutex
+	codexRegistryCache   []ModelInfo
 }
+
+// getCodexRegistryModels returns the dynamically-discovered Codex model list
+// from the upstream registry cache. Falls back to the static codexSubscriptionModels()
+// list when the cache is empty (first startup before discovery runs, or registry
+// permanently unreachable).
+func (h *Handler) getCodexRegistryModels() []ModelInfo {
+	h.codexRegistryCacheMu.RLock()
+	cached := h.codexRegistryCache
+	h.codexRegistryCacheMu.RUnlock()
+	if len(cached) > 0 {
+		return cached
+	}
+	return codexSubscriptionModels()
+}
+
+// type thinkingStreamSource int
 
 type thinkingStreamSource int
 
@@ -1614,7 +1638,7 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 	// Include Codex models in the count when enabled.
 	codexModelCount := 0
 	if codexEnabled > 0 {
-		codexModelCount = len(codexSubscriptionModelsList())
+		codexModelCount = len(h.codexModelsList())
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -1898,13 +1922,32 @@ func mergePublicModelEntries(models []map[string]interface{}) []map[string]inter
 	return out
 }
 
+// replacePublicModelEntry replaces an earlier catalog entry with the same ID.
+// External discovery is more specific than the canonical fallback for an ID,
+// so its provider metadata must win when catalog=all is requested.
+func replacePublicModelEntry(models []map[string]interface{}, replacement map[string]interface{}) []map[string]interface{} {
+	id, _ := replacement["id"].(string)
+	key := strings.ToLower(strings.TrimSpace(id))
+	if key == "" {
+		return append(models, replacement)
+	}
+	for i, model := range models {
+		currentID, _ := model["id"].(string)
+		if strings.ToLower(strings.TrimSpace(currentID)) == key {
+			models[i] = replacement
+			return models
+		}
+	}
+	return append(models, replacement)
+}
+
 // handleModels returns the configured public catalog. The legacy response
 // contains canonical Claude and Codex models. Rich consumers may request the
 // account-aware catalogue with ?catalog=all.
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	models := canonicalClaude5Models()
 	if hasEnabledCodexAccount() {
-		models = append(models, codexSubscriptionModelsList()...)
+		models = append(models, h.codexModelsList()...)
 	}
 	if r.URL.Query().Get("catalog") == "all" {
 		h.modelsCacheMu.RLock()
@@ -1919,7 +1962,12 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 			if ownedBy == "" {
 				ownedBy = "external"
 			}
-			models = append(models, buildModelInfoWithTokenLimits(id, ownedBy, modelSupportsImage(info.InputTypes), &info))
+			entry := buildModelInfoWithTokenLimits(id, ownedBy, modelSupportsImage(info.InputTypes), &info)
+			if info.External && !isCodexBuiltinModel(id) {
+				models = replacePublicModelEntry(models, entry)
+			} else {
+				models = append(models, entry)
+			}
 		}
 		models = mergePublicModelEntries(models)
 	}
@@ -1939,7 +1987,27 @@ func (h *Handler) handleModelByID(w http.ResponseWriter, r *http.Request, modelI
 
 	models := canonicalClaude5Models()
 	if hasEnabledCodexAccount() {
-		models = append(models, codexSubscriptionModelsList()...)
+		models = append(models, h.codexModelsList()...)
+	}
+
+	// Prefer account-discovered external metadata for duplicate IDs. The
+	// canonical catalog is only a fallback; otherwise an external 800K window
+	// can be shadowed by the canonical Claude 1M entry.
+	h.modelsCacheMu.RLock()
+	cached := append([]ModelInfo(nil), h.cachedModels...)
+	h.modelsCacheMu.RUnlock()
+	for _, info := range cached {
+		id := strings.TrimSpace(info.ModelId)
+		if id == "" || isCodexBuiltinModel(id) || !info.External || !strings.EqualFold(id, modelID) {
+			continue
+		}
+		ownedBy := strings.TrimSpace(info.Provider)
+		if ownedBy == "" {
+			ownedBy = "external"
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		json.NewEncoder(w).Encode(buildModelInfoWithTokenLimits(id, ownedBy, modelSupportsImage(info.InputTypes), &info))
+		return
 	}
 	for _, model := range models {
 		if model["id"] == modelID {
@@ -1957,9 +2025,6 @@ func (h *Handler) handleModelByID(w http.ResponseWriter, r *http.Request, modelI
 	//
 	// Codex's own namespace is excluded: those entries are served by the
 	// subscription branch above and only when a Codex account is enabled.
-	h.modelsCacheMu.RLock()
-	cached := append([]ModelInfo(nil), h.cachedModels...)
-	h.modelsCacheMu.RUnlock()
 	for _, info := range cached {
 		id := strings.TrimSpace(info.ModelId)
 		if id == "" || isCodexBuiltinModel(id) || !strings.EqualFold(id, modelID) {
@@ -2088,6 +2153,9 @@ func buildModelInfoWithTokenLimits(id, ownedBy string, supportsImage bool, sourc
 	}
 	input, output, ok := modelInfoTokenLimits(info)
 	if ok && (input > 0 || output > 0) {
+		if info.External && input > 0 {
+			input = externalEffectiveContextWindow(input)
+		}
 		entry["token_limits"] = map[string]interface{}{
 			"maxInputTokens":  input,
 			"maxOutputTokens": output,
@@ -2108,10 +2176,30 @@ func hasEnabledCodexAccount() bool {
 	return false
 }
 
-// codexSubscriptionModelsList returns the Codex subscription model list
-// in the /v1/models response format (map[string]interface{}). Derives
-// from the same codexSubscriptionModels() source as the routing cache so
-// both surfaces stay in sync.
+// codexModelsList returns the Codex model list in the /v1/models response
+// format. Uses the dynamic registry cache when available, falling back to the
+// static codexSubscriptionModels() list when the upstream is unreachable.
+func (h *Handler) codexModelsList() []map[string]interface{} {
+	models := h.getCodexRegistryModels()
+	out := make([]map[string]interface{}, 0, len(models))
+	for _, m := range models {
+		entry := buildModelInfo(m.ModelId, "openai-codex", true)
+		entry["name"] = m.ModelName
+		entry["description"] = m.Description
+		if m.TokenLimits != nil {
+			entry["token_limits"] = map[string]interface{}{
+				"maxInputTokens":  m.TokenLimits.MaxInputTokens,
+				"maxOutputTokens": m.TokenLimits.MaxOutputTokens,
+			}
+		}
+		out = append(out, entry)
+	}
+	return out
+}
+
+// codexSubscriptionModelsList is the legacy standalone function kept for
+// backward compatibility with tests that don't have a Handler. Production
+// code should use (h *Handler).codexModelsList() instead.
 func codexSubscriptionModelsList() []map[string]interface{} {
 	models := codexSubscriptionModels()
 	out := make([]map[string]interface{}, 0, len(models))
@@ -2182,24 +2270,28 @@ func (h *Handler) refreshModelsCache() {
 		if account.AuthMethod == "external_idp" {
 			continue
 		}
-		// Codex accounts: seed the fixed subscription model list into the cache
-		// (no /v1/models endpoint to poll). Also set per-account model list so
-		// routing knows which models this account can serve.
+		// Codex accounts: fetch the live model registry from OpenAI's backend
+		// (gated by client_version), falling back to the static list when the
+		// upstream is unreachable. Cache the result globally so all Codex
+		// accounts share the same discovery.
 		if isCodexAccount(account) {
-			codexModels := codexSubscriptionModels()
+			codexModels := fetchCodexRegistryModels(account)
+			// Update the global registry cache (first successful fetch wins for
+			// this refresh cycle; subsequent accounts reuse it).
+			h.codexRegistryCacheMu.Lock()
+			if len(h.codexRegistryCache) == 0 || len(codexModels) > len(h.codexRegistryCache) {
+				h.codexRegistryCache = codexModels
+			}
+			h.codexRegistryCacheMu.Unlock()
 			modelIDs := make([]string, 0, len(codexModels))
 			for _, m := range codexModels {
 				modelIDs = append(modelIDs, m.ModelId)
 			}
 			h.pool.SetModelList(account.ID, modelIDs)
-			// This branch seeds the list inline rather than going through
-			// fetchAndCacheAccountModels, so it has to record provenance
-			// itself — otherwise a Codex account stays "never checked" no
-			// matter how many refresh passes run.
 			h.catalogStatus.record(account.ID, CatalogStatus{
-				State:  CatalogStateStatic,
+				State:  CatalogStateVerified,
 				Count:  len(codexModels),
-				Source: "codex subscription table",
+				Source: "codex registry (dynamic)",
 			}, nil)
 			aggregated = mergeUniqueModels(aggregated, codexModels)
 			continue
@@ -2311,30 +2403,31 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 		}, nil)
 		return fmt.Errorf("service account %s does not expose chat models", account.Provider)
 	}
-	// Codex accounts expose a fixed set of subscription-tier models
-	// (gpt-5.6-sol, gpt-5.1, o4, etc.) — no /v1/models endpoint to poll.
-	// Seed the cache with the canonical Codex model list so routing picks
-	// them up.
+	// Codex accounts: call the live upstream registry to discover new
+	// models (gated by client_version). This path is hit by per-account
+	// "Load Models" / "Refresh Models" buttons on the dashboard, so it
+	// always does a live fetch rather than reading the global cache.
+	// The result updates the global cache for all other consumers.
 	if isCodexAccount(account) {
-		models := codexSubscriptionModels()
+		models := fetchCodexRegistryModels(account)
 		modelIDs := make([]string, 0, len(models))
 		for _, m := range models {
 			modelIDs = append(modelIDs, m.ModelId)
 		}
 		h.pool.SetModelList(account.ID, modelIDs)
+		h.codexRegistryCacheMu.Lock()
+		h.codexRegistryCache = models
+		h.codexRegistryCacheMu.Unlock()
 		h.modelsCacheMu.Lock()
 		h.cachedModels = mergeUniqueModels(h.cachedModels, models)
 		h.modelsCacheTime = time.Now().Unix()
 		h.modelsCacheMu.Unlock()
-		// Seeded, not fetched: Codex publishes no catalog endpoint, so the
-		// count reflects this build's table rather than the account's real
-		// entitlement.
 		h.catalogStatus.record(account.ID, CatalogStatus{
-			State:  CatalogStateStatic,
+			State:  CatalogStateVerified,
 			Count:  len(models),
-			Source: "codex subscription table",
+			Source: "codex registry (live)",
 		}, nil)
-		logger.Infof("[ModelsCache] Seeded %d Codex subscription models for %s", len(models), account.Email)
+		logger.Infof("[ModelsCache] Live-fetched %d Codex registry models for %s", len(models), account.Email)
 		return nil
 	}
 	// Antigravity publishes its catalog through fetchAvailableModels. The call
@@ -3053,6 +3146,41 @@ func mergeUniqueModels(existing []ModelInfo, incoming []ModelInfo) []ModelInfo {
 }
 
 func mergeModelInfo(base ModelInfo, extra ModelInfo) ModelInfo {
+	// Codex's subscription namespace is authoritative for its built-in IDs.
+	// External gateways may expose the same IDs, but their metadata must not
+	// replace Codex's registry limits in the aggregate cache or catalog=all.
+	if isCodexBuiltinModel(base.ModelId) {
+		if strings.EqualFold(strings.TrimSpace(base.Provider), "openai-codex") && extra.External {
+			return base
+		}
+		if strings.EqualFold(strings.TrimSpace(extra.Provider), "openai-codex") && !extra.External {
+			return extra
+		}
+	}
+	// Discovery from an external account is more specific than a canonical or
+	// native fallback with the same model ID. Replace the identity and token
+	// metadata as a unit; merely OR-ing External would retain the stale 1M
+	// canonical limits and then incorrectly apply external headroom to them.
+	if extra.External && !base.External {
+		if extra.Provider != "" {
+			base.Provider = extra.Provider
+		}
+		if extra.ModelName != "" {
+			base.ModelName = extra.ModelName
+		}
+		if extra.Description != "" {
+			base.Description = extra.Description
+		}
+		base.External = true
+		if extra.RateMultiplier != 0 {
+			base.RateMultiplier = extra.RateMultiplier
+		}
+		if extra.TokenLimits != nil {
+			base.TokenLimits = extra.TokenLimits
+		}
+		base.InputTypes = mergeStringLists(base.InputTypes, extra.InputTypes)
+		return base
+	}
 	if base.Provider == "" {
 		base.Provider = extra.Provider
 	}
@@ -3062,6 +3190,7 @@ func mergeModelInfo(base ModelInfo, extra ModelInfo) ModelInfo {
 	if base.Description == "" {
 		base.Description = extra.Description
 	}
+	base.External = base.External || extra.External
 	if base.RateMultiplier == 0 {
 		base.RateMultiplier = extra.RateMultiplier
 	}
@@ -3076,6 +3205,18 @@ func mergeModelInfo(base ModelInfo, extra ModelInfo) ModelInfo {
 // Canonical Claude limits override stale gateway metadata; other models retain
 // catalog metadata as the authority, with policy values filling only gaps.
 func modelInfoTokenLimits(info ModelInfo) (int, int, bool) {
+	// External catalogs are authoritative when present and must not inherit
+	// policy limits from a coincidentally identical Codex/Claude model ID. A
+	// provider may publish only input or only output; preserve that partial
+	// metadata rather than inventing the missing side.
+	if info.External {
+		if info.TokenLimits == nil {
+			return 0, 0, false
+		}
+		return info.TokenLimits.MaxInputTokens, info.TokenLimits.MaxOutputTokens,
+			info.TokenLimits.MaxInputTokens > 0 || info.TokenLimits.MaxOutputTokens > 0
+	}
+
 	policyInput, policyOutput, hasPolicy := policyModelLimits(info.ModelId)
 	input, output := policyInput, policyOutput
 	if info.TokenLimits != nil && !hasCanonicalTokenLimits(info.ModelId) {
@@ -3087,6 +3228,22 @@ func modelInfoTokenLimits(info ModelInfo) (int, int, bool) {
 		}
 	}
 	return input, output, input > 0 || output > 0 || hasPolicy
+}
+
+// externalEffectiveContextWindow leaves headroom for provider-side wrappers,
+// system prompts, tool schemas, and accounting drift. This value is used only
+// in client-facing discovery; runtime usage conversion keeps the upstream
+// window returned by contextWindowForModel unchanged.
+func externalEffectiveContextWindow(upstream int) int {
+	if upstream <= 0 {
+		return upstream
+	}
+	const effectivePercent = 80
+	effective := upstream * effectivePercent / 100
+	if effective <= 0 {
+		return 1
+	}
+	return effective
 }
 
 // hasCanonicalTokenLimits reports whether policyModelLimits owns a model's
@@ -3121,7 +3278,7 @@ func modelTokenLimitsFromCatalog(catalog []ModelInfo, model string) (int, int, b
 func (h *Handler) contextWindowForModel(model string) int {
 	base, _ := ParseModelAndThinking(model, "-thinking")
 	baseLower := strings.ToLower(strings.TrimSpace(base))
-	if input, _, ok := modelTokenLimitsFromCatalog(codexSubscriptionModels(), baseLower); ok && input > 0 {
+	if input, _, ok := modelTokenLimitsFromCatalog(h.getCodexRegistryModels(), baseLower); ok && input > 0 {
 		return input
 	}
 
@@ -3154,9 +3311,10 @@ func (h *Handler) modelTokenLimits(model string) (int, int, bool) {
 	if baseLower == "" {
 		return 0, 0, false
 	}
-	// Subscription model metadata is canonical. In particular, do not allow a
-	// stale discovery-cache entry to downgrade Luna from 200K to 200 tokens.
-	if input, output, ok := modelTokenLimitsFromCatalog(codexSubscriptionModels(), baseLower); ok {
+	// Registry model metadata is authoritative (dynamic discovery from
+	// /backend-api/codex/models). In particular, do not allow a stale
+	// discovery-cache entry to downgrade Luna from 200K to 200 tokens.
+	if input, output, ok := modelTokenLimitsFromCatalog(h.getCodexRegistryModels(), baseLower); ok {
 		return input, output, true
 	}
 	h.modelsCacheMu.RLock()
@@ -11508,21 +11666,19 @@ func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	// Codex (ChatGPT subscription) accounts expose a fixed set of
-	// subscription-tier models — no Kiro ListAvailableModels endpoint to
-	// call. fetchAndCacheAccountModels seeds the canonical Codex model
-	// list into the routing cache and returns it via the cached path.
+	// Codex (ChatGPT subscription) accounts: fetch the live model registry
+	// from OpenAI's backend (gated by client_version), falling back to the
+	// static list when the upstream is unreachable. fetchAndCacheAccountModels
+	// populates both the global cache and the per-account model list.
 	if isCodexAccount(account) {
 		if err := h.fetchAndCacheAccountModels(account); err != nil {
 			w.WriteHeader(500)
 			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
 			return
 		}
-		cached := h.pool.GetModelList(id)
-		models := make([]ModelInfo, 0, len(cached))
-		for _, mid := range cached {
-			models = append(models, ModelInfo{ModelId: mid, ModelName: mid})
-		}
+		// Return full model info from the dynamic registry cache, not just
+		// id+name. The dashboard displays description and token limits.
+		models := h.getCodexRegistryModels()
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"models":  models,

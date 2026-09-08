@@ -12,11 +12,8 @@ import (
 
 func cliTestModel(id string, input, output int) ModelInfo {
 	return ModelInfo{
-		ModelId: id,
-		TokenLimits: &struct {
-			MaxInputTokens  int `json:"maxInputTokens"`
-			MaxOutputTokens int `json:"maxOutputTokens"`
-		}{MaxInputTokens: input, MaxOutputTokens: output},
+		ModelId:     id,
+		TokenLimits: &ModelTokenLimits{MaxInputTokens: input, MaxOutputTokens: output},
 	}
 }
 
@@ -451,11 +448,8 @@ func TestApplyHermesSettingsUsesCanonicalLunaLimits(t *testing.T) {
 
 func TestModelInfoTokenLimitsFillsOnlyMissingMetadata(t *testing.T) {
 	input, output, ok := modelInfoTokenLimits(ModelInfo{
-		ModelId: "gpt-5.6-luna",
-		TokenLimits: &struct {
-			MaxInputTokens  int `json:"maxInputTokens"`
-			MaxOutputTokens int `json:"maxOutputTokens"`
-		}{MaxInputTokens: 180_000},
+		ModelId:     "gpt-5.6-luna",
+		TokenLimits: &ModelTokenLimits{MaxInputTokens: 180_000},
 	})
 	if !ok || input != 180_000 || output != 128_000 {
 		t.Fatalf("partial Luna metadata = (%d, %d, %v), want (180000, 128000, true)", input, output, ok)
@@ -466,11 +460,8 @@ func TestModelInfoTokenLimitsFillsOnlyMissingMetadata(t *testing.T) {
 // them made Claude Code compact and bill against the wrong profile.
 func TestSotaAliasesKeepGatewayTokenLimits(t *testing.T) {
 	input, output, ok := modelInfoTokenLimits(ModelInfo{
-		ModelId: "model-A",
-		TokenLimits: &struct {
-			MaxInputTokens  int `json:"maxInputTokens"`
-			MaxOutputTokens int `json:"maxOutputTokens"`
-		}{MaxInputTokens: 200_000, MaxOutputTokens: 100_000},
+		ModelId:     "model-A",
+		TokenLimits: &ModelTokenLimits{MaxInputTokens: 200_000, MaxOutputTokens: 100_000},
 	})
 	if !ok || input != 200_000 || output != 100_000 {
 		t.Fatalf("SOTA catalog limits = (%d, %d, %v), want (200000, 100000, true)", input, output, ok)

@@ -1316,6 +1316,17 @@ func fetchExternalProviderModels(account *config.Account) ([]ModelInfo, error) {
 			OutputModalities interface{} `json:"output_modalities,omitempty"`
 			Capabilities     interface{} `json:"capabilities,omitempty"`
 			Type             string      `json:"type,omitempty"`
+			// Limits and the top-level raw fields below capture token-window
+			// metadata. Gateways disagree on field names: xpiki uses
+			// limits.max_input_tokens, others use context_window,
+			// max_context_tokens, token_limits.maxInputTokens, etc. Decode
+			// loosely so every provider's metadata flows into TokenLimits.
+			Limits         interface{} `json:"limits,omitempty"`
+			TokenLimits    interface{} `json:"token_limits,omitempty"`
+			ContextWindow  interface{} `json:"context_window,omitempty"`
+			MaxInputTokens interface{} `json:"max_input_tokens,omitempty"`
+			MaxContextTok  interface{} `json:"max_context_tokens,omitempty"`
+			MaxOutputTok   interface{} `json:"max_output_tokens,omitempty"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -1334,11 +1345,105 @@ func fetchExternalProviderModels(account *config.Account) ([]ModelInfo, error) {
 			ModelId:     m.ID,
 			ModelName:   m.ID,
 			Provider:    provider,
+			External:    true,
 			Modalities:  flattenModelMetadata(m.Modalities),
 			OutputTypes: append(flattenModelMetadata(m.OutputModalities), imageCapabilityMetadata(m.Capabilities)...),
+			TokenLimits: externalModelTokenLimits(m.Limits, m.TokenLimits, m.ContextWindow, m.MaxInputTokens, m.MaxContextTok, m.MaxOutputTok),
 		})
 	}
 	return out, nil
+}
+
+// externalModelTokenLimits walks the heterogeneous token-window fields that
+// OpenAI-compatible gateways attach to /v1/models entries and converts them
+// into the canonical ModelInfo.TokenLimits. Sources are checked in order of
+// increasing specificity: explicit limits objects first, then top-level
+// scalar fallbacks. Returns nil when the upstream published nothing.
+func externalModelTokenLimits(limits, tokenLimits, contextWindow, maxInput, maxContext, maxOutput interface{}) *ModelTokenLimits {
+	in, out := 0, 0
+	// collectTokens applies a normalized key+value to the input/output budget,
+	// skipping anything that is clearly pricing rather than a token window.
+	collect := func(key, val interface{}) {
+		lk := strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(fmt.Sprintf("%v", key), "_", ""), "-", ""))
+		// Price fields (input_price, output_price, $/1M) are per-token-unit
+		// costs and must never be read as token counts.
+		if strings.Contains(lk, "price") || strings.Contains(lk, "cost") || strings.Contains(lk, "usd") || strings.Contains(lk, "$") {
+			return
+		}
+		n, ok := intFromMetadata(val)
+		if !ok || n <= 0 {
+			return
+		}
+		switch {
+		case strings.Contains(lk, "input") || strings.Contains(lk, "context") || strings.Contains(lk, "window"):
+			if n > in {
+				in = n
+			}
+		case strings.Contains(lk, "output") || strings.Contains(lk, "completion") || strings.Contains(lk, "response"):
+			if n > out {
+				out = n
+			}
+		}
+	}
+
+	// Top-level scalar fallbacks (these are unambiguous token counts).
+	if v, ok := intFromMetadata(contextWindow); ok && v > in {
+		in = v
+	}
+	if v, ok := intFromMetadata(maxInput); ok && v > in {
+		in = v
+	}
+	if v, ok := intFromMetadata(maxContext); ok && v > in {
+		in = v
+	}
+	if v, ok := intFromMetadata(maxOutput); ok && v > out {
+		out = v
+	}
+	// Nested limits/token_limits objects: iterate keys through collect().
+	for _, blob := range []interface{}{limits, tokenLimits} {
+		m, ok := blob.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		for key, val := range m {
+			collect(key, val)
+		}
+	}
+	if in <= 0 && out <= 0 {
+		return nil
+	}
+	return &ModelTokenLimits{MaxInputTokens: in, MaxOutputTokens: out}
+}
+
+// intFromMetadata accepts JSON-numbers-as-float64, ints, and numeric strings
+// (including "1M" style on some gateways is intentionally NOT expanded here;
+// only plain numeric values are trusted to avoid misparsing prices).
+func intFromMetadata(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case json.Number:
+		i, err := n.Int64()
+		if err == nil {
+			return int(i), true
+		}
+		f, err := n.Float64()
+		if err == nil {
+			return int(f), true
+		}
+	case string:
+		s := strings.TrimSpace(strings.ReplaceAll(n, ",", ""))
+		if s == "" {
+			return 0, false
+		}
+		var i int
+		if _, err := fmt.Sscanf(s, "%d", &i); err == nil && i > 0 {
+			return i, true
+		}
+	}
+	return 0, false
 }
 
 // openAICompatibleEndpoint accepts either a provider root URL or a URL that

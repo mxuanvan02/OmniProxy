@@ -532,11 +532,20 @@ type ModelInfo struct {
 	RateMultiplier float64  `json:"rateMultiplier"`
 	// Provider is populated by the cache for model discovery. It is kept out
 	// of the upstream Kiro JSON shape because the API does not return it.
-	Provider    string `json:"-"`
-	TokenLimits *struct {
-		MaxInputTokens  int `json:"maxInputTokens"`
-		MaxOutputTokens int `json:"maxOutputTokens"`
-	} `json:"tokenLimits"`
+	Provider string `json:"-"`
+	// External marks entries discovered from an external OpenAI-compatible
+	// account. It is deliberately not serialized; it controls client-facing
+	// safety headroom without changing native Kiro or Codex metadata.
+	External    bool              `json:"-"`
+	TokenLimits *ModelTokenLimits `json:"tokenLimits"`
+}
+
+// ModelTokenLimits is the canonical per-model input/output token budget
+// published in model discovery and used by clients to decide when to compact.
+// Sharing this named type lets external provider adapters populate it directly.
+type ModelTokenLimits struct {
+	MaxInputTokens  int `json:"maxInputTokens"`
+	MaxOutputTokens int `json:"maxOutputTokens"`
 }
 
 // modelSupportsImageOutput is intentionally stricter than the input/vision

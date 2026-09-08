@@ -176,10 +176,7 @@ func TestClaudeModelDiscoveryOmitsHaiku(t *testing.T) {
 func TestClaudeModelDiscoveryIgnoresStaleHaikuMetadata(t *testing.T) {
 	mustInitConfig(t)
 
-	staleLimits := &struct {
-		MaxInputTokens  int `json:"maxInputTokens"`
-		MaxOutputTokens int `json:"maxOutputTokens"`
-	}{MaxInputTokens: 200_000, MaxOutputTokens: 100}
+	staleLimits := &ModelTokenLimits{MaxInputTokens: 200_000, MaxOutputTokens: 100}
 	h := &Handler{cachedModels: []ModelInfo{{
 		ModelId:     "claude-haiku-5",
 		Provider:    "anthropic",
@@ -216,13 +213,10 @@ func TestClaudeModelDiscoveryIgnoresStaleHaikuMetadata(t *testing.T) {
 func TestPublicClaudeCatalogOmitsCodexModels(t *testing.T) {
 	mustInitConfig(t)
 	h := &Handler{cachedModels: []ModelInfo{{
-		ModelId:    "gpt-5.6-luna",
-		Provider:   "external",
-		InputTypes: []string{"text"},
-		TokenLimits: &struct {
-			MaxInputTokens  int `json:"maxInputTokens"`
-			MaxOutputTokens int `json:"maxOutputTokens"`
-		}{MaxInputTokens: 200, MaxOutputTokens: 100},
+		ModelId:     "gpt-5.6-luna",
+		Provider:    "external",
+		InputTypes:  []string{"text"},
+		TokenLimits: &ModelTokenLimits{MaxInputTokens: 200, MaxOutputTokens: 100},
 	}}}
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)

@@ -757,9 +757,9 @@ type antigravityEnvelope struct {
 			Content struct {
 				Role  string `json:"role"`
 				Parts []struct {
-					Text             string                 `json:"text"`
-					Thought          bool                   `json:"thought"`
-					ThoughtSignature string                 `json:"thoughtSignature"`
+					Text             string `json:"text"`
+					Thought          bool   `json:"thought"`
+					ThoughtSignature string `json:"thoughtSignature"`
 					FunctionCall     *struct {
 						Name string                 `json:"name"`
 						Args map[string]interface{} `json:"args"`
@@ -1173,10 +1173,7 @@ func antigravityFallbackModels() []ModelInfo {
 			RateMultiplier: 1.0,
 			Provider:       "antigravity",
 		}
-		model.TokenLimits = &struct {
-			MaxInputTokens  int `json:"maxInputTokens"`
-			MaxOutputTokens int `json:"maxOutputTokens"`
-		}{MaxInputTokens: spec.maxInput, MaxOutputTokens: spec.maxOutput}
+		model.TokenLimits = &ModelTokenLimits{MaxInputTokens: spec.maxInput, MaxOutputTokens: spec.maxOutput}
 		out = append(out, model)
 	}
 	return out
@@ -1219,22 +1216,22 @@ func fetchAntigravityModels(account *config.Account) ([]ModelInfo, error) {
 func parseAntigravityModels(raw []byte) []ModelInfo {
 	var payload struct {
 		Models []struct {
-			Name            string `json:"name"`
-			ModelID         string `json:"modelId"`
-			ID              string `json:"id"`
-			DisplayName     string `json:"displayName"`
-			Description     string `json:"description"`
-			InputTokenLimit int    `json:"inputTokenLimit"`
-			OutputTokenLimit int   `json:"outputTokenLimit"`
+			Name             string `json:"name"`
+			ModelID          string `json:"modelId"`
+			ID               string `json:"id"`
+			DisplayName      string `json:"displayName"`
+			Description      string `json:"description"`
+			InputTokenLimit  int    `json:"inputTokenLimit"`
+			OutputTokenLimit int    `json:"outputTokenLimit"`
 		} `json:"models"`
 		AvailableModels []struct {
-			Name            string `json:"name"`
-			ModelID         string `json:"modelId"`
-			ID              string `json:"id"`
-			DisplayName     string `json:"displayName"`
-			Description     string `json:"description"`
-			InputTokenLimit int    `json:"inputTokenLimit"`
-			OutputTokenLimit int   `json:"outputTokenLimit"`
+			Name             string `json:"name"`
+			ModelID          string `json:"modelId"`
+			ID               string `json:"id"`
+			DisplayName      string `json:"displayName"`
+			Description      string `json:"description"`
+			InputTokenLimit  int    `json:"inputTokenLimit"`
+			OutputTokenLimit int    `json:"outputTokenLimit"`
 		} `json:"availableModels"`
 	}
 	if json.Unmarshal(raw, &payload) != nil {
@@ -1267,10 +1264,7 @@ func parseAntigravityModels(raw []byte) []ModelInfo {
 			Provider:       "antigravity",
 		}
 		if entry.InputTokenLimit > 0 || entry.OutputTokenLimit > 0 {
-			model.TokenLimits = &struct {
-				MaxInputTokens  int `json:"maxInputTokens"`
-				MaxOutputTokens int `json:"maxOutputTokens"`
-			}{MaxInputTokens: entry.InputTokenLimit, MaxOutputTokens: entry.OutputTokenLimit}
+			model.TokenLimits = &ModelTokenLimits{MaxInputTokens: entry.InputTokenLimit, MaxOutputTokens: entry.OutputTokenLimit}
 		}
 		out = append(out, model)
 	}

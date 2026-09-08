@@ -103,10 +103,7 @@ func TestContextWindowForModelUsesUpstreamLimit(t *testing.T) {
 
 	// With an upstream-reported limit cached, prefer it over the constant.
 	h.cachedModels = []ModelInfo{
-		{ModelId: "claude-sonnet-4.5", TokenLimits: &struct {
-			MaxInputTokens  int `json:"maxInputTokens"`
-			MaxOutputTokens int `json:"maxOutputTokens"`
-		}{MaxInputTokens: 250000, MaxOutputTokens: 8192}},
+		{ModelId: "claude-sonnet-4.5", TokenLimits: &ModelTokenLimits{MaxInputTokens: 250000, MaxOutputTokens: 8192}},
 	}
 	if got := h.contextWindowForModel("claude-sonnet-4.5"); got != 250000 {
 		t.Fatalf("cached window for sonnet-4.5: got %d, want 250000", got)

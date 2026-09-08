@@ -287,10 +287,7 @@ func (h *Handler) codexDesktopModels(selected ...string) ([]ModelInfo, map[strin
 		if !found {
 			continue
 		}
-		models[i].TokenLimits = &struct {
-			MaxInputTokens  int `json:"maxInputTokens"`
-			MaxOutputTokens int `json:"maxOutputTokens"`
-		}{MaxInputTokens: input, MaxOutputTokens: output}
+		models[i].TokenLimits = &ModelTokenLimits{MaxInputTokens: input, MaxOutputTokens: output}
 	}
 	// Derive efforts from every discovered variant, not just the published
 	// representatives: the variants are what name the levels.
