@@ -1118,7 +1118,18 @@ let customSelectRefreshQueued = false;
       else if (a === 'saveCodexImageModel') saveCodexImageModel(id);
       else if (a === 'saveImageModel') saveImageModel(id);
       else if (a === 'saveGommoSettings') saveGommoSettings(id);
+      else if (a === 'loadAllowedModels') loadAllowedModelsCatalog(id, true);
+      else if (a === 'allowedModelsNone') clearAllowedModels();
+      else if (a === 'saveAllowedModels') saveAllowedModels(id);
       else if (a === 'refresh') refreshAccount(id);
+    });
+    // Checkbox state lives in the DOM between renders; mirror it into the
+    // picker state on every toggle so the summary line and the eventual save
+    // cannot drift from what the operator sees.
+    $('detailBody').addEventListener('change', e => {
+      if (e.target && e.target.classList && e.target.classList.contains('allowedModelBox')) {
+        syncAllowedModelsFromDom();
+      }
     });
   }
 

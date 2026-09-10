@@ -454,6 +454,23 @@ func (p *AccountPool) GetModelList(accountID string) []string {
 // been loaded it is authoritative for every account type, including external
 // OpenAI-compatible providers.
 func (p *AccountPool) accountHasModel(accountID, model string) bool {
+	requested := normalizeCatalogModelID(model)
+	for i := range p.accounts {
+		if p.accounts[i].ID != accountID || len(p.accounts[i].AllowedModels) == 0 {
+			continue
+		}
+		allowed := false
+		for _, allowedModel := range p.accounts[i].AllowedModels {
+			if normalizeCatalogModelID(allowedModel) == requested {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false
+		}
+		break
+	}
 	list, ok := p.modelLists[accountID]
 	if !ok {
 		return true // cold start: catalog not loaded yet
@@ -461,7 +478,6 @@ func (p *AccountPool) accountHasModel(accountID, model string) bool {
 	if len(list) == 0 {
 		return false
 	}
-	requested := normalizeCatalogModelID(model)
 	for catalogModel := range list {
 		candidate := normalizeCatalogModelID(catalogModel)
 		if candidate == requested || strings.HasPrefix(candidate, requested+"-") {

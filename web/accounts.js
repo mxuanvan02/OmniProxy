@@ -29,6 +29,14 @@ let gommoPlaygroundRunning = false;
 let gommoPlaygroundResult = null;
 let gommoPlaygroundVoice = '';
 let collapsedGroups = loadCollapsedGroups();
+// Allowed-models picker state (detail modal). detailAllowedSelected holds the
+// operator's current selection; an empty set means "no restriction" and is
+// saved as an empty list, which the pool reads as unrestricted.
+let detailAllowedAccountId = '';
+let detailAllowedSelected = new Set();
+let detailAllowedCatalog = [];
+let detailAllowedLoading = false;
+let detailAllowedError = '';
 
   async function loadAccounts() {
     const res = await api('/accounts');
@@ -1231,6 +1239,14 @@ let collapsedGroups = loadCollapsedGroups();
     const a = accountsData.find(x => x.id === id);
     if (!a) return;
     const idAttr = escapeAttr(id);
+    // Seed the allowed-models picker from the account's saved whitelist. The
+    // catalog itself is fetched lazily (cached endpoint) after the modal opens
+    // so opening a detail view never blocks on an upstream model probe.
+    detailAllowedAccountId = id;
+    detailAllowedSelected = new Set((a.allowedModels || []).map(m => String(m).trim()).filter(Boolean));
+    detailAllowedCatalog = [];
+    detailAllowedLoading = false;
+    detailAllowedError = '';
     const isCodex = String(a.authMethod || '').toLowerCase() === 'codex';
     const isExternal = isExternalAuthMethod(a.authMethod);
     const isSearch = hasConfiguredCapability(a, 'search');
@@ -1437,6 +1453,11 @@ let collapsedGroups = loadCollapsedGroups();
       // included: their zero count is the one most often misread as a fault.
       catalogProvenanceSection(a) +
 
+      // Allowed-models whitelist — chat-capable accounts only. Service
+      // (search/image) accounts are appended by the selector and never
+      // model-routed, so a whitelist there would be inert.
+      (isService ? '' : allowedModelsSection(a, idAttr)) +
+
       (isService ? '' : '<div class="detail-section">' +
       '<h4>' + escapeHtml(t('detail.models')) +
       ' <button class="btn btn-sm btn-outline" data-detail-action="loadModels" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.loadModels')) + '</button>' +
@@ -1446,6 +1467,12 @@ let collapsedGroups = loadCollapsedGroups();
       '</div>');
 
     openDialog('detailModal');
+    if (!isService) {
+      renderAllowedModels();
+      // Cached catalog only: no upstream call, so this cannot make opening the
+      // detail modal slow or fail on a dead credential.
+      loadAllowedModelsCatalog(id, false);
+    }
   }
   async function loadModels(id) {
     const c = $('modelsList');
@@ -1475,6 +1502,97 @@ let collapsedGroups = loadCollapsedGroups();
       c.innerHTML = '<p class="message message-error">' + escapeHtml(t('detail.loadFailed')) + '</p>';
       toast(t('detail.loadFailed'), 'error');
     }
+  }
+  // Allowed-models picker ---------------------------------------------------
+  // account.allowedModels is an explicit whitelist of public model IDs that the
+  // routing pool checks BEFORE the discovered catalog. An empty list means "no
+  // restriction", so clearing the selection has to be a real save (empty array)
+  // rather than a skipped field.
+  function allowedModelsSection(a, idAttr) {
+    return '<div class="detail-section"><h4>' + escapeHtml(t('detail.allowedModels')) +
+      ' <button class="btn btn-sm btn-outline" data-detail-action="loadAllowedModels" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.allowedModelsLoad')) + '</button>' +
+      '</h4>' +
+      '<p class="help-block">' + escapeHtml(t('detail.allowedModelsHint')) + '</p>' +
+      '<div id="allowedModelsBox" class="model-list"></div>' +
+      '<div class="machine-id-row" style="margin-top:0.5rem">' +
+      '<button class="btn btn-sm btn-outline" data-detail-action="allowedModelsNone" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.allowedModelsClear')) + '</button>' +
+      '<button class="btn btn-sm btn-primary" data-detail-action="saveAllowedModels" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.save')) + '</button>' +
+      '</div></div>';
+  }
+  function allowedModelsSummaryText() {
+    return detailAllowedSelected.size === 0
+      ? t('detail.allowedModelsUnrestricted')
+      : t('detail.allowedModelsCount', detailAllowedSelected.size);
+  }
+  function renderAllowedModels() {
+    const box = $('allowedModelsBox');
+    if (!box) return;
+    if (detailAllowedLoading) {
+      box.innerHTML = '<p class="empty-state">' + escapeHtml(t('detail.loading')) + '</p>';
+      return;
+    }
+    const options = [];
+    const seen = new Set();
+    detailAllowedCatalog.forEach(id => {
+      if (id && !seen.has(id)) { seen.add(id); options.push(id); }
+    });
+    // Keep an already-restricted model visible even when the cached catalog no
+    // longer lists it; otherwise a save would silently drop the restriction.
+    detailAllowedSelected.forEach(id => {
+      if (id && !seen.has(id)) { seen.add(id); options.push(id); }
+    });
+    options.sort();
+    const summary = '<p class="help-block" id="allowedModelsSummary">' + escapeHtml(allowedModelsSummaryText()) + '</p>';
+    const errorBlock = detailAllowedError ? '<p class="help-block">' + escapeHtml(detailAllowedError) + '</p>' : '';
+    if (options.length === 0) {
+      box.innerHTML = summary + '<p class="empty-state">' + escapeHtml(detailAllowedError || t('detail.allowedModelsEmpty')) + '</p>';
+      return;
+    }
+    box.innerHTML = summary + options.map(id =>
+      '<label class="model-item" style="grid-template-columns:auto 1fr">' +
+      '<input type="checkbox" class="allowedModelBox" value="' + escapeAttr(id) + '"' + (detailAllowedSelected.has(id) ? ' checked' : '') + ' />' +
+      '<span class="model-name">' + escapeHtml(id) + '</span></label>'
+    ).join('') + errorBlock;
+  }
+  function syncAllowedModelsFromDom() {
+    const boxes = Array.from(qsa('.allowedModelBox'));
+    if (boxes.length === 0) return;
+    detailAllowedSelected = new Set(boxes.filter(b => b.checked).map(b => b.value));
+    const summary = $('allowedModelsSummary');
+    if (summary) summary.textContent = allowedModelsSummaryText();
+  }
+  async function loadAllowedModelsCatalog(id, live) {
+    detailAllowedLoading = true;
+    detailAllowedError = '';
+    renderAllowedModels();
+    let catalog = [];
+    try {
+      const res = await api('/accounts/' + id + '/models' + (live ? '' : '/cached'));
+      const d = await res.json();
+      if (d && d.success) {
+        catalog = (d.models || [])
+          .map(m => (typeof m === 'string' ? m : (m && (m.modelId || m.id)) || ''))
+          .map(s => String(s).trim())
+          .filter(Boolean);
+      } else {
+        detailAllowedError = t('detail.loadFailed') + (d && d.error ? ': ' + d.error : '');
+      }
+    } catch (e) {
+      detailAllowedError = t('detail.loadFailed');
+    }
+    detailAllowedLoading = false;
+    // The modal may have moved to another account while this was in flight.
+    if (detailAllowedAccountId !== id) return;
+    detailAllowedCatalog = catalog;
+    renderAllowedModels();
+  }
+  function clearAllowedModels() {
+    detailAllowedSelected = new Set();
+    renderAllowedModels();
+  }
+  async function saveAllowedModels(id) {
+    syncAllowedModelsFromDom();
+    await putAccount(id, { allowedModels: Array.from(detailAllowedSelected) }, t('detail.saved'));
   }
   async function generateMachineId() {
     try {

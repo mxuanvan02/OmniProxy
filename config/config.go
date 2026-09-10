@@ -157,6 +157,12 @@ type Account struct {
 	// outbound external-provider request is rewritten.
 	ModelMappings map[string]string `json:"modelMappings,omitempty"`
 
+	// AllowedModels restricts this account to an explicit set of public model
+	// IDs. Empty preserves the legacy unrestricted behavior. The routing pool
+	// enforces this before consulting the discovered upstream catalog, so a
+	// cold-start or stale catalog cannot bypass an operator restriction.
+	AllowedModels []string `json:"allowedModels"`
+
 	// CacheControlPassthrough overrides the global
 	// Settings.CacheControlPassthrough switch for this account only.
 	// Tri-state: nil = inherit the global setting, true = always attach
