@@ -1950,9 +1950,53 @@ func replacePublicModelEntry(models []map[string]interface{}, replacement map[st
 	return append(models, replacement)
 }
 
+// filterModelsByCapability narrows a discovery response to the requested
+// modalities. An empty selector is a no-op so the default route keeps its
+// historical shape for existing clients.
+//
+// Entries carry their modality in the "capability" field written by
+// buildModelInfoWithTokenLimits. Entries that predate that field (or come from
+// a path that builds its own map) are treated as chat, which matches how they
+// were published before modality labelling existed.
+func filterModelsByCapability(models []map[string]interface{}, selector string) []map[string]interface{} {
+	selector = strings.TrimSpace(selector)
+	if selector == "" {
+		return models
+	}
+	wanted := make(map[string]bool)
+	for _, part := range strings.Split(selector, ",") {
+		if normalized := strings.ToLower(strings.TrimSpace(part)); normalized != "" {
+			wanted[normalized] = true
+		}
+	}
+	if len(wanted) == 0 {
+		return models
+	}
+	out := make([]map[string]interface{}, 0, len(models))
+	for _, model := range models {
+		capability, _ := model["capability"].(string)
+		capability = strings.ToLower(strings.TrimSpace(capability))
+		if capability == "" {
+			capability = capabilityChat
+		}
+		if wanted[capability] {
+			out = append(out, model)
+		}
+	}
+	return out
+}
+
 // handleModels returns the configured public catalog. The legacy response
 // contains canonical Claude and Codex models. Rich consumers may request the
 // account-aware catalogue with ?catalog=all.
+//
+// ?capability=<name> narrows the response to one modality. Without it, a chat
+// client browsing the catalogue is offered video generators and TTS voices it
+// cannot call, because every entry shares the /v1/models route regardless of
+// request shape. Multiple values may be comma-separated
+// (?capability=chat,image). Unknown values yield an empty list rather than
+// silently falling back to everything: a typo must not hand a chat picker the
+// media catalogue.
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	models := canonicalClaude5Models()
 	if hasEnabledCodexAccount() {
@@ -1980,6 +2024,7 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 		models = mergePublicModelEntries(models)
 	}
+	models = filterModelsByCapability(models, r.URL.Query().Get("capability"))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"object": "list",
@@ -2108,18 +2153,99 @@ func buildModelInfo(id, ownedBy string, supportsImage bool) map[string]interface
 	return buildModelInfoWithTokenLimits(id, ownedBy, supportsImage, nil)
 }
 
+// primaryModelCapability resolves the one capability that decides a model's
+// request shape. classifyModelCapabilities may report several signals, but
+// discovery metadata and endpoint routing need a single answer: a video
+// generator is not also a chat model, and publishing it as one produces
+// upstream 400s when a client sends it chat messages.
+//
+// Catalog metadata outranks name inference. A provider that explicitly
+// declares an output modality is authoritative; the needle rules are the
+// fallback for reseller catalogs that publish no modality data at all.
+func primaryModelCapability(id string, source *ModelInfo) string {
+	if source != nil {
+		for _, value := range append(append([]string{}, source.OutputTypes...), source.Modalities...) {
+			normalized := strings.ToLower(strings.TrimSpace(value))
+			switch {
+			case strings.Contains(normalized, "video"):
+				return capabilityVideo
+			case strings.Contains(normalized, "audio"), strings.Contains(normalized, "speech"):
+				return capabilityAudioTTS
+			case strings.Contains(normalized, "image") &&
+				(strings.Contains(normalized, "output") || strings.Contains(normalized, "generate") || normalized == "image"):
+				return capabilityImage
+			}
+		}
+	}
+	for _, capability := range classifyModelCapabilities(id) {
+		if capability != capabilityChat {
+			return capability
+		}
+	}
+	return capabilityChat
+}
+
+// modelOutputModalities maps a capability to what the model actually emits.
+// Every entry previously advertised “output: ["text"]“, which left a client
+// unable to tell kling_video_3_0 from a chat model — the reason media models
+// showed up in chat model pickers.
+func modelOutputModalities(capability string) []string {
+	switch capability {
+	case capabilityImage:
+		return []string{"image"}
+	case capabilityVideo:
+		return []string{"video"}
+	case capabilityAudioTTS, capabilityAudioMusic:
+		return []string{"audio"}
+	case capabilityEmbedding:
+		return []string{"embedding"}
+	default:
+		// Chat, moderation and speech-to-text all return text.
+		return []string{"text"}
+	}
+}
+
 // buildModelInfoWithTokenLimits keeps model discovery consistent with runtime
 // accounting. Claude Code uses the advertised limits when deciding whether
 // to compact or continue a conversation, so omitting them can make a valid
 // 1M-context model look like an unknown or smaller-window model.
 func buildModelInfoWithTokenLimits(id, ownedBy string, supportsImage bool, source *ModelInfo) map[string]interface{} {
+	// The capability decides the request shape, so it also decides which
+	// metadata is truthful. Chat flags (tool_use, reasoning, effort levels)
+	// were previously hardcoded to true for every entry, which advertised
+	// tool calling on video generators and left clients unable to tell a
+	// media model from a chat model.
+	capability := primaryModelCapability(id, source)
+	isChat := capability == capabilityChat
+
 	modalities := []string{"text"}
 	if supportsImage {
 		modalities = append(modalities, "image")
 	}
 	modalitiesMap := map[string][]string{
 		"input":  modalities,
-		"output": []string{"text"},
+		"output": modelOutputModalities(capability),
+	}
+
+	capabilities := map[string]interface{}{
+		// image_input / image_vision describe what the model accepts.
+		// Generation support is reported through the output modality and
+		// the "capability" field, never inferred from vision.
+		"vision":       supportsImage,
+		"image_vision": supportsImage,
+		"image_input":  map[string]bool{"supported": supportsImage},
+		// Only chat endpoints stream token deltas and accept tools.
+		"streaming": map[string]bool{"supported": isChat},
+		"tool_use":  map[string]bool{"supported": isChat},
+	}
+	// "image" historically conflated vision input with image generation.
+	// Keep the key for client compatibility but answer the question it
+	// actually asks: can this model emit an image?
+	capabilities["image"] = capability == capabilityImage
+	if isChat {
+		capabilities["reasoning"] = map[string]interface{}{"supported": true, "type": "adaptive"}
+	} else {
+		capabilities["reasoning"] = map[string]bool{"supported": false}
 	}
 
 	entry := map[string]interface{}{
@@ -2129,20 +2255,10 @@ func buildModelInfoWithTokenLimits(id, ownedBy string, supportsImage bool, sourc
 		"supports_image":   supportsImage,
 		"input_modalities": modalities,
 		"modalities":       modalitiesMap,
-		"capabilities": map[string]interface{}{
-			"vision":       supportsImage,
-			"image":        supportsImage,
-			"image_vision": supportsImage,
-			"image_input":  map[string]bool{"supported": supportsImage},
-			"streaming":    map[string]bool{"supported": true},
-			"tool_use":     map[string]bool{"supported": true},
-			"reasoning":    map[string]interface{}{"supported": true, "type": "adaptive"},
-		},
-		"runtime": map[string]interface{}{
-			"effort_levels":  []string{"low", "medium", "high", "xhigh", "max"},
-			"default_effort": "high",
-			"capabilities":   []string{"effort", "xhigh_effort", "max_effort", "adaptive_thinking", "interleaved_thinking"},
-		},
+		// Explicit modality label so a client can filter without parsing
+		// model names. This is the field Hermes-style pickers consume.
+		"capability":   capability,
+		"capabilities": capabilities,
 		"info": map[string]interface{}{
 			"meta": map[string]interface{}{
 				"capabilities": map[string]bool{
@@ -2151,6 +2267,16 @@ func buildModelInfoWithTokenLimits(id, ownedBy string, supportsImage bool, sourc
 				},
 			},
 		},
+	}
+	// Reasoning effort is a chat-completions concept. Publishing it on a
+	// TTS or video model invites clients to send parameters the upstream
+	// rejects.
+	if isChat {
+		entry["runtime"] = map[string]interface{}{
+			"effort_levels":  []string{"low", "medium", "high", "xhigh", "max"},
+			"default_effort": "high",
+			"capabilities":   []string{"effort", "xhigh_effort", "max_effort", "adaptive_thinking", "interleaved_thinking"},
+		}
 	}
 
 	var info ModelInfo

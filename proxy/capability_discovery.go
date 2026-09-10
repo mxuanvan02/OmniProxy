@@ -11,16 +11,17 @@ import (
 // distinct from the pool-partitioning capabilities ("chat", "search", "image")
 // so that discovery can describe an account without moving it between pools.
 const (
-	capabilityChat      = "chat"
-	capabilitySearch    = "search"
-	capabilityImage     = "image"
-	capabilityEmbedding = "embedding"
-	capabilityAudioSTT  = "audio-stt"
-	capabilityAudioTTS  = "audio-tts"
+	capabilityChat       = "chat"
+	capabilitySearch     = "search"
+	capabilityImage      = "image"
+	capabilityEmbedding  = "embedding"
+	capabilityAudioSTT   = "audio-stt"
+	capabilityAudioTTS   = "audio-tts"
 	capabilityModeration = "moderation"
 	capabilityVideo      = "video"
 	capabilityAudioMusic = "audio-music"
 )
+
 // discoverableCapabilities is the ordered list reported by the capabilities
 // endpoint. Order is stable so the admin UI renders badges deterministically.
 var discoverableCapabilities = []string{
@@ -46,6 +47,12 @@ type modelCapabilityRule struct {
 	// prefixes match only at the start of the lowercased model ID. Used where a
 	// bare substring would produce false positives.
 	prefixes []string
+	// excludeNeedles veto the rule when present. Needed where two capabilities
+	// share a word: "speech" appears in both text-to-speech and
+	// speech-to-text, so the TTS rule vetoes on the transcription tokens
+	// instead of relying on rule ordering (classify evaluates every rule and
+	// a model can otherwise collect both capabilities).
+	excludeNeedles []string
 }
 
 // modelCapabilityRules is evaluated in order; a model may contribute more than
@@ -75,8 +82,21 @@ var modelCapabilityRules = []modelCapabilityRule{
 		capability: capabilityAudioTTS,
 		needles: []string{
 			"-tts", "tts-", "text-to-speech", "speech-synthesis",
+			// Reseller catalogs label TTS with a bare "speech" token
+			// (minimax-speech-2-8-hd, autoai-speech-1). The STT vetoes below
+			// keep transcription models out.
+			"speech", "voicedesign", "voice-design",
 		},
-		prefixes: []string{"tts"},
+		prefixes:       []string{"tts"},
+		excludeNeedles: []string{"speech-to-text", "transcribe", "transcription", "whisper", "asr"},
+	},
+	{
+		// Music generation has its own request shape and its own upstream
+		// route, so it must not fall through to the chat default.
+		capability: capabilityAudioMusic,
+		needles: []string{
+			"suno", "music", "musicgen", "lyria", "songgen", "-song",
+		},
 	},
 	{
 		capability: capabilityModeration,
@@ -87,7 +107,11 @@ var modelCapabilityRules = []modelCapabilityRule{
 		needles: []string{
 			"veo-", "sora", "seedance", "kling", "runway", "wan-video",
 			"-video", "video-gen", "hailuo", "luma-",
+			// Bare "veo"/"video" as a leading token, plus upscalers and
+			// reseller-specific families that carry no hyphenated marker.
+			"video-upscale", "video-heavy", "pixverse", "vidu", "minimax-video",
 		},
+		prefixes: []string{"veo", "video"},
 	},
 	{
 		capability: capabilityImage,
@@ -95,15 +119,43 @@ var modelCapabilityRules = []modelCapabilityRule{
 			"gpt-image", "dall-e", "dalle", "-image", "image-gen",
 			"flux", "stable-diffusion", "sdxl", "midjourney",
 			"imagen", "seedream", "recraft", "ideogram", "qwen-image",
+			// Reseller families whose IDs carry no "image" token at all.
+			"imagine", "image-upscale", "nano-banana", "gen-image",
 		},
+		prefixes: []string{"image", "z-image"},
 	},
+}
+
+// normalizeModelIDForClassification makes provider naming conventions
+// comparable. Reseller catalogs are inconsistent about the separator: the same
+// family ships as “veo-3-1“ on one gateway and “veo_3_1“ on another, and
+// “google_image_gen_banana“ matches no hyphenated needle at all. Collapsing
+// underscores, dots and spaces to hyphens lets one rule set cover every
+// spelling instead of duplicating needles per separator.
+func normalizeModelIDForClassification(modelID string) string {
+	id := strings.ToLower(strings.TrimSpace(modelID))
+	if id == "" {
+		return ""
+	}
+	replacer := strings.NewReplacer("_", "-", ".", "-", " ", "-", "/", "-")
+	id = replacer.Replace(id)
+	// Collapse runs of hyphens so "gpt--image" and "gpt-image" behave alike.
+	for strings.Contains(id, "--") {
+		id = strings.ReplaceAll(id, "--", "-")
+	}
+	return strings.Trim(id, "-")
 }
 
 // classifyModelCapabilities maps a single model ID to the capabilities it
 // implies. An empty result means the model contributed no signal and the caller
 // should treat it as chat.
 func classifyModelCapabilities(modelID string) []string {
-	id := strings.ToLower(strings.TrimSpace(modelID))
+	// Match against the separator-normalized form so underscore-style
+	// catalogs (google_image_gen_banana, veo_3_1, minimax_speech_2_8_hd)
+	// are classified identically to their hyphenated equivalents. Before
+	// this, every underscore-named media model matched no rule and fell
+	// through to the chat default.
+	id := normalizeModelIDForClassification(modelID)
 	if id == "" {
 		return nil
 	}
@@ -116,6 +168,16 @@ func classifyModelCapabilities(modelID string) []string {
 		}
 	}
 	for _, rule := range modelCapabilityRules {
+		vetoed := false
+		for _, needle := range rule.excludeNeedles {
+			if strings.Contains(id, needle) {
+				vetoed = true
+				break
+			}
+		}
+		if vetoed {
+			continue
+		}
 		matched := false
 		for _, needle := range rule.needles {
 			if strings.Contains(id, needle) {

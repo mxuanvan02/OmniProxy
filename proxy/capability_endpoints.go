@@ -13,12 +13,12 @@ import (
 )
 
 const (
-	endpointEmbeddings     = "embeddings"
-	endpointAudioSpeech    = "audio-speech"
+	endpointEmbeddings      = "embeddings"
+	endpointAudioSpeech     = "audio-speech"
 	endpointAudioTranscribe = "audio-transcriptions"
-	endpointImageEdit      = "image-edit"
-	endpointImageVariation = "image-variation"
-	endpointModerations    = "moderations"
+	endpointImageEdit       = "image-edit"
+	endpointImageVariation  = "image-variation"
+	endpointModerations     = "moderations"
 
 	// maxPassthroughResponseBytes bounds an upstream response we buffer in
 	// memory. Audio responses are the large case; 32 MiB covers long TTS output
@@ -87,6 +87,56 @@ var capabilityEndpoints = map[string]capabilityEndpoint{
 		usageEndpoint:    endpointImageVariation,
 		multipartRequest: true,
 	},
+}
+
+// capabilityEndpointCatalog is the client-facing route registry. Its order is
+// intentional: the first route remains the backward-compatible primary URL,
+// while the complete slice lets clients expose every supported operation.
+func capabilityEndpointCatalog() map[string][]string {
+	return map[string][]string{
+		capabilityChat: {
+			"/v1/chat/completions",
+			"/v1/messages",
+			"/v1/responses",
+		},
+		capabilitySearch: {
+			"/v1/search",
+		},
+		capabilityImage: {
+			"/v1/images/generations",
+			"/v1/images/edits",
+			"/v1/images/variations",
+		},
+		capabilityEmbedding: {
+			"/v1/embeddings",
+		},
+		capabilityAudioSTT: {
+			"/v1/audio/transcriptions",
+			"/v1/audio/translations",
+		},
+		capabilityAudioTTS: {
+			"/v1/audio/speech",
+		},
+		capabilityModeration: {
+			"/v1/moderations",
+		},
+		capabilityVideo: {
+			"/v1/videos/generations",
+			"/v1/videos/{id}",
+		},
+		capabilityAudioMusic: {
+			"/v1/music/generations",
+			"/v1/music/{id}",
+		},
+	}
+}
+
+func primaryCapabilityEndpoint(capability string, catalog map[string][]string) string {
+	endpoints := catalog[capability]
+	if len(endpoints) == 0 {
+		return ""
+	}
+	return endpoints[0]
 }
 
 // lookupCapabilityEndpoint resolves a request path to a passthrough route,
@@ -486,10 +536,11 @@ func (h *Handler) apiGetCapabilities(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type capabilitySummary struct {
-		Capability     string `json:"capability"`
-		Accounts       int    `json:"accounts"`
-		EnabledAccount int    `json:"enabledAccounts"`
-		Endpoint       string `json:"endpoint,omitempty"`
+		Capability     string   `json:"capability"`
+		Accounts       int      `json:"accounts"`
+		EnabledAccount int      `json:"enabledAccounts"`
+		Endpoint       string   `json:"endpoint,omitempty"`
+		Endpoints      []string `json:"endpoints,omitempty"`
 		// Available means "an enabled account advertises this capability". It
 		// is derived from the provider catalog, which is aspirational: a model
 		// can be listed with no channel behind it, and the endpoint path may
@@ -509,15 +560,7 @@ func (h *Handler) apiGetCapabilities(w http.ResponseWriter, r *http.Request) {
 		Verified bool `json:"verified"`
 	}
 
-	endpointFor := make(map[string]string, len(capabilityEndpoints))
-	for path, route := range capabilityEndpoints {
-		if _, exists := endpointFor[route.capability]; !exists {
-			endpointFor[route.capability] = path
-		}
-	}
-	endpointFor[capabilityChat] = "/v1/chat/completions"
-	endpointFor[capabilitySearch] = "/v1/search"
-	endpointFor[capabilityImage] = "/v1/images/generations"
+	endpointCatalog := capabilityEndpointCatalog()
 
 	summary := make([]capabilitySummary, 0, len(discoverableCapabilities))
 	for _, capability := range discoverableCapabilities {
@@ -525,7 +568,8 @@ func (h *Handler) apiGetCapabilities(w http.ResponseWriter, r *http.Request) {
 			Capability:       capability,
 			Accounts:         counts[capability],
 			EnabledAccount:   enabledCounts[capability],
-			Endpoint:         endpointFor[capability],
+			Endpoint:         primaryCapabilityEndpoint(capability, endpointCatalog),
+			Endpoints:        endpointCatalog[capability],
 			Available:        enabledCounts[capability] > 0,
 			VerifiedAccounts: verifiedCounts[capability],
 			ProbeFailures:    probeFailureCounts[capability],

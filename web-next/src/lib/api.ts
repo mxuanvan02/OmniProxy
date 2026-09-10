@@ -100,7 +100,67 @@ export async function logout(): Promise<void> {
 
 export const api = {
   accounts: () => request<Account[]>('/accounts'),
+  capabilities: () => request<CapabilityMatrix>('/capabilities'),
+  probeCapabilities: (accountId: string, includeCostly = false) =>
+    request<CapabilityProbeResponse>(
+      `/accounts/${encodeURIComponent(accountId)}/probe-capabilities${includeCostly ? '?includeCostly=true' : ''}`,
+      { method: 'POST' },
+    ),
   stats: () => request<Record<string, unknown>>('/stats'),
+}
+
+export interface CapabilityProbeResult {
+  ok: boolean
+  status?: number
+  model?: string
+  detail?: string
+  checkedAt?: number
+  latencyMs?: number
+  skipped?: boolean
+  skippedReason?: string
+}
+
+export interface CapabilitySummary {
+  capability: string
+  accounts: number
+  enabledAccounts: number
+  endpoint?: string
+  endpoints?: string[]
+  available: boolean
+  verifiedAccounts: number
+  probeFailures: number
+  probeSkipped: number
+  verified: boolean
+}
+
+export interface AccountCapability {
+  id: string
+  email?: string
+  nickname?: string
+  provider?: string
+  enabled: boolean
+  configured?: string[]
+  discovered?: string[]
+  effective?: string[]
+  discoveredAt?: number
+  probes?: Record<string, CapabilityProbeResult>
+  verified?: string[]
+}
+
+export interface CapabilityMatrix {
+  capabilities: CapabilitySummary[]
+  accounts: AccountCapability[]
+}
+
+export interface CapabilityProbeResponse {
+  success: boolean
+  accountId: string
+  includeCostly: boolean
+  probes: Record<string, CapabilityProbeResult>
+  verified: string[]
+  failed: string[]
+  skipped: string[]
+  note?: string
 }
 
 /** Subset of /admin/api/accounts that this UI reads. The endpoint returns ~70
