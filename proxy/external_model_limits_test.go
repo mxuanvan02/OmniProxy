@@ -112,7 +112,7 @@ func TestExternalModelTokenLimitsIgnoresPricing(t *testing.T) {
 	}
 }
 
-func TestExternalModelPublishedContextUsesHeadroom(t *testing.T) {
+func TestExternalModelPublishedContextMatchesUpstream(t *testing.T) {
 	info := ModelInfo{
 		ModelId:  "external-model",
 		Provider: "external",
@@ -127,8 +127,8 @@ func TestExternalModelPublishedContextUsesHeadroom(t *testing.T) {
 	if !ok {
 		t.Fatal("external model should publish token_limits")
 	}
-	if limits["maxInputTokens"] != 800_000 {
-		t.Fatalf("published input limit = %#v, want 800000", limits["maxInputTokens"])
+	if limits["maxInputTokens"] != 1_000_000 {
+		t.Fatalf("published input limit = %#v, want upstream 1000000", limits["maxInputTokens"])
 	}
 	if limits["maxOutputTokens"] != 128_000 {
 		t.Fatalf("published output limit = %#v, want 128000", limits["maxOutputTokens"])
@@ -166,36 +166,8 @@ func TestExternalWithoutUpstreamLimitDoesNotInheritPolicy(t *testing.T) {
 	}
 }
 
-func TestExternalDefaultOutputTokensByFamily(t *testing.T) {
-	cases := []struct {
-		model string
-		want  int
-	}{
-		{"claude-opus-5", 128_000},
-		{"claude-sonnet-4.6", 128_000},
-		{"claude-fable-5-1", 128_000},
-		{"gpt-5.6-luna", 128_000},
-		{"o4", 128_000},
-		{"codex-mini-latest", 128_000},
-		{"deepseek-v4-pro", 32_000},
-		{"kimi-k3", 32_000},
-		{"qwen3.8-max", 32_000},
-		{"gemini-3.1-pro", 32_000},
-		{"grok-4.6", 32_000},
-		{"muse-spark-1.1", 32_000},
-		{"anthropic/claude-opus-5", 128_000},
-		{"claude-opus-5-thinking", 128_000},
-		{"totally-unknown-model", 16_000},
-	}
-	for _, c := range cases {
-		if got := externalDefaultOutputTokens(c.model); got != c.want {
-			t.Errorf("externalDefaultOutputTokens(%q) = %d, want %d", c.model, got, c.want)
-		}
-	}
-}
-
-func TestExternalOutputFallbackFillsZeroOnly(t *testing.T) {
-	// Upstream publishes input but no output cap -> family default fills output.
+func TestExternalPartialMetadataStaysPartial(t *testing.T) {
+	// Upstream publishes input but no output cap: preserve that partial metadata.
 	info := ModelInfo{
 		ModelId:  "claude-opus-4-8",
 		Provider: "gpt2api",
@@ -209,11 +181,11 @@ func TestExternalOutputFallbackFillsZeroOnly(t *testing.T) {
 	if !ok {
 		t.Fatal("external model should publish token_limits")
 	}
-	if limits["maxInputTokens"] != 800_000 {
-		t.Fatalf("published input limit = %#v, want 800000", limits["maxInputTokens"])
+	if limits["maxInputTokens"] != 1_000_000 {
+		t.Fatalf("published input limit = %#v, want upstream 1000000", limits["maxInputTokens"])
 	}
-	if limits["maxOutputTokens"] != 128_000 {
-		t.Fatalf("published output limit = %#v, want 128000 (family fallback)", limits["maxOutputTokens"])
+	if limits["maxOutputTokens"] != 0 {
+		t.Fatalf("published output limit = %#v, want upstream 0", limits["maxOutputTokens"])
 	}
 }
 
