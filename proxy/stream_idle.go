@@ -20,7 +20,11 @@ import (
 // refactor the message.
 var ErrStreamIdleTimeout = errors.New("stream idle timeout: upstream produced no data within idle window")
 
-const initialStreamDataTimeout = 45 * time.Second
+// Some external gateways acknowledge an SSE request with response headers,
+// then need over a minute to produce the first real event for large contexts.
+// Keep this comfortably above the observed 68-79s TTFT while retaining a
+// finite bound for an upstream that returns 200 OK and then stays silent.
+const initialStreamDataTimeout = 120 * time.Second
 
 // idleTimeoutReader wraps an upstream response body and aborts the read
 // when no byte arrives within the idle window. It serves two purposes:

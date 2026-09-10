@@ -55,6 +55,14 @@ func TestIdleTimeoutReaderPassesData(t *testing.T) {
 	}
 }
 
+func TestInitialStreamDataTimeoutAllowsSlowFirstEvent(t *testing.T) {
+	// JUSTWOKER has produced first tokens after 68-79s for large contexts.
+	// Keep enough margin so those healthy requests are not aborted locally.
+	if initialStreamDataTimeout < 120*time.Second {
+		t.Fatalf("initial stream data timeout = %s, want at least 120s", initialStreamDataTimeout)
+	}
+}
+
 func TestIdleTimeoutReaderUsesShorterDeadlineForFirstByte(t *testing.T) {
 	r := &idleTimeoutReader{
 		body:        &neverReader{},
