@@ -138,7 +138,7 @@ func buildKiroTransport(proxyURL string) *http.Transport {
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   20,
 		IdleConnTimeout:       90 * time.Second,
-		ResponseHeaderTimeout: initialStreamDataTimeout,
+		ResponseHeaderTimeout: config.GetResponseHeaderTimeout(),
 		DisableCompression:    false,
 		ForceAttemptHTTP2:     true,
 	}

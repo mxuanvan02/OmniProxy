@@ -474,6 +474,16 @@ type Config struct {
 	// Set to 0 to disable (falls back to the overall KiroApiTimeoutMs).
 	StreamIdleTimeoutSeconds int `json:"streamIdleTimeoutSeconds"`
 
+	// Response header timeout: max seconds to wait for the upstream's HTTP
+	// response headers. Gateways that buffer the whole completion before
+	// answering (measured on apikey.click 2026-09-10: headers at 63-66s for a
+	// reasoning model) exceed a short deadline even though the request is
+	// healthy, so this must stay above single-request inference latency.
+	// Default: 300s. Env override: RESPONSE_HEADER_TIMEOUT_SECONDS.
+	// Set to 0 to disable (the overall KiroApiTimeoutMs and the stream idle
+	// reader still bound the request).
+	ResponseHeaderTimeoutSeconds int `json:"responseHeaderTimeoutSeconds"`
+
 	// SanitizeClaudeCodePrompt is kept for backward-compatible JSON loading only.
 	// Migrated to FilterClaudeCode on first load. Do not use directly.
 	SanitizeClaudeCodePrompt bool `json:"sanitizeClaudeCodePrompt,omitempty"`
@@ -565,10 +575,11 @@ var (
 )
 
 type configSaveBaseline struct {
-	apiTimeoutMs             int
-	streamIdleTimeoutSeconds int
-	extraModels              []string
-	initialized              bool
+	apiTimeoutMs                 int
+	streamIdleTimeoutSeconds     int
+	responseHeaderTimeoutSeconds int
+	extraModels                  []string
+	initialized                  bool
 }
 
 const (
@@ -576,6 +587,10 @@ const (
 	// chunks while the upstream model is reasoning or executing tools.
 	defaultKiroApiTimeoutMs      = 900_000
 	defaultStreamIdleTimeoutSecs = 900
+	// Buffering gateways answer with headers only after the whole completion
+	// is ready, so the header wait must exceed single-request inference
+	// latency rather than typical TTFB.
+	defaultResponseHeaderTimeoutSecs = 300
 )
 
 // Init initializes the configuration system with the specified file path.
@@ -668,20 +683,22 @@ func loadLocked() error {
 			// not be reachable from the LAN. Containers opt back in by setting
 			// host to 0.0.0.0 (docker-compose ships that).
 			cfg = &Config{
-				Password:                 "",
-				Port:                     8080,
-				Host:                     "127.0.0.1",
-				RequireApiKey:            false,
-				Accounts:                 []Account{},
-				KiroApiTimeoutMs:         defaultKiroApiTimeoutMs,
-				StreamIdleTimeoutSeconds: defaultStreamIdleTimeoutSecs,
-				ExtraModels:              []string{},
+				Password:                     "",
+				Port:                         8080,
+				Host:                         "127.0.0.1",
+				RequireApiKey:                false,
+				Accounts:                     []Account{},
+				KiroApiTimeoutMs:             defaultKiroApiTimeoutMs,
+				StreamIdleTimeoutSeconds:     defaultStreamIdleTimeoutSecs,
+				ResponseHeaderTimeoutSeconds: defaultResponseHeaderTimeoutSecs,
+				ExtraModels:                  []string{},
 			}
 			saveBaseline = configSaveBaseline{
-				apiTimeoutMs:             cfg.KiroApiTimeoutMs,
-				streamIdleTimeoutSeconds: cfg.StreamIdleTimeoutSeconds,
-				extraModels:              append([]string(nil), cfg.ExtraModels...),
-				initialized:              true,
+				apiTimeoutMs:                 cfg.KiroApiTimeoutMs,
+				streamIdleTimeoutSeconds:     cfg.StreamIdleTimeoutSeconds,
+				responseHeaderTimeoutSeconds: cfg.ResponseHeaderTimeoutSeconds,
+				extraModels:                  append([]string(nil), cfg.ExtraModels...),
+				initialized:                  true,
 			}
 			extraModelsExplicit = false
 			ensurePasswordLocked()
@@ -696,10 +713,11 @@ func loadLocked() error {
 	}
 	cfg = &c
 	saveBaseline = configSaveBaseline{
-		apiTimeoutMs:             c.KiroApiTimeoutMs,
-		streamIdleTimeoutSeconds: c.StreamIdleTimeoutSeconds,
-		extraModels:              append([]string(nil), c.ExtraModels...),
-		initialized:              true,
+		apiTimeoutMs:                 c.KiroApiTimeoutMs,
+		streamIdleTimeoutSeconds:     c.StreamIdleTimeoutSeconds,
+		responseHeaderTimeoutSeconds: c.ResponseHeaderTimeoutSeconds,
+		extraModels:                  append([]string(nil), c.ExtraModels...),
+		initialized:                  true,
 	}
 	extraModelsExplicit = false
 	var rawFields map[string]json.RawMessage
@@ -716,6 +734,10 @@ func loadLocked() error {
 	}
 	if _, present := rawFields["streamIdleTimeoutSeconds"]; !present {
 		cfg.StreamIdleTimeoutSeconds = defaultStreamIdleTimeoutSecs
+		configMigrated = true
+	}
+	if _, present := rawFields["responseHeaderTimeoutSeconds"]; !present {
+		cfg.ResponseHeaderTimeoutSeconds = defaultResponseHeaderTimeoutSecs
 		configMigrated = true
 	}
 	// Migration: if a legacy single ApiKey is present and the new ApiKeys list is empty,
@@ -896,10 +918,11 @@ func Save() error {
 		return err
 	}
 	saveBaseline = configSaveBaseline{
-		apiTimeoutMs:             cfg.KiroApiTimeoutMs,
-		streamIdleTimeoutSeconds: cfg.StreamIdleTimeoutSeconds,
-		extraModels:              append([]string(nil), cfg.ExtraModels...),
-		initialized:              true,
+		apiTimeoutMs:                 cfg.KiroApiTimeoutMs,
+		streamIdleTimeoutSeconds:     cfg.StreamIdleTimeoutSeconds,
+		responseHeaderTimeoutSeconds: cfg.ResponseHeaderTimeoutSeconds,
+		extraModels:                  append([]string(nil), cfg.ExtraModels...),
+		initialized:                  true,
 	}
 	extraModelsExplicit = false
 	// Rename is atomic on the same filesystem. Sync the directory as well so
@@ -955,6 +978,11 @@ func preserveNewerRuntimeFields(data []byte) ([]byte, error) {
 	if cfg.StreamIdleTimeoutSeconds == saveBaseline.streamIdleTimeoutSeconds {
 		if value, ok := validPersistedInt(diskFields["streamIdleTimeoutSeconds"], true); ok && value != cfg.StreamIdleTimeoutSeconds {
 			outputFields["streamIdleTimeoutSeconds"] = diskFields["streamIdleTimeoutSeconds"]
+		}
+	}
+	if cfg.ResponseHeaderTimeoutSeconds == saveBaseline.responseHeaderTimeoutSeconds {
+		if value, ok := validPersistedInt(diskFields["responseHeaderTimeoutSeconds"], true); ok && value != cfg.ResponseHeaderTimeoutSeconds {
+			outputFields["responseHeaderTimeoutSeconds"] = diskFields["responseHeaderTimeoutSeconds"]
 		}
 	}
 	if !extraModelsExplicit && stringSlicesEqual(cfg.ExtraModels, saveBaseline.extraModels) {
@@ -2036,6 +2064,29 @@ func GetStreamIdleTimeout() time.Duration {
 		return time.Duration(cfg.StreamIdleTimeoutSeconds) * time.Second
 	}
 	return time.Duration(defaultStreamIdleTimeoutSecs) * time.Second
+}
+
+// GetResponseHeaderTimeout returns the max duration the proxy will wait for an
+// upstream's HTTP response headers. Gateways that buffer the entire completion
+// before answering (apikey.click, measured 2026-09-10: headers at 63-66s for a
+// reasoning model) legitimately exceed a TTFB-shaped deadline, so this bound
+// tracks inference latency rather than first-byte latency. Once the headers
+// arrive, GetStreamIdleTimeout governs the body.
+//
+// Priority: RESPONSE_HEADER_TIMEOUT_SECONDS env var > config file > default (300s).
+// Returns 0 to disable the transport deadline (KiroApiTimeout still applies).
+func GetResponseHeaderTimeout() time.Duration {
+	if envVal := os.Getenv("RESPONSE_HEADER_TIMEOUT_SECONDS"); envVal != "" {
+		if sec, err := strconv.Atoi(envVal); err == nil && sec >= 0 {
+			return time.Duration(sec) * time.Second
+		}
+	}
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg != nil {
+		return time.Duration(cfg.ResponseHeaderTimeoutSeconds) * time.Second
+	}
+	return time.Duration(defaultResponseHeaderTimeoutSecs) * time.Second
 }
 
 // UpdateProxySettings updates the outbound proxy config

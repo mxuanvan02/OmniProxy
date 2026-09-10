@@ -180,10 +180,16 @@ func TestBuildKiroTransportUsesExplicitProxyURL(t *testing.T) {
 	assertProxyURL(t, got, "http://proxy.local:8080")
 }
 
-func TestBuildKiroTransportBoundsResponseHeaderWait(t *testing.T) {
+func TestBuildKiroTransportUsesConfiguredResponseHeaderWait(t *testing.T) {
+	want := config.GetResponseHeaderTimeout()
 	transport := buildKiroTransport("")
-	if transport.ResponseHeaderTimeout != initialStreamDataTimeout {
-		t.Fatalf("response header timeout = %s, want %s", transport.ResponseHeaderTimeout, initialStreamDataTimeout)
+	if transport.ResponseHeaderTimeout != want {
+		t.Fatalf("response header timeout = %s, want configured %s", transport.ResponseHeaderTimeout, want)
+	}
+	// A buffering gateway can spend over a minute before answering with
+	// headers; a deadline at the old hardcoded 45s aborted valid requests.
+	if want > 0 && want < 120*time.Second {
+		t.Fatalf("response header timeout = %s, too tight for buffering gateways", want)
 	}
 }
 
