@@ -1,131 +1,31 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AccountsTable } from './components/AccountsTable'
+import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { Login } from './components/Login'
-import { ApiError, api, getToken, logout } from './lib/api'
-import type { Account } from './lib/api'
-import { health } from './lib/format'
+import { Shell, type Section } from './components/Shell'
+import { Overview } from './components/Overview'
+import { AccountsView } from './components/AccountsView'
 
-const POLL_MS = 10_000
+import { QuotaView } from './components/QuotaView'
+import { ApiView } from './components/ApiView'
+import { SettingsView } from './components/SettingsView'
+import { LogsView } from './components/LogsView'
+import { ApiError, api, getToken, logout, type Account, type ChartPoint, type QuotaOverview, type Settings, type Status, type UsageStats } from './lib/api'
 
-export function App() {
-  const [authed, setAuthed] = useState(() => Boolean(getToken()))
-  const [accounts, setAccounts] = useState<Account[]>([])
-  const [error, setError] = useState('')
-  const [loading, setLoading] = useState(false)
-  const [fetchedAt, setFetchedAt] = useState<number | null>(null)
+const VALID_SECTIONS:Section[]=['overview','accounts','usage','quota','api','settings','logs']
+const UsageView = lazy(() => import('./components/UsageView').then(module => ({ default: module.UsageView })))
+function initialSection():Section{const v=location.hash.replace('#','') as Section;return VALID_SECTIONS.includes(v)?v:'overview'}
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    try {
-      const rows = await api.accounts()
-      setAccounts(Array.isArray(rows) ? rows : [])
-      setFetchedAt(Date.now())
-      setError('')
-    } catch (err) {
-      // A 401 means the session died; drop to the login shell instead of
-      // showing a stale pool as if it were live.
-      if (err instanceof ApiError && err.status === 401) {
-        setAuthed(false)
-        setAccounts([])
-      }
-      setError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setLoading(false)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!authed) return
-    void load()
-    const timer = window.setInterval(() => {
-      // Skip polling while the tab is hidden: a background dashboard that keeps
-      // re-fetching a ~76 KiB payload is the classic long-run leak.
-      if (!document.hidden) void load()
-    }, POLL_MS)
-    return () => window.clearInterval(timer)
-  }, [authed, load])
-
-  const summary = useMemo(() => {
-    const counts = { active: 0, idle: 0, disabled: 0, banned: 0 }
-    for (const a of accounts) counts[health(a)] += 1
-    return counts
-  }, [accounts])
-
-  if (!authed) {
-    return <Login onDone={() => setAuthed(true)} />
-  }
-
-  return (
-    // h-dvh + flex column is what makes the table's sticky header work: the
-    // scroll has to happen inside the table container, not on the window. With
-    // a page-level scroll the header scrolls away no matter what CSS it carries.
-    <div className="flex h-dvh flex-col overflow-hidden bg-neutral-50 text-neutral-900">
-      <header className="flex flex-wrap items-center gap-x-6 gap-y-2 border-b border-neutral-200 bg-white px-6 py-4">
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight">OmniProxy · Accounts</h1>
-          <p className="font-mono text-xs text-neutral-500">
-            {accounts.length} tài khoản
-            {fetchedAt ? ` · cập nhật ${new Date(fetchedAt).toLocaleTimeString('vi-VN')}` : ''}
-          </p>
-        </div>
-
-        {/* Labels match the table's filter chips word for word. Two names for
-            one state ("chờ" here, "Chưa dùng" there) reads as two metrics. */}
-        <dl className="flex gap-4 font-mono text-xs">
-          <Stat label="đang chạy" value={summary.active} tone="text-emerald-700" />
-          <Stat label="chưa dùng" value={summary.idle} tone="text-sky-700" />
-          <Stat label="đã tắt" value={summary.disabled} tone="text-neutral-500" />
-          {/* Alarm colour only when there is something to alarm about: a red
-              zero draws the eye every render and teaches the operator to ignore
-              red. */}
-          <Stat
-            label="bị khoá"
-            value={summary.banned}
-            tone={summary.banned > 0 ? 'text-red-700' : 'text-neutral-500'}
-          />
-        </dl>
-
-        <div className="ml-auto flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void load()}
-            disabled={loading}
-            className="rounded-md border border-neutral-300 px-3 py-1.5 text-sm hover:bg-neutral-100 disabled:opacity-50"
-          >
-            {loading ? 'Đang tải…' : 'Tải lại'}
-          </button>
-          <button
-            type="button"
-            onClick={async () => {
-              await logout()
-              setAuthed(false)
-              setAccounts([])
-            }}
-            className="rounded-md px-3 py-1.5 text-sm text-neutral-600 hover:bg-neutral-100"
-          >
-            Đăng xuất
-          </button>
-        </div>
-      </header>
-
-      {error ? (
-        <p role="alert" className="border-b border-red-200 bg-red-50 px-6 py-2 text-sm text-red-800">
-          {error}
-        </p>
-      ) : null}
-
-      <main className="flex min-h-0 flex-1 flex-col p-6">
-        <AccountsTable accounts={accounts} />
-      </main>
-    </div>
-  )
-}
-
-function Stat({ label, value, tone }: { label: string; value: number; tone: string }) {
-  return (
-    <div className="flex items-baseline gap-1.5">
-      <dd className={`text-base font-semibold ${tone}`}>{value}</dd>
-      <dt className="text-neutral-500">{label}</dt>
-    </div>
-  )
+export function App(){
+ const [authed,setAuthed]=useState(()=>Boolean(getToken()));const [section,setSectionState]=useState<Section>(initialSection)
+ const [accounts,setAccounts]=useState<Account[]>([]);const [status,setStatus]=useState<Status|null>(null);const [usage,setUsage]=useState<UsageStats|null>(null);const [chart,setChart]=useState<ChartPoint[]>([]);const [quota,setQuota]=useState<QuotaOverview|null>(null);const [settings,setSettings]=useState<Settings|null>(null);const [cliStatus,setCliStatus]=useState<Record<string,unknown>|null>(null)
+ const [busy,setBusy]=useState(false);const [error,setError]=useState('');const [updatedAt,setUpdatedAt]=useState<number|null>(null);const [usagePeriod,setUsagePeriod]=useState('24h')
+ const onAuthError=useCallback((err:unknown)=>{if(err instanceof ApiError&&err.status===401){setAuthed(false);setAccounts([])}setError(err instanceof Error?err.message:String(err))},[])
+ const setSection=(s:Section)=>{setSectionState(s);history.replaceState(null,'',`#${s}`)}
+ const loadCore=useCallback(async()=>{const [a,s]=await Promise.all([api.accounts(),api.status()]);setAccounts(Array.isArray(a)?a:[]);setStatus(s)},[])
+ const load=useCallback(async()=>{if(!authed)return;setBusy(true);try{await loadCore();if(section==='overview')setUsage(await api.usage('24h'));if(section==='usage'){const [nextUsage,nextChart]=await Promise.all([api.usage(usagePeriod),api.usageChart(usagePeriod)]);setUsage(nextUsage);setChart(nextChart)}if(section==='quota')setQuota(await api.quota());if(section==='api'){const [cfg,cli]=await Promise.all([api.settings(),api.cliStatus()]);setSettings(cfg);setCliStatus(cli)}if(section==='settings')setSettings(await api.settings());setUpdatedAt(Date.now());setError('')}catch(err){onAuthError(err)}finally{setBusy(false)}},[authed,section,usagePeriod,loadCore,onAuthError])
+ useEffect(()=>{const id=window.setTimeout(()=>void load(),0);return()=>window.clearTimeout(id)},[load])
+ useEffect(()=>{if(!authed||!['accounts','overview'].includes(section))return;const id=window.setInterval(()=>{if(!document.hidden)void load()},15000);return()=>clearInterval(id)},[authed,section,load])
+ if(!authed)return <Login onDone={()=>setAuthed(true)}/>
+ const settingsKey=`${settings?.requireApiKey??'loading'}:${settings?.allowOverUsage??'loading'}:${settings?.apiKey?'configured':'empty'}`
+ const content=section==='overview'?<Overview status={status} usage={usage} accounts={accounts} onNavigate={setSection}/>:section==='accounts'?<AccountsView accounts={accounts} onReload={load}/>:section==='usage'?<Suspense fallback={<div className="grid min-h-96 place-items-center text-sm text-slate-500">Đang tải biểu đồ…</div>}><UsageView usage={usage} chart={chart} period={usagePeriod} onPeriod={setUsagePeriod}/></Suspense>:section==='quota'?<QuotaView data={quota} onReload={load}/>:section==='api'?<ApiView settings={settings} cliStatus={cliStatus} models={status?.modelIds||[]}/>:section==='settings'?<SettingsView key={settingsKey} settings={settings} onReload={load}/>:<LogsView/>
+ return <Shell section={section} onSection={setSection} onRefresh={()=>void load()} onLogout={()=>void logout().then(()=>setAuthed(false))} busy={busy} updatedAt={updatedAt}>{error?<div role="alert" className="mx-auto mb-4 max-w-7xl rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{error}</div>:null}{busy&&!updatedAt?<div className="grid min-h-96 place-items-center text-sm text-slate-500">Đang tải dữ liệu vận hành…</div>:content}</Shell>
 }

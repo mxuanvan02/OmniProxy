@@ -17,7 +17,8 @@ export default defineConfig({
   server: {
     port: 5183,
     proxy: {
-      // Dev server talks to the live local OmniProxy admin API.
+      // Dev server talks to the local OmniProxy admin API. Authentication is
+      // supplied by the browser exactly as it is in the embedded production UI.
       '/admin/api': {
         target: 'http://127.0.0.1:8080',
         changeOrigin: true,
