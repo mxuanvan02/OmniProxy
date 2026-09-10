@@ -38,6 +38,7 @@ const externalAuthMethod = "external_openai"
 // caller, not the account, so they are constants rather than config.
 const (
 	externalOpenAIUserAgent           = "OpenAI/Python 1.109.1"
+	externalCurlUserAgent             = "curl/8.7.1"
 	externalOpenAIStainlessLang       = "python"
 	externalOpenAIStainlessPackageVer = "1.109.1"
 	externalOpenAIStainlessRuntime    = "CPython"
@@ -70,9 +71,7 @@ func setExternalOpenAIHeaders(req *http.Request, account *config.Account, apiKey
 	req.Header.Set("Accept", accept)
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	if account != nil && strings.EqualFold(strings.TrimSpace(account.ExternalHeaderProfile), "curl") {
-		// This is deliberately per-account: other resale gateways require the
-		// OpenAI SDK fingerprint below to pass their bot-protection checks.
-		req.Header.Set("User-Agent", "curl/8.7.1")
+		applyExternalCurlIdentity(req)
 		return
 	}
 	req.Header.Set("User-Agent", externalOpenAIUserAgent)
@@ -83,6 +82,162 @@ func setExternalOpenAIHeaders(req *http.Request, account *config.Account, apiKey
 	req.Header.Set("x-stainless-os", externalOpenAIStainlessOS)
 	req.Header.Set("x-stainless-arch", externalOpenAIStainlessArch)
 	req.Header.Set("x-stainless-retry-count", "0")
+}
+
+func applyExternalCurlIdentity(req *http.Request) {
+	req.Header.Set("User-Agent", externalCurlUserAgent)
+	for _, name := range []string{
+		"x-stainless-lang", "x-stainless-package-version", "x-stainless-runtime",
+		"x-stainless-runtime-version", "x-stainless-os", "x-stainless-arch",
+		"x-stainless-retry-count",
+	} {
+		req.Header.Del(name)
+	}
+}
+
+// externalWAFBlocked distinguishes edge/bot-protection rejections from genuine
+// credential 403s. Only the former are safe to replay with another HTTP identity.
+func externalWAFBlocked(resp *http.Response, body []byte) bool {
+	if resp == nil || resp.StatusCode != http.StatusForbidden {
+		return false
+	}
+	text := strings.ToLower(string(body))
+	for _, marker := range []string{
+		"request was blocked", "error code: 1010", "cloudflare",
+		"attention required", "cf-chl-", "challenge-platform",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// Resale gateways that broker a pool of upstream OAuth sessions (apikey.click,
+// measured 2026-09-10) intermittently answer a valid API key with HTTP 401
+// "Encountered invalidated oauth token" / "Could not parse your authentication
+// token", code auth_unavailable. The same key succeeds on the next attempt, so
+// the failure describes one broken upstream session, not the caller's
+// credential. Such responses are replayed a bounded number of times; a 401 that
+// names the API key itself is permanent and fails immediately.
+const (
+	externalTransientAuthMaxAttempts = 3
+	externalTransientAuthBackoff     = 200 * time.Millisecond
+)
+
+// externalTransientAuthFailure reports whether a 401 describes a temporarily
+// unavailable upstream session rather than a bad API key. Credential markers are
+// checked first so a wrong key is never retried.
+func externalTransientAuthFailure(resp *http.Response, body []byte) bool {
+	if resp == nil || resp.StatusCode != http.StatusUnauthorized {
+		return false
+	}
+	text := strings.ToLower(string(body))
+	for _, marker := range []string{
+		"invalid_api_key", "invalid api key", "incorrect api key",
+		"no such api key", "api key not valid", "missing api key",
+	} {
+		if strings.Contains(text, marker) {
+			return false
+		}
+	}
+	for _, marker := range []string{
+		"auth_unavailable", "invalidated oauth token",
+		"could not parse your authentication token", "temporarily",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// cloneExternalRequest rebuilds req so it can be sent again, optionally swapping
+// in the curl-shaped identity. It fails when the body cannot be rewound.
+func cloneExternalRequest(req *http.Request, curlIdentity bool) (*http.Request, error) {
+	clone := req.Clone(req.Context())
+	if req.GetBody != nil {
+		body, err := req.GetBody()
+		if err != nil {
+			return nil, err
+		}
+		clone.Body = body
+	} else if req.Body != nil && req.Body != http.NoBody {
+		return nil, fmt.Errorf("external retry cannot replay request body")
+	}
+	clone.Header = req.Header.Clone()
+	if curlIdentity {
+		applyExternalCurlIdentity(clone)
+	}
+	return clone, nil
+}
+
+// doExternalOpenAIRequest performs the request with its configured identity and
+// retries only failures that are provably not the caller's fault, always before
+// any model output exists: a recognisable WAF 403 is replayed once with
+// curl-shaped headers, and a transient upstream 401 is replayed up to
+// externalTransientAuthMaxAttempts times with a short backoff. Explicit header
+// profiles are authoritative and are never auto-switched; permanent credential
+// failures are returned unchanged.
+func doExternalOpenAIRequest(client *http.Client, req *http.Request, account *config.Account) (*http.Response, error) {
+	explicitProfile := account != nil && strings.TrimSpace(account.ExternalHeaderProfile) != ""
+	current := req
+	curlIdentity := false
+	wafReplayed := false
+	authRetries := 0
+
+	for {
+		resp, err := client.Do(current)
+		if err != nil || resp == nil {
+			return resp, err
+		}
+		status := resp.StatusCode
+		if status != http.StatusForbidden && status != http.StatusUnauthorized {
+			return resp, nil
+		}
+
+		body, readErr := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if readErr != nil {
+			return nil, readErr
+		}
+		keep := func() (*http.Response, error) {
+			resp.Body = io.NopCloser(bytes.NewReader(body))
+			return resp, nil
+		}
+
+		switch {
+		case status == http.StatusForbidden && !explicitProfile && !wafReplayed && externalWAFBlocked(resp, body):
+			wafReplayed = true
+			curlIdentity = true
+		case status == http.StatusUnauthorized &&
+			authRetries+1 < externalTransientAuthMaxAttempts &&
+			externalTransientAuthFailure(resp, body):
+			authRetries++
+			logger.Warnf("external account %s: transient upstream auth failure, retry %d/%d",
+				accountLabel(account), authRetries, externalTransientAuthMaxAttempts-1)
+			time.Sleep(externalTransientAuthBackoff * time.Duration(authRetries))
+		default:
+			return keep()
+		}
+
+		next, cloneErr := cloneExternalRequest(req, curlIdentity)
+		if cloneErr != nil {
+			return keep()
+		}
+		current = next
+	}
+}
+
+// accountLabel is a log-safe account identifier that never exposes credentials.
+func accountLabel(account *config.Account) string {
+	if account == nil {
+		return "unknown"
+	}
+	if e := strings.TrimSpace(account.Email); e != "" {
+		return e
+	}
+	return account.ID
 }
 
 // ErrExternalCreditsNotSupported is returned by fetchExternalProviderCredits
@@ -143,7 +298,7 @@ func CallExternalOpenAI(ctx context.Context, account *config.Account, payload *K
 	setExternalOpenAIHeaders(req, account, apiKey, "text/event-stream")
 
 	client := GetClientForProxy(ResolveAccountProxyURL(account))
-	resp, err := client.Do(req)
+	resp, err := doExternalOpenAIRequest(client, req, account)
 	if err != nil {
 		return fmt.Errorf("external call %s: %w", account.Email, err)
 	}
@@ -1297,7 +1452,7 @@ func fetchExternalProviderModels(account *config.Account) ([]ModelInfo, error) {
 	setExternalOpenAIHeaders(req, account, apiKey, "application/json")
 
 	client := GetRestClientForProxy(ResolveAccountProxyURL(account))
-	resp, err := client.Do(req)
+	resp, err := doExternalOpenAIRequest(client, req, account)
 	if err != nil {
 		return nil, err
 	}
@@ -1759,7 +1914,7 @@ func getProviderJSON(account *config.Account, url string, out interface{}) error
 	}
 	setExternalOpenAIHeaders(req, account, strings.TrimSpace(account.AccessToken), "application/json")
 
-	resp, err := GetRestClientForProxy(ResolveAccountProxyURL(account)).Do(req)
+	resp, err := doExternalOpenAIRequest(GetRestClientForProxy(ResolveAccountProxyURL(account)), req, account)
 	if err != nil {
 		return err
 	}
