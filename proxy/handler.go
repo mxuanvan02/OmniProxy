@@ -14,6 +14,7 @@ import (
 	"omniproxy/config"
 	"omniproxy/logger"
 	"omniproxy/pool"
+	"omniproxy/webnext"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1574,6 +1575,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleAdminAPI(w, r)
 	case strings.HasPrefix(path, "/admin/"):
 		h.serveStaticFile(w, r)
+
+	// Next-generation admin client, served beside the legacy UI so both can be
+	// compared against the same live pool. It shares /admin/api, so there is no
+	// second auth surface.
+	case path == "/admin-next" || path == webnext.Prefix:
+		h.serveAdminNextPage(w, r)
+	case strings.HasPrefix(path, webnext.Prefix):
+		h.serveAdminNextAsset(w, r)
 
 	// health check
 	case path == "/health" || path == "/":
@@ -11881,6 +11890,57 @@ func (h *Handler) serveAdminPage(w http.ResponseWriter, r *http.Request) {
 	setNoCacheHeaders(w)
 	setAdminSecurityHeaders(w)
 	http.ServeFile(w, r, filepath.Join(h.webDir, "index.html"))
+}
+
+// serveAdminNextPage serves the embedded React client's entry document. The
+// client is a single-page app, so every non-asset path under the prefix has to
+// resolve to index.html rather than 404.
+func (h *Handler) serveAdminNextPage(w http.ResponseWriter, r *http.Request) {
+	index, err := webnext.Index()
+	if err != nil {
+		// A checkout whose frontend was never built must say so instead of
+		// serving a blank page that looks like a broken dashboard.
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte("admin-next build missing: run npm run build in web-next/\n"))
+		return
+	}
+	setNoCacheHeaders(w)
+	setAdminNextSecurityHeaders(w)
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write(index)
+}
+
+// serveAdminNextAsset serves hashed build assets from the embedded tree, and
+// falls back to the entry document so a deep link survives a page reload.
+func (h *Handler) serveAdminNextAsset(w http.ResponseWriter, r *http.Request) {
+	name := strings.TrimPrefix(r.URL.Path, webnext.Prefix)
+	if name != "" && !strings.Contains(name, ".") {
+		h.serveAdminNextPage(w, r)
+		return
+	}
+	setNoCacheHeaders(w)
+	setAdminNextSecurityHeaders(w)
+	webnext.FileServer().ServeHTTP(w, r)
+}
+
+// setAdminNextSecurityHeaders is stricter than the legacy dashboard's policy:
+// the React client carries no inline handlers, so script-src does not need
+// 'unsafe-inline'. style-src keeps it because the bundler injects a <style> tag.
+func setAdminNextSecurityHeaders(w http.ResponseWriter) {
+	w.Header().Set("Content-Security-Policy",
+		"default-src 'self'; "+
+			"script-src 'self'; "+
+			"style-src 'self' 'unsafe-inline'; "+
+			"img-src 'self' data:; "+
+			"connect-src 'self'; "+
+			"frame-ancestors 'none'; "+
+			"base-uri 'none'; "+
+			"form-action 'none'; "+
+			"object-src 'none'")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Frame-Options", "DENY")
 }
 
 // serveStaticFile serves web assets under webDir. http.Dir refuses any path
