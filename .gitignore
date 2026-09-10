@@ -27,6 +27,8 @@ omniproxy-linux-*
 
 # Personal ops scripts (not published to public repo)
 scripts/sync-*.sh
+# Host-specific launchd restart helper (hardcodes this machine's label/paths)
+restart.sh
 
 # Local rollback snapshots (contain data/config.json with live credentials)
 .rollback/
