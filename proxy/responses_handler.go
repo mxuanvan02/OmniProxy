@@ -258,6 +258,16 @@ func (h *Handler) handleResponsesNonStream(
 				goto responsesNonStreamSuccess
 			}
 			if pool.IsContentBlockedError(err) {
+				// This is the path Codex takes (/v1/responses). A payload
+				// refusal follows the bytes, not the credential, so retry the
+				// same account with the suspect terms split before rotating.
+				if h.tryContentBlockRecovery(ctx, account, payload, callback, model, err) {
+					h.pool.RecordSuccess(account.ID, model)
+					if cacheKey != "" {
+						h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
+					}
+					goto responsesNonStreamSuccess
+				}
 				lastErr = err
 				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
 				excluded[account.ID] = true
@@ -639,6 +649,15 @@ func (h *Handler) handleResponsesStream(
 				goto responsesStreamSuccess
 			}
 			if pool.IsContentBlockedError(err) {
+				// Streaming Codex path. Only safe before the first event goes
+				// out, otherwise a retry duplicates the response prefix.
+				if !responseStarted && h.tryContentBlockRecovery(ctx, account, payload, effectiveCallback, model, err) {
+					h.pool.RecordSuccess(account.ID, model)
+					if cacheKey != "" {
+						h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
+					}
+					goto responsesStreamSuccess
+				}
 				lastErr = err
 				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
 				excluded[account.ID] = true

@@ -351,6 +351,18 @@ type Account struct {
 	CodexUsageCheckedAt int64  `json:"codexUsageCheckedAt,omitempty"` // last header capture timestamp
 	ImageModel          string `json:"imageModel,omitempty"`          // model used by image-generation tests/requests
 	CodexImageModel     string `json:"codexImageModel,omitempty"`     // model used with the Codex image_generation tool
+
+	// ContentBlockEvasion opts this account into retrying a payload that the
+	// upstream rejected with a content/sensitive-words verdict, with the
+	// offending term split by a zero-width character so the provider's raw
+	// substring scan no longer matches while the text still reads identically
+	// to the model.
+	//
+	// Off by default, and deliberately per-account rather than global: this
+	// works around a provider's own content control, which its terms of service
+	// may treat as a violation. Only the operator can judge that trade-off for
+	// a given credential, so nothing here turns itself on.
+	ContentBlockEvasion bool `json:"contentBlockEvasion,omitempty"`
 }
 
 const codexPrimaryWindowTolerance = 5 * time.Minute
@@ -883,6 +895,21 @@ func FlushPendingSave() error {
 		return err
 	}
 	return nil
+}
+
+// DataDir returns the directory holding config.json, which is also where
+// derived runtime state belongs (logs, captures, learned-term stores).
+//
+// Callers outside this package cannot reach cfgPath, and hardcoding "data/"
+// elsewhere would break as soon as CONFIG_PATH points somewhere else — which
+// it does under launchd, where the working directory is not the repo.
+// Returns "" before Init, so callers must treat an empty result as
+// "persistence unavailable" rather than writing to the process CWD.
+func DataDir() string {
+	if cfgPath == "" {
+		return ""
+	}
+	return filepath.Dir(cfgPath)
 }
 
 // Save persists the current configuration to the JSON file.

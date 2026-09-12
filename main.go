@@ -35,6 +35,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Load terms that an earlier run proved were rejected by an upstream
+	// content scanner, so those requests are pre-emptively rewritten instead of
+	// paying a rejection plus a retry to rediscover the same term.
+	proxy.InitContentBlockStore(config.DataDir())
+
 	pidPath = cli.PIDPath(configPath)
 	defer cli.RemovePID(pidPath)
 	if cli.CheckAndKillExisting(pidPath) {

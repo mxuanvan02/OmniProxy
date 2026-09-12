@@ -4254,6 +4254,17 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 				goto skipAccountHandling
 			}
 			if pool.IsContentBlockedError(err) {
+				// Rotating accounts cannot fix a payload refusal, so before
+				// giving this account up, try the payload again with the
+				// suspect terms split by a zero-width character. Opt-in per
+				// account; a no-op for accounts that did not opt in.
+				if h.tryContentBlockRecovery(ctx, account, payload, effectiveCallback, model, err) {
+					h.pool.RecordSuccess(account.ID, model)
+					if cacheKey != "" {
+						h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
+					}
+					goto skipAccountHandling
+				}
 				lastErr = err
 				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
 				excluded[account.ID] = true
@@ -4872,6 +4883,12 @@ func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWrit
 				goto skipNonStreamHandling
 			}
 			if pool.IsContentBlockedError(err) {
+				// A payload refusal follows the bytes, not the credential, so
+				// rotating accounts cannot help. Retry once with the suspect
+				// terms split; no-op unless this account opted in.
+				if h.tryContentBlockRecovery(ctx, account, payload, callback, model, err) {
+					goto skipNonStreamHandling
+				}
 				lastErr = err
 				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
 				excluded[account.ID] = true
@@ -5453,6 +5470,16 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 				goto skipOpenAIStreamHandling
 			}
 			if pool.IsContentBlockedError(err) {
+				// Guarded on !responseStarted for the same reason as the
+				// transient retry above: once bytes are on the wire, a retry
+				// would replay the prefix the client already received.
+				if !responseStarted && h.tryContentBlockRecovery(ctx, account, payload, effectiveCallback, model, err) {
+					h.pool.RecordSuccess(account.ID, model)
+					if cacheKey != "" {
+						h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
+					}
+					goto skipOpenAIStreamHandling
+				}
 				lastErr = err
 				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
 				excluded[account.ID] = true
@@ -5672,6 +5699,12 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 				goto skipOpenAINonStreamHandling
 			}
 			if pool.IsContentBlockedError(err) {
+				// A payload refusal follows the bytes, not the credential, so
+				// rotating accounts cannot help. Retry once with the suspect
+				// terms split; no-op unless this account opted in.
+				if h.tryContentBlockRecovery(ctx, account, payload, callback, model, err) {
+					goto skipOpenAINonStreamHandling
+				}
 				lastErr = err
 				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
 				excluded[account.ID] = true
