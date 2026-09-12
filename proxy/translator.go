@@ -1267,6 +1267,18 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 		}
 	}
 
+	// Sanitize before the thinking prompt is prepended, so operator regex rules
+	// only ever see the client's own text and cannot corrupt ThinkingModePrompt.
+	//
+	// This call used to exist only in buildClaudeSystemPrompt, i.e. only on the
+	// Claude protocol path. Every OpenAI-protocol client — /v1/chat/completions
+	// and the /v1/responses route Codex speaks — arrives here instead, so prompt
+	// filters silently did nothing for them. Operators had no lever at all to
+	// strip text that an upstream keyword scanner rejects (AgentRouter answers a
+	// match with HTTP 500 sensitive_words_detected), which is why the same work
+	// succeeded from a small-payload CLI and failed from Codex and the gateway.
+	systemPrompt = applyPromptFilters(systemPrompt)
+
 	// if thinking mode enabled, inject thinking prompt
 	if thinking {
 		systemPrompt = ThinkingModePrompt + "\n\n" + systemPrompt

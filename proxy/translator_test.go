@@ -1,9 +1,95 @@
 package proxy
 
 import (
+	"omniproxy/config"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+// Prompt filters used to run only on the Claude protocol path, so an operator
+// rule aimed at text an upstream keyword scanner rejects had no effect for any
+// OpenAI-protocol client — including the /v1/responses route Codex speaks.
+func TestOpenAIToKiroAppliesPromptFilters(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	rules := []config.PromptFilterRule{{
+		ID:      "strip-trigger",
+		Name:    "strip scanner trigger",
+		Type:    "lines-containing",
+		Match:   "TRIGGER-PHRASE",
+		Enabled: true,
+	}}
+	if err := config.UpdatePromptFilterConfig(false, false, false, rules); err != nil {
+		t.Fatalf("UpdatePromptFilterConfig: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = config.UpdatePromptFilterConfig(false, false, false, []config.PromptFilterRule{})
+	})
+
+	req := &OpenAIRequest{
+		Model: "claude-opus-5",
+		Messages: []OpenAIMessage{
+			{Role: "system", Content: "keep this line\nTRIGGER-PHRASE must be removed\nkeep this too"},
+			{Role: "user", Content: "hello"},
+		},
+	}
+
+	payload := OpenAIToKiro(req, false)
+	if len(payload.ConversationState.History) == 0 {
+		t.Fatal("expected priming history carrying the system prompt")
+	}
+	primed := payload.ConversationState.History[0].UserInputMessage
+	if primed == nil {
+		t.Fatal("expected first history entry to be the system priming message")
+	}
+	if strings.Contains(primed.Content, "TRIGGER-PHRASE") {
+		t.Errorf("filter rule was not applied on the OpenAI path: %q", primed.Content)
+	}
+	if !strings.Contains(primed.Content, "keep this line") ||
+		!strings.Contains(primed.Content, "keep this too") {
+		t.Errorf("filter removed more than the matching line: %q", primed.Content)
+	}
+}
+
+// Filters must run before ThinkingModePrompt is prepended, so an operator regex
+// can never corrupt the injected instruction.
+func TestOpenAIToKiroFiltersDoNotTouchThinkingPrompt(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	rules := []config.PromptFilterRule{{
+		ID:      "greedy",
+		Name:    "greedy line filter",
+		Type:    "lines-containing",
+		Match:   "thinking",
+		Enabled: true,
+	}}
+	if err := config.UpdatePromptFilterConfig(false, false, false, rules); err != nil {
+		t.Fatalf("UpdatePromptFilterConfig: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = config.UpdatePromptFilterConfig(false, false, false, []config.PromptFilterRule{})
+	})
+
+	req := &OpenAIRequest{
+		Model: "claude-opus-5",
+		Messages: []OpenAIMessage{
+			{Role: "system", Content: "plain system text"},
+			{Role: "user", Content: "hello"},
+		},
+	}
+
+	payload := OpenAIToKiro(req, true)
+	primed := payload.ConversationState.History[0].UserInputMessage
+	if primed == nil {
+		t.Fatal("expected system priming message")
+	}
+	if !strings.HasPrefix(primed.Content, ThinkingModePrompt) {
+		t.Errorf("thinking prompt must survive filtering intact, got %q", primed.Content)
+	}
+}
 
 func TestExtractOpenAIMessageTextStructured(t *testing.T) {
 	content := []interface{}{
