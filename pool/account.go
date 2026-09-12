@@ -1301,6 +1301,17 @@ func isTransientHTTP2StreamReset(lower string) bool {
 // the request payload or model (e.g. AgentRouter HTTP 400 "content-blocked").
 // This is a payload-level refusal, not an account fault. Callers must NOT
 // rotate accounts — the same payload will fail identically on every account.
+//
+// The sensitive-words markers matter as much as the content-blocked ones.
+// new-api / one-api style gateways (AgentRouter among them) run a keyword
+// scanner over the request and reject a match with
+// {"code":"sensitive_words_detected","type":"new_api_error"} under HTTP 500 —
+// not the 400 the marker list was originally written for. A 500 is also not one
+// of the 502/503/504 tokens IsTransientError recognises, so before these
+// markers existed the error matched no classifier at all and landed in
+// handleAccountFailure's default branch: every healthy account in the pool
+// collected a cooldown strike for a payload it was never at fault for, and the
+// failover loop replayed the same rejected payload across the whole pool.
 func IsContentBlockedError(err error) bool {
 	if err == nil {
 		return false
@@ -1308,7 +1319,13 @@ func IsContentBlockedError(err error) bool {
 	lower := strings.ToLower(err.Error())
 	return strings.Contains(lower, "content-blocked") ||
 		strings.Contains(lower, "content_blocker") ||
-		strings.Contains(lower, "content blocked")
+		strings.Contains(lower, "content blocked") ||
+		// "sensitive_word" / "sensitive word" are prefixes of the plural and
+		// of "..._detected", so both spellings and both numbers are covered.
+		strings.Contains(lower, "sensitive_word") ||
+		strings.Contains(lower, "sensitive word") ||
+		// Gemini/Antigravity spelling of the same refusal.
+		strings.Contains(lower, "prohibited_content")
 }
 
 // DisableAccount marks an account as disabled (auth revoked / unrecoverable),

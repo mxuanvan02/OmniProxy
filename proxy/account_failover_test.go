@@ -58,3 +58,60 @@ func TestRateLimit403IsNotAuthenticationFailure(t *testing.T) {
 		t.Fatalf("rate-limit response must not trigger token refresh: %s", msg)
 	}
 }
+
+// AgentRouter's keyword scanner rejects a payload with HTTP 500 and
+// code "sensitive_words_detected". That status is neither one of the
+// 502/503/504 transient tokens nor an auth/quota shape, so before this was
+// classified the error reached handleAccountFailure's default branch and
+// charged a cooldown to an account that was working correctly — then the
+// failover loop replayed the identical payload across the rest of the pool.
+func TestSensitiveWordsRejectionIsContentBlockedNotAccountFault(t *testing.T) {
+	msg := `AgentRouter (Backup Domain) HTTP 500 from AgentRouter (AgentRouter-Opus5): ` +
+		`{"error":{"message":"sensitive words detected (request id: 20260912101558810317806g8n5vTAILW1QK)",` +
+		`"type":"new_api_error","param":"","code":"sensitive_words_detected"}}`
+
+	if !isContentBlockedErrorMessage(msg) {
+		t.Fatalf("sensitive-words rejection must be classified content-blocked: %s", msg)
+	}
+	// Guard the misclassifications that made this bug expensive.
+	if isAuthErrorMessage(msg) {
+		t.Fatal("payload refusal must not be treated as an auth failure")
+	}
+	if isQuotaErrorMessage(msg) {
+		t.Fatal("payload refusal must not be treated as quota exhaustion")
+	}
+	if isNetworkError(msg) {
+		t.Fatal("payload refusal must not be treated as a transport error")
+	}
+}
+
+// The proxy-side classifier delegates to pool.IsContentBlockedError so the two
+// cannot drift again. Both spellings and both grammatical numbers must match.
+func TestContentBlockedClassifierMatchesPoolMarkers(t *testing.T) {
+	blocked := []string{
+		"upstream 400: content-blocked",
+		"CONTENT_BLOCKER triggered",
+		"request rejected: content blocked by policy",
+		`{"code":"sensitive_words_detected"}`,
+		"sensitive word detected",
+		"finishReason: PROHIBITED_CONTENT",
+	}
+	for _, msg := range blocked {
+		if !isContentBlockedErrorMessage(msg) {
+			t.Errorf("isContentBlockedErrorMessage(%q) = false, want true", msg)
+		}
+	}
+
+	notBlocked := []string{
+		"HTTP 401 unauthorized",
+		"HTTP 429 too many requests",
+		"context deadline exceeded",
+		"blocked account",
+		"",
+	}
+	for _, msg := range notBlocked {
+		if isContentBlockedErrorMessage(msg) {
+			t.Errorf("isContentBlockedErrorMessage(%q) = true, want false", msg)
+		}
+	}
+}

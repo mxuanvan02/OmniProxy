@@ -296,17 +296,37 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error, model
 		// exhaust the pool unnecessarily.
 		logger.Debugf("[AccountFailover] Network error for %s: %v — rotating without cooldown", account.Email, err)
 	default:
+		// An unclassified failure is the shape that most needs a log line, and
+		// was the only one without one. Every branch above names what it thinks
+		// went wrong; this one silently charged a cooldown and moved on.
+		//
+		// The sensitive-words rejection lived here for its entire life and left
+		// no trace: the log held 2777 greppable "content-blocked" events while
+		// the rejections actually exhausting the pool were invisible, so the
+		// classifier gap had to be found by reading the code rather than the
+		// log. Anything that reaches this branch is by definition something the
+		// classifiers do not understand yet — say so out loud.
+		logger.Warnf("[AccountFailover] %s: unclassified failure for model %s — recording cooldown (err: %s)",
+			account.Email, model, truncateForLog(errMsg))
 		h.pool.RecordError(account.ID, false, model)
 	}
 }
 
-// isContentBlockedErrorMessage reports whether err indicates a payload/model
+// isContentBlockedErrorMessage reports whether msg indicates a payload/model
 // refusal from upstream (AgentRouter returns HTTP 400 with
-// {"error":{"code":"content-blocked","message":"content-blocked (...)",...}}).
+// {"error":{"code":"content-blocked",...}} and HTTP 500 with
+// {"error":{"code":"sensitive_words_detected",...}}).
 // These are not account faults; do not cooldown or disable.
+//
+// The marker list deliberately lives in exactly one place. This used to be a
+// second hand-maintained copy of pool.IsContentBlockedError's markers, and the
+// two drifted: the pool learned about sensitive-words rejections while this
+// branch did not, so handleAccountFailure fell through to its default branch and
+// recorded a cooldown against a healthy account for a request the pool had
+// already correctly classified as a payload refusal.
 func isContentBlockedErrorMessage(msg string) bool {
-	lower := strings.ToLower(msg)
-	return strings.Contains(lower, "content-blocked") ||
-		strings.Contains(lower, "content_blocker") ||
-		strings.Contains(lower, "content blocked")
+	if strings.TrimSpace(msg) == "" {
+		return false
+	}
+	return pool.IsContentBlockedError(errors.New(msg))
 }
