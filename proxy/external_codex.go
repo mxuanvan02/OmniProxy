@@ -1502,6 +1502,8 @@ func codexSubscriptionModels() []ModelInfo {
 		id, name, desc string
 		lim
 	}{
+		// ── GPT-6 family (current flagship) ──
+		{"gpt-6-astra", "GPT-6 Astra", "Flagship GPT-6 model for complex coding and reasoning", lim{272000, 128000}},
 		// ── GPT-5.6 family (current flagship) ──
 		{"gpt-5.6", "GPT-5.6", "GPT-5.6 alias (routes to Sol)", lim{272000, 128000}},
 		{"gpt-5.6-sol", "GPT-5.6 Sol", "Flagship GPT-5.6 — hardest coding & reasoning", lim{272000, 128000}},

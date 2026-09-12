@@ -19,6 +19,7 @@ func TestCodexSubscriptionModels(t *testing.T) {
 		t.Fatal("codexSubscriptionModels returned empty list")
 	}
 	want := map[string]bool{
+		"gpt-6-astra":       true,
 		"gpt-5.6":           true,
 		"gpt-5.6-sol":       true,
 		"gpt-5.6-terra":     true,
@@ -44,6 +45,22 @@ func TestCodexSubscriptionModels(t *testing.T) {
 			t.Errorf("codexSubscriptionModels missing %q", id)
 		}
 	}
+}
+
+func TestCodexSubscriptionModelsUsesEvidenceBackedGPT6AstraLimits(t *testing.T) {
+	for _, model := range codexSubscriptionModels() {
+		if model.ModelId != "gpt-6-astra" {
+			continue
+		}
+		if model.TokenLimits == nil {
+			t.Fatal("gpt-6-astra missing TokenLimits")
+		}
+		if model.TokenLimits.MaxInputTokens != 272_000 || model.TokenLimits.MaxOutputTokens != 128_000 {
+			t.Fatalf("gpt-6-astra TokenLimits = %+v, want input=272000 output=128000", model.TokenLimits)
+		}
+		return
+	}
+	t.Fatal("codexSubscriptionModels missing gpt-6-astra")
 }
 
 func TestCodexSubscriptionModelsUsesEvidenceBackedGPT56Limits(t *testing.T) {

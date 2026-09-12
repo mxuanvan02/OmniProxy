@@ -532,6 +532,28 @@ func TestCodexDesktopModelsExcludesGenerativeModels(t *testing.T) {
 	}
 }
 
+// A newly released Codex model can be routable before the installed desktop
+// client ships a bundled catalog entry. The configured model must therefore be
+// emitted, while unrelated discovered Codex models remain owned by the client.
+func TestCodexDesktopModelsIncludesConfiguredNewCodexModel(t *testing.T) {
+	h := &Handler{cachedModels: []ModelInfo{
+		{ModelId: "gpt-6-astra", ModelName: "GPT-6 Astra", TokenLimits: &ModelTokenLimits{MaxInputTokens: 272_000, MaxOutputTokens: 128_000}},
+		{ModelId: "gpt-5.6-sol"},
+	}}
+	models, _ := h.codexDesktopModels("gpt-6-astra")
+
+	published := make(map[string]bool, len(models))
+	for _, model := range models {
+		published[model.ModelId] = true
+	}
+	if !published["gpt-6-astra"] {
+		t.Fatalf("configured new Codex model missing from picker: %#v", models)
+	}
+	if published["gpt-5.6-sol"] {
+		t.Fatalf("unselected bundled Codex model was republished: %#v", models)
+	}
+}
+
 // A gateway may list a model without token metadata. The routing policy fills
 // only documented model families; aliases without upstream limits must remain
 // unset rather than inheriting an unrelated context window.

@@ -229,7 +229,11 @@ func codexModelFamilyRepresentatives(models []ModelInfo, preferred map[string]bo
 
 // codexDesktopModels returns the models OmniProxy adds to the Codex picker:
 // one entry per discovered non-Codex family (Claude and the other frontier
-// families), plus whatever is currently configured to route. Publishing the
+// families), plus whatever is currently configured to route. A configured
+// Codex-family model is included as well: newly released models can be
+// available through OmniProxy before the installed Codex client bundles them.
+// syncCodexModelCatalog preserves an existing rich client entry when present.
+// Publishing the
 // whole unified catalog filled the menu with every cached provider id,
 // including per-effort and per-thinking aliases of one upstream model.
 //
@@ -250,12 +254,12 @@ func (h *Handler) codexDesktopModels(selected ...string) ([]ModelInfo, map[strin
 	configured := make([]string, 0, len(selected))
 	for _, raw := range selected {
 		id := openClawModelID(strings.TrimSpace(raw))
-		// A configured Codex model still routes through the proxy via the
-		// top-level model_provider, so Codex's own catalog entry serves it.
-		if id == "" || isCodexBuiltinModel(id) {
+		if id == "" {
 			continue
 		}
-		preferred[strings.ToLower(id)] = true
+		if !isCodexBuiltinModel(id) {
+			preferred[strings.ToLower(id)] = true
+		}
 		configured = append(configured, id)
 	}
 
