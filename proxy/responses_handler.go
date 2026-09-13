@@ -109,6 +109,24 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		openaiReq.MaxTokens = *req.MaxOutputTokens
 	}
 
+	// Resolve the opt-in virtual model after Responses input has been expanded,
+	// so classification sees the real current turn, but before combo dispatch.
+	if r.Context().Value(comboBypassKey) == nil {
+		decision := h.resolveAdaptiveModel(openaiReq.Model, adaptiveSignalFromOpenAI(openaiReq))
+		if decision.Intercepted {
+			applyAdaptiveTraceHeaders(w, decision)
+			if len(decision.Models) == 0 {
+				h.sendOpenAIError(w, http.StatusServiceUnavailable, "server_error", adaptiveUnavailableMessage(decision))
+				return
+			}
+			// Keep the original raw body: the combo engine patches only model, so
+			// unknown Responses extensions survive adaptive fallback unchanged.
+			ctx := context.WithValue(r.Context(), comboForceFallbackKey, true)
+			h.handleComboRequest(w, r.WithContext(ctx), decision.VirtualModel, decision.Models, body, "responses")
+			return
+		}
+	}
+
 	// Check if model is a combo name — only on the top-level request, not
 	// on sub-requests dispatched by the combo handler itself.
 	if r.Context().Value(comboBypassKey) == nil {

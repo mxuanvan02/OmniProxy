@@ -964,7 +964,9 @@ func (p *AccountPool) isModelLocked(accountID, model string, now time.Time) bool
 	return ok && now.Before(until)
 }
 
-// CountAccountsForModel returns how many accounts in the pool support the given model.
+// CountAccountsForModel returns how many weighted pool entries support the
+// given model. It intentionally ignores transient availability and is used for
+// catalog/support diagnostics rather than request admission.
 func (p *AccountPool) CountAccountsForModel(model string) int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -975,6 +977,40 @@ func (p *AccountPool) CountAccountsForModel(model string) int {
 		}
 	}
 	return count
+}
+
+// HasAvailableAccountForModel reports whether at least one distinct account can
+// serve model right now. Unlike GetNextForModel it is read-only: it does not
+// advance the round-robin cursor or mutate cache affinity, which makes it safe
+// for admission/ranking probes such as omni-auto.
+func (p *AccountPool) HasAvailableAccountForModel(model string) bool {
+	if p == nil || strings.TrimSpace(model) == "" {
+		return false
+	}
+	// Read config before taking p.mu to preserve the lock order used by Reload.
+	allowOverUsage := config.GetAllowOverUsage()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	now := time.Now()
+	seen := make(map[string]bool, len(p.accounts))
+	for i := range p.accounts {
+		acc := &p.accounts[i]
+		if seen[acc.ID] {
+			continue
+		}
+		seen[acc.ID] = true
+		if !p.accountHasModel(acc.ID, model) || p.isModelLocked(acc.ID, model, now) {
+			continue
+		}
+		if until, ok := p.cooldowns[acc.ID]; ok && now.Before(until) {
+			continue
+		}
+		if isQuotaBlocked(*acc, allowOverUsage) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // GetByID returns an account by ID.

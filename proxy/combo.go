@@ -5,10 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"omniproxy/config"
-	"omniproxy/logger"
 	"net/http"
 	"net/http/httptest"
+	"omniproxy/config"
+	"omniproxy/logger"
 	"strings"
 	"sync"
 	"time"
@@ -20,6 +20,10 @@ import (
 type contextKey string
 
 const comboBypassKey contextKey = "combo_bypass"
+
+// comboForceFallbackKey prevents a ranked adaptive chain from being rotated by
+// the global combo strategy. omni-auto has already ordered the models.
+const comboForceFallbackKey contextKey = "combo_force_fallback"
 
 // comboRotationEntry tracks round-robin state for a single combo.
 type comboRotationEntry struct {
@@ -116,19 +120,195 @@ func (b *bufferingResponseWriter) Flush() {
 	// no-op: buffered — we flush to real writer only on success
 }
 
-func (b *bufferingResponseWriter) status() int {
-	return b.recorder.Code
-}
+func (b *bufferingResponseWriter) status() int       { return b.recorder.Code }
+func (b *bufferingResponseWriter) bodyBytes() []byte { return b.recorder.Body.Bytes() }
+func (b *bufferingResponseWriter) committed() bool   { return false }
 
 // flushTo copies the buffered response to the real ResponseWriter.
 func (b *bufferingResponseWriter) flushTo(w http.ResponseWriter) {
 	for k, vs := range b.recorder.Header() {
-		for _, v := range vs {
-			w.Header().Set(k, v)
-		}
+		w.Header()[k] = append([]string(nil), vs...)
 	}
 	w.WriteHeader(b.recorder.Code)
-	w.Write(b.recorder.Body.Bytes()) //nolint:errcheck
+	_, _ = w.Write(b.recorder.Body.Bytes())
+}
+
+// streamingPreludeWriter buffers only protocol setup events. Once the first
+// meaningful SSE event appears it commits the prelude and becomes a direct
+// pass-through. A failure before that point can still fall back to another
+// model; after output is visible, replay is forbidden.
+type streamingPreludeWriter struct {
+	dst       http.ResponseWriter
+	recorder  *httptest.ResponseRecorder
+	didCommit bool
+}
+
+const maxStreamingPreludeBytes = 64 << 10
+
+func newStreamingPreludeWriter(dst http.ResponseWriter) *streamingPreludeWriter {
+	return &streamingPreludeWriter{dst: dst, recorder: httptest.NewRecorder()}
+}
+
+func (s *streamingPreludeWriter) Header() http.Header {
+	if s.didCommit {
+		return s.dst.Header()
+	}
+	return s.recorder.Header()
+}
+
+func (s *streamingPreludeWriter) WriteHeader(code int) {
+	if s.didCommit {
+		s.dst.WriteHeader(code)
+		return
+	}
+	s.recorder.WriteHeader(code)
+}
+
+func (s *streamingPreludeWriter) Write(p []byte) (int, error) {
+	if s.didCommit {
+		return s.dst.Write(p)
+	}
+	n, err := s.recorder.Write(p)
+	if err != nil {
+		return n, err
+	}
+	if streamPreludeShouldCommit(s.recorder.Body.Bytes()) || s.recorder.Body.Len() >= maxStreamingPreludeBytes {
+		if err := s.commit(); err != nil {
+			return n, err
+		}
+	}
+	return n, nil
+}
+
+func (s *streamingPreludeWriter) Flush() {
+	if s.didCommit {
+		if flusher, ok := s.dst.(http.Flusher); ok {
+			flusher.Flush()
+		}
+	}
+}
+
+func (s *streamingPreludeWriter) commit() error {
+	if s.didCommit {
+		return nil
+	}
+	for k, vs := range s.recorder.Header() {
+		s.dst.Header()[k] = append([]string(nil), vs...)
+	}
+	code := s.recorder.Code
+	if code == 0 {
+		code = http.StatusOK
+	}
+	s.dst.WriteHeader(code)
+	s.didCommit = true
+	if s.recorder.Body.Len() == 0 {
+		return nil
+	}
+	_, err := s.dst.Write(s.recorder.Body.Bytes())
+	s.recorder.Body.Reset()
+	return err
+}
+
+func (s *streamingPreludeWriter) status() int       { return s.recorder.Code }
+func (s *streamingPreludeWriter) bodyBytes() []byte { return s.recorder.Body.Bytes() }
+func (s *streamingPreludeWriter) committed() bool   { return s.didCommit }
+func (s *streamingPreludeWriter) flushTo(http.ResponseWriter) {
+	_ = s.commit()
+}
+
+// streamPreludeShouldCommit detects generated output or a clean terminal event.
+// Setup-only and empty-delta events remain buffered so an error before useful
+// output can still switch models. Error events never trigger commitment.
+func streamPreludeShouldCommit(data []byte) bool {
+	meaningful := [][]byte{
+		[]byte(`"type":"tool_use"`),
+		[]byte(`"tool_calls":[`),
+		[]byte("data: [DONE]"),
+		[]byte(`"type":"message_stop"`),
+		[]byte(`"type":"response.completed"`),
+	}
+	errors := [][]byte{[]byte("event: error"), []byte(`"type":"error"`), []byte(`"error":{`)}
+	firstMeaningful, firstError := -1, -1
+	for _, marker := range meaningful {
+		if idx := bytes.Index(data, marker); idx >= 0 && (firstMeaningful < 0 || idx < firstMeaningful) {
+			firstMeaningful = idx
+		}
+	}
+	for _, marker := range errors {
+		if idx := bytes.Index(data, marker); idx >= 0 && (firstError < 0 || idx < firstError) {
+			firstError = idx
+		}
+	}
+	for _, field := range []string{"text", "thinking", "partial_json", "content", "reasoning_content", "delta"} {
+		if idx := firstNonEmptyJSONStringField(data, field); idx >= 0 && (firstMeaningful < 0 || idx < firstMeaningful) {
+			firstMeaningful = idx
+		}
+	}
+	return firstMeaningful >= 0 && (firstError < 0 || firstMeaningful < firstError)
+}
+
+// firstNonEmptyJSONStringField returns the byte offset of the first JSON string
+// field with a non-empty value. It understands escapes and tolerates whitespace
+// after the colon without parsing unrelated SSE lines as one JSON document.
+func firstNonEmptyJSONStringField(data []byte, field string) int {
+	marker := []byte(`"` + field + `"`)
+	for offset := 0; offset < len(data); {
+		rel := bytes.Index(data[offset:], marker)
+		if rel < 0 {
+			return -1
+		}
+		start := offset + rel
+		i := start + len(marker)
+		for i < len(data) && (data[i] == ' ' || data[i] == '	' || data[i] == '\r' || data[i] == '\n') {
+			i++
+		}
+		if i >= len(data) || data[i] != ':' {
+			offset = start + len(marker)
+			continue
+		}
+		i++
+		for i < len(data) && (data[i] == ' ' || data[i] == '	') {
+			i++
+		}
+		if i >= len(data) || data[i] != '"' {
+			offset = start + len(marker)
+			continue
+		}
+		valueStart := i
+		i++
+		escaped := false
+		for i < len(data) {
+			if escaped {
+				escaped = false
+				i++
+				continue
+			}
+			if data[i] == '\\' {
+				escaped = true
+				i++
+				continue
+			}
+			if data[i] == '"' {
+				var value string
+				if json.Unmarshal(data[valueStart:i+1], &value) == nil && value != "" {
+					return start
+				}
+				break
+			}
+			i++
+		}
+		offset = start + len(marker)
+	}
+	return -1
+}
+
+type comboAttemptWriter interface {
+	http.ResponseWriter
+	http.Flusher
+	status() int
+	bodyBytes() []byte
+	committed() bool
+	flushTo(http.ResponseWriter)
 }
 
 // handleComboRequest is the combo execution engine.
@@ -145,12 +325,17 @@ func (h *Handler) handleComboRequest(
 	format string,
 ) {
 	strategy := config.GetComboStrategy()
+	forcedFallback, _ := r.Context().Value(comboForceFallbackKey).(bool)
+	if forcedFallback {
+		strategy = "fallback"
+	}
 	// Per-combo strategy override.
-	if entry := config.GetComboByName(comboName); entry != nil && entry.Strategy != "" {
+	if entry := config.GetComboByName(comboName); !forcedFallback && entry != nil && entry.Strategy != "" {
 		strategy = entry.Strategy
 	}
 	stickyLimit := config.GetComboStickyRoundRobinLimit()
 	rotated := getRotatedModels(models, comboName, strategy, stickyLimit)
+	isStream := isComboRequestStreaming(originalBody)
 
 	var lastStatus int
 	var lastErrMsg string
@@ -202,7 +387,12 @@ func (h *Handler) handleComboRequest(
 			continue
 		}
 
-		buf := newBufferingResponseWriter()
+		var attemptWriter comboAttemptWriter
+		if isStream {
+			attemptWriter = newStreamingPreludeWriter(w)
+		} else {
+			attemptWriter = newBufferingResponseWriter()
+		}
 
 		// Mark this as a combo sub-request so the dispatched handler skips
 		// combo resolution (prevents infinite recursion when a combo model
@@ -212,32 +402,39 @@ func (h *Handler) handleComboRequest(
 
 		switch format {
 		case "claude":
-			h.handleClaudeMessages(buf, newReq)
+			h.handleClaudeMessages(attemptWriter, newReq)
 		case "openai":
-			h.handleOpenAIChat(buf, newReq)
+			h.handleOpenAIChat(attemptWriter, newReq)
 		case "responses":
-			h.handleOpenAIResponses(buf, newReq)
+			h.handleOpenAIResponses(attemptWriter, newReq)
 		}
 
-		body := buf.recorder.Body.Bytes()
-		status := buf.status()
+		// Once meaningful stream output has escaped, retrying another model would
+		// replay the prefix. The dispatched handler already emitted any terminal
+		// error event, so the combo layer must return without writing again.
+		if attemptWriter.committed() {
+			return
+		}
+
+		body := attemptWriter.bodyBytes()
+		status := attemptWriter.status()
 		if status == 0 {
 			status = 500
 		}
 
-		// Even when status is 200, check for SSE error events (mid-stream failure).
+		// Before commitment an SSE error is still eligible for model fallback.
 		if status >= 200 && status < 300 && hasSSEErrorEvent(body) {
-			logger.Warnf("[COMBO] %s model=%s SSE stream contained error", comboName, modelStr)
+			logger.Warnf("[COMBO] %s model=%s SSE stream contained error before output", comboName, modelStr)
 			status = 500
 		}
 
 		if status >= 200 && status < 300 {
 			logger.Infof("[COMBO] %s model=%s succeeded status=%d", comboName, modelStr, status)
-			buf.flushTo(w)
+			attemptWriter.flushTo(w)
 			return
 		}
 
-		// Extract error message from buffered body.
+		// Extract error message from the bounded, uncommitted prelude/body.
 		errMsg := extractErrorMessage(body)
 		if errMsg == "" {
 			errMsg = fmt.Sprintf("HTTP %d", status)
@@ -252,7 +449,7 @@ func (h *Handler) handleComboRequest(
 
 		if !isComboFallbackEligible(status, errMsg) {
 			logger.Warnf("[COMBO] %s model=%s error not fallback-eligible, aborting chain", comboName, modelStr)
-			buf.flushTo(w)
+			attemptWriter.flushTo(w)
 			return
 		}
 
@@ -268,12 +465,8 @@ func (h *Handler) handleComboRequest(
 	}
 	logger.Warnf("[COMBO] %s all models failed — lastStatus=%d lastError=%s", comboName, lastStatus, truncateStr(lastErrMsg, 200))
 
-	// Detect streaming: if the original request was stream:true, the client
-	// expects SSE events. Sending a JSON error body after the combo handler
-	// has not yet committed SSE headers is technically valid HTTP, but Claude
-	// Code CLI and other streaming clients may not parse it correctly because
-	// they've already negotiated SSE mode. Send the error as SSE instead.
-	isStream := isComboRequestStreaming(originalBody)
+	// Streaming clients expect a terminal SSE error when every model failed
+	// before any candidate produced meaningful output.
 	if isStream {
 		flusher, ok := w.(http.Flusher)
 		if ok {

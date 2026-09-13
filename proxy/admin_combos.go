@@ -2,8 +2,8 @@ package proxy
 
 import (
 	"encoding/json"
-	"omniproxy/config"
 	"net/http"
+	"omniproxy/config"
 	"strings"
 )
 
@@ -131,7 +131,7 @@ func (h *Handler) apiDeleteCombo(w http.ResponseWriter, r *http.Request, id stri
 // apiGetComboSettings handles GET /admin/api/combo-settings
 func (h *Handler) apiGetComboSettings(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"strategy":             config.GetComboStrategy(),
+		"strategy":              config.GetComboStrategy(),
 		"stickyRoundRobinLimit": config.GetComboStickyRoundRobinLimit(),
 	})
 }
@@ -139,7 +139,7 @@ func (h *Handler) apiGetComboSettings(w http.ResponseWriter, r *http.Request) {
 // apiUpdateComboSettings handles POST /admin/api/combo-settings
 func (h *Handler) apiUpdateComboSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Strategy             string `json:"strategy"`
+		Strategy              string `json:"strategy"`
 		StickyRoundRobinLimit int    `json:"stickyRoundRobinLimit"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -153,4 +153,30 @@ func (h *Handler) apiUpdateComboSettings(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	h.apiGetComboSettings(w, r)
+}
+
+// apiGetAdaptiveRouting handles GET /admin/api/adaptive-routing.
+func (h *Handler) apiGetAdaptiveRouting(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(config.GetAdaptiveRouting()) //nolint:errcheck
+}
+
+// apiUpdateAdaptiveRouting handles PUT /admin/api/adaptive-routing. The config
+// package owns validation and atomic persistence so every caller gets identical
+// recursion, size, objective, and profile bounds.
+func (h *Handler) apiUpdateAdaptiveRouting(w http.ResponseWriter, r *http.Request) {
+	var req config.AdaptiveRoutingConfig
+	decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "invalid adaptive routing policy: " + err.Error()}) //nolint:errcheck
+		return
+	}
+	if err := config.UpdateAdaptiveRouting(req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()}) //nolint:errcheck
+		return
+	}
+	h.apiGetAdaptiveRouting(w, r)
 }

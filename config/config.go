@@ -390,6 +390,27 @@ type PromptFilterRule struct {
 	Enabled bool   `json:"enabled"`           // Whether this rule is active
 }
 
+// AdaptiveModelProfile supplies operator measurements used by omni-auto.
+// Omitted values fall back to conservative model-family estimates.
+type AdaptiveModelProfile struct {
+	Quality   float64 `json:"quality,omitempty"`   // 0-100 relative quality score
+	LatencyMs int     `json:"latencyMs,omitempty"` // expected time to first useful output
+}
+
+// AdaptiveRoutingConfig defines the deterministic omni-auto policy. Route keys
+// are category.tier (for example coding.strong); values are ordered candidate
+// model or combo names. The objective ranks viable candidates without another
+// LLM call, so routing itself adds no network cost.
+type AdaptiveRoutingConfig struct {
+	Enabled      bool                            `json:"enabled,omitempty"`
+	ShadowMode   bool                            `json:"shadowMode,omitempty"`
+	VirtualModel string                          `json:"virtualModel,omitempty"`
+	Objective    string                          `json:"objective,omitempty"` // balanced | cost | performance | quality
+	DefaultRoute []string                        `json:"defaultRoute,omitempty"`
+	Routes       map[string][]string             `json:"routes,omitempty"`
+	Profiles     map[string]AdaptiveModelProfile `json:"profiles,omitempty"`
+}
+
 // ApiKeyEntry represents a single API key with optional usage limits and counters.
 // Limits with value 0 are treated as "no limit". Counters are cumulative and never reset
 // automatically; operators can use the admin endpoint to manually reset them.
@@ -524,6 +545,11 @@ type Config struct {
 
 	// Combos is the list of user-defined sequential model fallback chains.
 	Combos []ComboEntry `json:"combos,omitempty"`
+
+	// AdaptiveRouting powers the opt-in virtual model (default: omni-auto).
+	// It is inert unless Enabled is true and never rewrites explicitly named
+	// models, preserving historical routing for every existing client.
+	AdaptiveRouting AdaptiveRoutingConfig `json:"adaptiveRouting,omitempty"`
 
 	// ExtraModels are model IDs advertised in /v1/models even when the
 	// upstream Kiro account doesn't list them. The proxy's chat-completions
@@ -743,6 +769,20 @@ func loadLocked() error {
 		return err
 	}
 	configMigrated := false
+	// Validate and normalize adaptive routing on startup as well as through the
+	// admin API. Only touch the policy when the field exists in the source file,
+	// so legacy configs do not gain an inert adaptiveRouting block merely by
+	// being loaded.
+	if _, present := rawFields["adaptiveRouting"]; present {
+		normalized, changed, normalizeErr := normalizeAdaptiveRouting(cfg.AdaptiveRouting)
+		if normalizeErr != nil {
+			return fmt.Errorf("invalid adaptiveRouting: %w", normalizeErr)
+		}
+		cfg.AdaptiveRouting = normalized
+		if changed {
+			configMigrated = true
+		}
+	}
 	// Older running configurations omitted these fields because they were
 	// introduced after the original 5-minute/60-second defaults. Populate only
 	// missing fields so an explicit stream timeout of 0 remains meaningful.

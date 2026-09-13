@@ -1999,6 +1999,9 @@ func filterModelsByCapability(models []map[string]interface{}, selector string) 
 // media catalogue.
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	models := canonicalClaude5Models()
+	if entry := adaptiveCatalogEntry(); entry != nil {
+		models = append(models, entry)
+	}
 	if hasEnabledCodexAccount() {
 		models = append(models, h.codexModelsList()...)
 	}
@@ -2040,6 +2043,9 @@ func (h *Handler) handleModelByID(w http.ResponseWriter, r *http.Request, modelI
 	}
 
 	models := canonicalClaude5Models()
+	if entry := adaptiveCatalogEntry(); entry != nil {
+		models = append(models, entry)
+	}
 	if hasEnabledCodexAccount() {
 		models = append(models, h.codexModelsList()...)
 	}
@@ -3679,6 +3685,22 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	// so the request routes to the same pool entries as the bare model name.
 	req.Model = stripProviderPrefix(req.Model)
 
+	// omni-auto is opt-in and resolved before combo detection so the selected
+	// route may itself be a combo. Explicitly named models never enter this path.
+	if r.Context().Value(comboBypassKey) == nil {
+		decision := h.resolveAdaptiveModel(req.Model, adaptiveSignalFromClaude(&req))
+		if decision.Intercepted {
+			applyAdaptiveTraceHeaders(w, decision)
+			if len(decision.Models) == 0 {
+				h.sendClaudeError(w, http.StatusServiceUnavailable, "api_error", adaptiveUnavailableMessage(decision))
+				return
+			}
+			ctx := context.WithValue(r.Context(), comboForceFallbackKey, true)
+			h.handleComboRequest(w, r.WithContext(ctx), decision.VirtualModel, decision.Models, body, "claude")
+			return
+		}
+	}
+
 	// Check if model is a combo name FIRST, before thinking/alias resolution.
 	// This prevents alias mappings (e.g. "gpt-4o" → "claude-sonnet-4.5") from
 	// defeating combo detection when a combo shares an alias name.
@@ -5058,6 +5080,22 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	// Strip provider prefix (e.g. "codex/gpt-5.6-sol" → "gpt-5.6-sol")
 	req.Model = stripProviderPrefix(req.Model)
 
+	// Resolve the opt-in virtual model before combo detection; a policy route
+	// can name either a concrete model or an existing combo.
+	if r.Context().Value(comboBypassKey) == nil {
+		decision := h.resolveAdaptiveModel(req.Model, adaptiveSignalFromOpenAI(&req))
+		if decision.Intercepted {
+			applyAdaptiveTraceHeaders(w, decision)
+			if len(decision.Models) == 0 {
+				h.sendOpenAIError(w, http.StatusServiceUnavailable, "server_error", adaptiveUnavailableMessage(decision))
+				return
+			}
+			ctx := context.WithValue(r.Context(), comboForceFallbackKey, true)
+			h.handleComboRequest(w, r.WithContext(ctx), decision.VirtualModel, decision.Models, body, "openai")
+			return
+		}
+	}
+
 	// Check if model is a combo name FIRST, before thinking/alias resolution.
 	// Skip combo resolution for sub-requests dispatched by the combo handler itself
 	// (prevents infinite recursion when a combo model shares the combo name).
@@ -6273,6 +6311,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetComboSettings(w, r)
 	case path == "/combo-settings" && r.Method == "POST":
 		h.apiUpdateComboSettings(w, r)
+	case path == "/adaptive-routing" && r.Method == "GET":
+		h.apiGetAdaptiveRouting(w, r)
+	case path == "/adaptive-routing" && r.Method == "PUT":
+		h.apiUpdateAdaptiveRouting(w, r)
 	case strings.HasPrefix(path, "/combos/") && r.Method == "GET":
 		h.apiGetCombo(w, r, strings.TrimPrefix(path, "/combos/"))
 	case strings.HasPrefix(path, "/combos/") && r.Method == "PUT":
