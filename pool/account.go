@@ -1406,6 +1406,27 @@ func IsContentBlockedError(err error) bool {
 // DisableAccount marks an account as disabled (auth revoked / unrecoverable),
 // removes it from the in-memory pool so subsequent requests skip it, and
 // persists the change via config.SetAccountBanStatus.
+
+// IsKiroTruncatedError reports whether err indicates a Kiro/Bedrock stream
+// that returned HTTP 200 but ended without any renderable assistant output
+// (blank) or was truncated mid-stream. These are upstream 200-OK "success"
+// failures that must be retried on another Kiro account but must NOT affect
+// other providers (external_openai/codex/antigravity).
+func IsKiroTruncatedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	// Must contain kiro marker to avoid matching external blank errors
+	// ("external SSE stream ended without assistant output").
+	if !strings.Contains(lower, "kiro") {
+		return false
+	}
+	return strings.Contains(lower, "without assistant output") ||
+		strings.Contains(lower, "blank") ||
+		strings.Contains(lower, "truncated")
+}
+
 func (p *AccountPool) DisableAccount(id, reason string) {
 	if err := config.SetAccountBanStatus(id, "DISABLED", reason); err != nil {
 		// best effort — even if persistence fails, drop it from memory

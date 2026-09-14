@@ -32,7 +32,7 @@ func (h *Handler) waitForPoolRecovery(ctx context.Context, model string, exclude
 	if *wave >= poolRecoveryWaves || len(excluded) == 0 || lastErr == nil {
 		return false
 	}
-	if clientGone(ctx, lastErr) || !pool.IsTransientError(lastErr) {
+	if clientGone(ctx, lastErr) || (!pool.IsTransientError(lastErr) && !pool.IsKiroTruncatedError(lastErr)) {
 		return false
 	}
 	*wave++
@@ -305,6 +305,15 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error, model
 		logger.Warnf("[AccountFailover] %s: upstream content-blocked (payload/model-level refusal, not account fault): %v",
 			account.Email, truncateForLog(err.Error()))
 		return
+	case pool.IsKiroTruncatedError(err):
+		// Kiro 200-OK blank/truncated: the HTTP layer succeeded but produced no
+		// assistant output. This is a Kiro/Bedrock contract quirk, not a generic
+		// transient. Cool the Kiro account/model briefly and keep the error
+		// Kiro-scoped (error contains "kiro") so external/codex/antigravity
+		// pools are never affected.
+		class := h.pool.RecordErrorClass(account.ID, err, model)
+		logger.Warnf("[AccountFailover] %s: %s cooldown for model %s (kiro blank/truncated: %s)",
+			account.Email, class, model, truncateForLog(errMsg))
 	case isNetworkError(errMsg):
 		// Network errors (connection refused, DNS failure, timeout) affect all
 		// accounts equally when the gateway is down. Do NOT model-lock — just

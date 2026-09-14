@@ -65,12 +65,19 @@ const (
 	CooldownUnknown
 )
 
+// CooldownKiroTruncated is a Kiro/Bedrock-specific 200-OK blank/truncated
+// stream. HTTP 200 but no assistant output is a Kiro contract quirk; it must
+// cool the Kiro account briefly and must never be confused with a generic
+// transient that would affect external/codex pools.
+const CooldownKiroTruncated CooldownClass = 5
+
 // Durations are deliberately finite. A permanent-looking failure can still be
 // an upstream bug or a provider-side outage, and an account that never returns
 // on its own turns a transient provider incident into silent capacity loss that
 // only a restart clears.
 const (
-	cooldownRateLimited = time.Hour
+	cooldownKiroTruncated = 2 * time.Minute
+	cooldownRateLimited   = time.Hour
 	// Long enough to stop the retry storm (768 attempts became at most a
 	// handful per hour), short enough that a provider-side auth outage heals
 	// without operator intervention.
@@ -88,7 +95,7 @@ const (
 // more wasted requests.
 func (c CooldownClass) immediate() bool {
 	switch c {
-	case CooldownRateLimited, CooldownAuthFailed, CooldownNoBalance:
+	case CooldownRateLimited, CooldownAuthFailed, CooldownNoBalance, CooldownKiroTruncated:
 		return true
 	default:
 		return false
@@ -104,6 +111,8 @@ func (c CooldownClass) duration() time.Duration {
 		return cooldownAuthFailed
 	case CooldownNoBalance:
 		return cooldownNoBalance
+	case CooldownKiroTruncated:
+		return cooldownKiroTruncated
 	default:
 		return cooldownShortRest
 	}
@@ -121,6 +130,8 @@ func (c CooldownClass) String() string {
 		return "auth_failed"
 	case CooldownNoBalance:
 		return "no_balance"
+	case CooldownKiroTruncated:
+		return "kiro_truncated"
 	default:
 		return "unknown"
 	}
@@ -137,6 +148,8 @@ func ClassifyCooldown(err error) CooldownClass {
 		return CooldownUnknown
 	}
 	switch {
+	case IsKiroTruncatedError(err):
+		return CooldownKiroTruncated
 	case IsRateLimitError(err), IsQuotaExhaustionError(err):
 		return CooldownRateLimited
 	case isNoBalanceError(err):

@@ -582,6 +582,29 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 	var lastAssistantContent string
 	var lastReasoningContent string
 
+	// Blank/truncated diagnostics for Kiro 200-OK "success but empty" failures.
+	// These must be Kiro-scoped (error contains "kiro") so they do not collide
+	// with external_openai blank classifiers and do not cool other providers.
+	sawAssistantOutput := false
+	dataEvents := 0
+	var blankSamples []string
+	recordBlankSample := func(eventType string, payload map[string]interface{}) {
+		if len(blankSamples) >= 5 {
+			return
+		}
+		trimmed := eventType
+		if payload != nil {
+			if b, err := json.Marshal(payload); err == nil {
+				trimmed = eventType + ":" + string(b)
+			}
+		}
+		const maxSample = 500
+		if len(trimmed) > maxSample {
+			trimmed = trimmed[:maxSample] + "...[truncated]"
+		}
+		blankSamples = append(blankSamples, trimmed)
+	}
+
 	// KIRO_DEBUG_USAGE=1 dumps every upstream event type plus any token/usage
 	// fields it carries, so we can confirm from a live stream whether the
 	// upstream actually reports real token counts (vs only credits + context %).
@@ -651,23 +674,41 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 			}
 		}
 
+		dataEvents++
+		recordBlankSample(eventType, event)
 		// Dispatch by event type.
 		switch eventType {
 		case "assistantResponseEvent":
 			if content, ok := event["content"].(string); ok && content != "" {
 				normalized := normalizeChunk(content, &lastAssistantContent)
-				if normalized != "" && callback.OnText != nil {
-					callback.OnText(normalized, false)
+				if normalized != "" {
+					sawAssistantOutput = true
+					if callback.OnOutput != nil {
+						callback.OnOutput()
+					}
+					if callback.OnText != nil {
+						callback.OnText(normalized, false)
+					}
 				}
 			}
 		case "reasoningContentEvent":
 			if text, ok := event["text"].(string); ok && text != "" {
 				normalized := normalizeChunk(text, &lastReasoningContent)
-				if normalized != "" && callback.OnText != nil {
-					callback.OnText(normalized, true)
+				if normalized != "" {
+					sawAssistantOutput = true
+					if callback.OnOutput != nil {
+						callback.OnOutput()
+					}
+					if callback.OnText != nil {
+						callback.OnText(normalized, true)
+					}
 				}
 			}
 		case "toolUseEvent":
+			sawAssistantOutput = true
+			if callback.OnOutput != nil {
+				callback.OnOutput()
+			}
 			currentToolUse = handleToolUseEvent(event, currentToolUse, callback)
 		case "meteringEvent":
 			if usage, ok := event["usage"].(float64); ok {
@@ -682,7 +723,19 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 		}
 	}
 
+	pendingTruncated := false
 	if currentToolUse != nil {
+		// A pending tool without a stop marker is only truncated when its
+		// input is incomplete (invalid JSON). A single-frame tool that
+		// carries complete input but no stop flag is a normal Kiro shape
+		// and must stay a success (see TestParseEventStreamFinishesPendingToolUseOnEOF).
+		rawInput := currentToolUse.InputBuffer.String()
+		if rawInput != "" {
+			var js json.RawMessage
+			if err := json.Unmarshal([]byte(rawInput), &js); err != nil {
+				pendingTruncated = true
+			}
+		}
 		finishToolUse(currentToolUse, callback)
 	}
 
@@ -692,6 +745,30 @@ func parseEventStream(body io.Reader, callback *KiroStreamCallback) error {
 
 	if callback.OnComplete != nil {
 		callback.OnComplete(inputTokens, outputTokens)
+	}
+	// Kiro 200-OK but blank: 200 with no renderable output is a Kiro contract
+	// quirk (the HTTP layer succeeded but Bedrock produced nothing). Must be
+	// retryable and Kiro-scoped ("kiro" marker) so other providers are never
+	// cooled (see IsKiroTruncatedError).
+	if !sawAssistantOutput {
+		if len(blankSamples) > 0 {
+			logger.Warnf("[Kiro] blank stream without assistant output: events=%d samples=%q in=%d out=%d", dataEvents, blankSamples, inputTokens, outputTokens)
+		} else {
+			logger.Warnf("[Kiro] blank stream without assistant output: events=%d in=%d out=%d", dataEvents, inputTokens, outputTokens)
+		}
+		return fmt.Errorf("kiro stream ended without assistant output (blank): events=%d", dataEvents)
+	}
+	// Truncated mid-tool: stream ended without a stop marker for the pending
+	// toolUseEvent. Emitting a half-written input JSON would surface as a
+	// tool schema error downstream. Treat as Kiro-truncated so the handler
+	// rotates to another Kiro account (same isolation as blank).
+	if pendingTruncated {
+		if len(blankSamples) > 0 {
+			logger.Warnf("[Kiro] truncated tool stream without stop marker: events=%d samples=%q", dataEvents, blankSamples)
+		} else {
+			logger.Warnf("[Kiro] truncated tool stream without stop marker: events=%d", dataEvents)
+		}
+		return fmt.Errorf("kiro stream truncated without tool stop: events=%d", dataEvents)
 	}
 	return nil
 }
