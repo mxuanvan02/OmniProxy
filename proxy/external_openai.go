@@ -740,42 +740,10 @@ func openAIUserContent(text string, images []KiroImage) interface{} {
 	return content
 }
 
-// resolveExternalModelID picks the best matching model ID from the provider's
-// cached model list. External providers may use slightly different naming
-// conventions (e.g. "claude-haiku-4-5-20251001" with a date suffix instead of
-// "claude-haiku-4-5"). When the requested ID isn't an exact match, we try a
-// prefix match against the cached list. Falls back to the input ID when no
-// cache is available or no match is found.
+// resolveExternalModelID preserves model identity; discovery belongs to the
+// catalog refresh path, never the inference path.
 func resolveExternalModelID(account *config.Account, requested string) string {
-	requested = strings.TrimSpace(requested)
-	if requested == "" {
-		return requested
-	}
-	models, err := fetchExternalProviderModels(account)
-	if err != nil || len(models) == 0 {
-		return requested
-	}
-	// Exact match → use as-is.
-	for _, m := range models {
-		if strings.EqualFold(m.ModelId, requested) {
-			return requested
-		}
-	}
-	// Prefix match: requested "claude-haiku-4-5" matches "claude-haiku-4-5-20251001".
-	// Pick the shortest matching ID (closest to what was requested).
-	best := ""
-	for _, m := range models {
-		if strings.HasPrefix(strings.ToLower(m.ModelId), strings.ToLower(requested)) {
-			if best == "" || len(m.ModelId) < len(best) {
-				best = m.ModelId
-			}
-		}
-	}
-	if best != "" {
-		logger.Infof("[ExternalOpenAI] model %q not exact, resolved to %q via prefix match", requested, best)
-		return best
-	}
-	return requested
+	return strings.TrimSpace(requested)
 }
 
 // dotToDashClaudeVersion reverts OmniProxy's dot-form normalisation
@@ -912,6 +880,23 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 	sawAssistantOutput := false
 	terminal := false
 	stopReason := ""
+	// Blank-stream diagnostics: keep the first few raw data payloads (truncated)
+	// so the next "ended without assistant output" / blankTurnError names the
+	// actual dialect (e.g. delta.reasoning vs delta.reasoning_content) instead
+	// of guessing. Bounded to avoid unbounded memory on long streams.
+	var blankSamples []string
+	dataEvents := 0
+	recordBlankSample := func(payload string) {
+		if len(blankSamples) >= 5 {
+			return
+		}
+		trimmed := payload
+		const maxSample = 500
+		if len(trimmed) > maxSample {
+			trimmed = trimmed[:maxSample] + "...[truncated]"
+		}
+		blankSamples = append(blankSamples, trimmed)
+	}
 
 	emitToolCalls := func() {
 		for _, idx := range toolOrder {
@@ -990,6 +975,8 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 			continue
 		}
 		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		dataEvents++
+		recordBlankSample(data)
 		if data == "[DONE]" {
 			terminal = true
 			if stopReason == "" {
@@ -1032,6 +1019,11 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 		return fmt.Errorf("external SSE stream ended before a terminal finish_reason or [DONE]")
 	}
 	if !sawAssistantOutput {
+		if len(blankSamples) > 0 {
+			logger.Warnf("[ExternalOpenAI] blank SSE without assistant output: events=%d samples=%q stopReason=%q", dataEvents, blankSamples, stopReason)
+		} else {
+			logger.Warnf("[ExternalOpenAI] blank SSE without assistant output: events=%d stopReason=%q", dataEvents, stopReason)
+		}
 		return fmt.Errorf("external SSE stream ended without assistant output")
 	}
 
@@ -1043,6 +1035,11 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 	// space with finish_reason "length"). Report it so the caller can rotate
 	// accounts rather than closing the turn on an empty answer.
 	if !gate.meaningful {
+		if len(blankSamples) > 0 {
+			logger.Warnf("[ExternalOpenAI] blank turn (gate not meaningful): events=%d samples=%q stopReason=%q sawOutput=%v terminal=%v", dataEvents, blankSamples, stopReason, sawAssistantOutput, terminal)
+		} else {
+			logger.Warnf("[ExternalOpenAI] blank turn (gate not meaningful): events=%d stopReason=%q sawOutput=%v terminal=%v", dataEvents, stopReason, sawAssistantOutput, terminal)
+		}
 		return blankTurnError(stopReason)
 	}
 	if callback.OnStopReason != nil {
@@ -1188,8 +1185,12 @@ func processExternalSSEData(data string, callback *KiroStreamCallback, toolAccum
 	var chunk struct {
 		Choices []struct {
 			Delta struct {
-				Content          string `json:"content"`
-				ReasoningContent string `json:"reasoning_content"`
+				Content          json.RawMessage `json:"content"`
+				ReasoningContent json.RawMessage `json:"reasoning_content"`
+				Reasoning        json.RawMessage `json:"reasoning"`
+				ReasoningText    json.RawMessage `json:"reasoning_text"`
+				Thinking         json.RawMessage `json:"thinking"`
+				Thought          json.RawMessage `json:"thought"`
 				ToolCalls        []struct {
 					Index    int    `json:"index"`
 					ID       string `json:"id"`
@@ -1214,22 +1215,24 @@ func processExternalSSEData(data string, callback *KiroStreamCallback, toolAccum
 	}
 	sawOutput := false
 	for _, ch := range chunk.Choices {
-		if ch.Delta.Content != "" {
+		if s := rawMessageToString(ch.Delta.Content); s != "" {
 			sawOutput = true
 			if callback.OnOutput != nil {
 				callback.OnOutput()
 			}
 			if callback.OnText != nil {
-				callback.OnText(ch.Delta.Content, false)
+				callback.OnText(s, false)
 			}
 		}
-		if ch.Delta.ReasoningContent != "" {
-			sawOutput = true
-			if callback.OnOutput != nil {
-				callback.OnOutput()
-			}
-			if callback.OnText != nil {
-				callback.OnText(ch.Delta.ReasoningContent, true)
+		for _, raw := range []json.RawMessage{ch.Delta.ReasoningContent, ch.Delta.Reasoning, ch.Delta.ReasoningText, ch.Delta.Thinking, ch.Delta.Thought} {
+			if s := rawMessageToString(raw); s != "" {
+				sawOutput = true
+				if callback.OnOutput != nil {
+					callback.OnOutput()
+				}
+				if callback.OnText != nil {
+					callback.OnText(s, true)
+				}
 			}
 		}
 		for _, tc := range ch.Delta.ToolCalls {
@@ -1275,6 +1278,38 @@ func processExternalSSEData(data string, callback *KiroStreamCallback, toolAccum
 		recognized:       true,
 		recognizedOutput: sawOutput,
 	}
+}
+
+// rawMessageToString extracts a string from a json.RawMessage that may be a
+// plain JSON string or an object containing a string field. Gateways disagree
+// on the reasoning dialect: some use `reasoning_content` (OpenAI/DeepSeek),
+// others `reasoning`, `reasoning_text`, `thinking`, or `thought`. An object
+// shape like `{"content":"..."} `is also tolerated.
+func rawMessageToString(raw json.RawMessage) string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(raw, &m); err == nil {
+		for _, k := range []string{"content", "text", "value", "reasoning", "reasoning_content", "reasoning_text", "thinking", "thought"} {
+			if v, ok := m[k]; ok {
+				if str, ok := v.(string); ok && str != "" {
+					return str
+				}
+			}
+		}
+		// single-key object with string value
+		for _, v := range m {
+			if str, ok := v.(string); ok && str != "" {
+				return str
+			}
+		}
+	}
+	return ""
 }
 
 // extractExternalSSEError checks whether a JSON SSE data payload is an
@@ -1325,8 +1360,12 @@ func parseExternalOpenAIJSON(body io.Reader, callback *KiroStreamCallback) error
 	var resp struct {
 		Choices []struct {
 			Message struct {
-				Content          string `json:"content"`
-				ReasoningContent string `json:"reasoning_content"`
+				Content          json.RawMessage `json:"content"`
+				ReasoningContent json.RawMessage `json:"reasoning_content"`
+				Reasoning        json.RawMessage `json:"reasoning"`
+				ReasoningText    json.RawMessage `json:"reasoning_text"`
+				Thinking         json.RawMessage `json:"thinking"`
+				Thought          json.RawMessage `json:"thought"`
 				ToolCalls        []struct {
 					ID       string `json:"id"`
 					Type     string `json:"type"`
@@ -1353,22 +1392,24 @@ func parseExternalOpenAIJSON(body io.Reader, callback *KiroStreamCallback) error
 
 	sawAssistantOutput := false
 	for _, ch := range resp.Choices {
-		if ch.Message.Content != "" {
+		if txt := rawMessageToString(ch.Message.Content); txt != "" {
 			sawAssistantOutput = true
 			if callback.OnOutput != nil {
 				callback.OnOutput()
 			}
 			if callback.OnText != nil {
-				callback.OnText(ch.Message.Content, false)
+				callback.OnText(txt, false)
 			}
 		}
-		if ch.Message.ReasoningContent != "" {
-			sawAssistantOutput = true
-			if callback.OnOutput != nil {
-				callback.OnOutput()
-			}
-			if callback.OnText != nil {
-				callback.OnText(ch.Message.ReasoningContent, true)
+		for _, raw := range []json.RawMessage{ch.Message.ReasoningContent, ch.Message.Reasoning, ch.Message.ReasoningText, ch.Message.Thinking, ch.Message.Thought} {
+			if txt := rawMessageToString(raw); txt != "" {
+				sawAssistantOutput = true
+				if callback.OnOutput != nil {
+					callback.OnOutput()
+				}
+				if callback.OnText != nil {
+					callback.OnText(txt, true)
+				}
 			}
 		}
 		for _, tc := range ch.Message.ToolCalls {
@@ -1847,6 +1888,11 @@ type ExternalProviderMe struct {
 	TokensUsed       int64   `json:"tokensUsed"`
 	TokenLimit       int64   `json:"tokenLimit"`
 	TokensRemaining  int64   `json:"tokensRemaining"`
+
+	// BillingLimitIsTotal reports that this provider's hard_limit_usd carried
+	// the key's total quota rather than its remaining balance, so the caller
+	// can persist that finding and stop re-deriving a doubled limit.
+	BillingLimitIsTotal bool `json:"billingLimitIsTotal,omitempty"`
 }
 
 // unlimitedCreditSentinel is the threshold above which a reported quota means
@@ -2000,30 +2046,114 @@ func fetchCreditsV1Me(baseURL string, account *config.Account) (*ExternalProvide
 	return me, nil
 }
 
-// fetchCreditsDashboardBilling reads the one-api/new-api dialect. Note that
-// hard_limit_usd there is the key's REMAINING quota (remain_quota/500000), not a
-// ceiling, and /v1/dashboard/billing/usage reports consumed quota as USD×100
+// fetchCreditsDashboardBilling reads the one-api/new-api dialect, where
+// hard_limit_usd is the key's REMAINING quota (remain_quota/500000) rather than
+// a ceiling, and /v1/dashboard/billing/usage reports consumed quota as USD×100
 // (cents). The total limit is therefore derived as remaining + used.
+//
+// # WHY THAT IS NOT ALWAYS TRUE
+//
+// Some forks answer the same field with a fixed ceiling. Measured on
+// token.vietshare.site (2026-09-13) for one key: hard_limit_usd stayed at 60
+// while consumption went from ~0.00 to 60.00. Read as a balance that becomes
+// limit = 60 + 60 = 120, so a fully spent key renders "60.00 / 120, 50% used" —
+// and pool.isQuotaBlocked, which compares used against that limit, keeps
+// routing to an account with no money left until the upstream answers 402.
+//
+// Two signals separate the dialects, cheapest first:
+//
+//   - account.ExtBillingLimitIsTotal: already established (operator or an
+//     earlier probe), so trust it without re-deriving.
+//   - hard_limit_usd <= previously-observed used: a shrinking balance can never
+//     sit at or below what has already been spent, so the value is a ceiling.
+//
+// Neither fires on a healthy one-api key, whose balance stays above its spend
+// until exhaustion; the fallback therefore remains the historical behaviour.
 func fetchCreditsDashboardBilling(baseURL string, account *config.Account) (*ExternalProviderMe, error) {
 	var sub struct {
-		HardLimitUSD float64 `json:"hard_limit_usd"`
-		SoftLimitUSD float64 `json:"soft_limit_usd"`
+		HardLimitUSD       float64 `json:"hard_limit_usd"`
+		SoftLimitUSD       float64 `json:"soft_limit_usd"`
+		SystemHardLimitUSD float64 `json:"system_hard_limit_usd"`
 	}
 	if err := getProviderJSON(account, openAICompatibleEndpoint(baseURL, "/v1/dashboard/billing/subscription"), &sub); err != nil {
 		return nil, err
 	}
-	me := &ExternalProviderMe{CreditsRemaining: sub.HardLimitUSD}
-	if me.CreditsRemaining == 0 {
-		me.CreditsRemaining = sub.SoftLimitUSD
+	reported := sub.HardLimitUSD
+	if reported == 0 {
+		reported = sub.SoftLimitUSD
 	}
+
 	var usage struct {
 		TotalUsage float64 `json:"total_usage"`
 	}
+	var used float64
 	if err := getProviderJSON(account, openAICompatibleEndpoint(baseURL, "/v1/dashboard/billing/usage"), &usage); err == nil {
-		me.CreditsUsed = usage.TotalUsage / 100.0
+		used = usage.TotalUsage / 100.0
 	} else if err != ErrExternalCreditsNotSupported {
 		return nil, err
 	}
+
+	me := &ExternalProviderMe{CreditsUsed: used}
+	if billingLimitIsTotal(account, reported, used) {
+		// A ceiling: remaining is what is left of it, floored at zero so an
+		// overdraft does not read as a negative balance.
+		me.BillingLimitIsTotal = true
+		me.CreditLimit = reported
+		me.CreditsRemaining = reported - used
+		if me.CreditsRemaining < 0 {
+			me.CreditsRemaining = 0
+		}
+	} else {
+		me.CreditsRemaining = reported
+	}
 	normalizeCreditSnapshot(me)
 	return me, nil
+}
+
+// minBillingDeltaUSD is the consumption increase a comparison needs before it
+// can say anything. Below a cent the movement is rounding, and a balance that
+// "failed to shrink" by that much proves nothing.
+const minBillingDeltaUSD = 0.01
+
+// billingLimitIsTotal reports whether hard_limit_usd should be read as a total
+// quota instead of a remaining balance.
+//
+// The discriminator is movement between two refreshes, not the relation between
+// the reported figure and consumption: a one-api balance is legitimately BELOW
+// what has been spent (30 left of a 100 quota after spending 70), so comparing
+// the two only misclassifies healthy keys. What a balance cannot do is stand
+// still while spend rises — every dollar consumed comes out of it.
+//
+// So: given a previous snapshot, the balance reading predicts the reported value
+// dropped by roughly the consumption increase. If it dropped by far less, the
+// prediction is wrong and the field is a ceiling.
+func billingLimitIsTotal(account *config.Account, reported, used float64) bool {
+	if reported <= 0 || reported >= unlimitedCreditSentinel {
+		return false
+	}
+	if account == nil {
+		return false
+	}
+	if account.ExtBillingLimitIsTotal {
+		return true
+	}
+	// ExtCreditsCheckedAt is the only honest marker of a completed earlier
+	// refresh; zeroed credit fields are indistinguishable from a fresh account.
+	if account.ExtCreditsCheckedAt == 0 {
+		return false
+	}
+	// Under the balance reading in force until now, the previous reported value
+	// was stored as the remaining balance.
+	previousReported := account.ExtCreditsRemaining
+	if previousReported <= 0 {
+		return false
+	}
+	spendIncrease := used - account.ExtCreditsUsed
+	if spendIncrease < minBillingDeltaUSD {
+		return false
+	}
+	// Half the increase is the tolerance: it absorbs a concurrent top-up or a
+	// refresh that straddles upstream accounting, while still catching a value
+	// that ignores consumption entirely.
+	return (previousReported - reported) < spendIncrease/2
 }

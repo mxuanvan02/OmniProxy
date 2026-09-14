@@ -13,6 +13,9 @@ import (
 func TestHasAvailableAccountForModelDoesNotAdvanceRoundRobinCursor(t *testing.T) {
 	initTempPoolConfig(t)
 	p := newModelPool(config.Account{ID: "probe-a"}, config.Account{ID: "probe-b"})
+	for _, a := range p.accounts {
+		p.SetModelList(a.ID, []string{"claude-opus-5"})
+	}
 
 	before := atomic.LoadUint64(&p.currentIndex)
 	for i := 0; i < 10; i++ {
@@ -36,6 +39,9 @@ func TestHasAvailableAccountForModelSeparatesSupportFromCapacity(t *testing.T) {
 		config.Account{ID: "cap-exhausted", UsageCurrent: 5, UsageLimit: 5},
 		config.Account{ID: "cap-locked"},
 	)
+	for _, a := range p.accounts {
+		p.SetModelList(a.ID, []string{"claude-opus-5"})
+	}
 	p.mu.Lock()
 	p.cooldowns["cap-cooled"] = time.Now().Add(time.Hour)
 	p.modelLocks["cap-locked"] = map[string]time.Time{"claude-opus-5": time.Now().Add(time.Hour)}
@@ -49,6 +55,9 @@ func TestHasAvailableAccountForModelSeparatesSupportFromCapacity(t *testing.T) {
 	}
 
 	healthy := newModelPool(config.Account{ID: "cap-cooled-2"}, config.Account{ID: "cap-healthy"})
+	for _, a := range healthy.accounts {
+		healthy.SetModelList(a.ID, []string{"claude-opus-5"})
+	}
 	healthy.mu.Lock()
 	healthy.cooldowns["cap-cooled-2"] = time.Now().Add(time.Hour)
 	healthy.mu.Unlock()

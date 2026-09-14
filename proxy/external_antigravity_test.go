@@ -147,11 +147,11 @@ func TestKiroPayloadToAntigravityRequestThinkingBudgetStaysBelowMaxTokens(t *tes
 
 func TestSanitizeAntigravitySchemaStripsRejectedKeys(t *testing.T) {
 	raw := map[string]interface{}{
-		"$schema":    "https://json-schema.org/draft/2020-12/schema",
-		"$id":        "urn:tool",
-		"type":       "object",
-		"default":    map[string]interface{}{},
-		"examples":   []interface{}{"x"},
+		"$schema":  "https://json-schema.org/draft/2020-12/schema",
+		"$id":      "urn:tool",
+		"type":     "object",
+		"default":  map[string]interface{}{},
+		"examples": []interface{}{"x"},
 		"properties": map[string]interface{}{
 			"kind": map[string]interface{}{
 				"type":  "string",
@@ -308,10 +308,10 @@ func TestParseAntigravitySSEEmitsTextToolsAndUsage(t *testing.T) {
 			}
 			text.WriteString(chunk)
 		},
-		OnToolUse:     func(tu KiroToolUse) { tools = append(tools, tu) },
-		OnComplete:    func(in, out int) { inTok, outTok = in, out },
-		OnCacheRead:   func(n int) { cacheRead = n },
-		OnStopReason:  func(reason string) { stopReason = reason },
+		OnToolUse:    func(tu KiroToolUse) { tools = append(tools, tu) },
+		OnComplete:   func(in, out int) { inTok, outTok = in, out },
+		OnCacheRead:  func(n int) { cacheRead = n },
+		OnStopReason: func(reason string) { stopReason = reason },
 	}
 
 	if err := parseAntigravitySSE(strings.NewReader(stream), &KiroPayload{}, callback); err != nil {

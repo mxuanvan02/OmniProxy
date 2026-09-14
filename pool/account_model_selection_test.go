@@ -96,6 +96,7 @@ func TestGetNextForModelHonoursUpstreamOverageSwitch(t *testing.T) {
 		ID: "overage-on", UsageCurrent: 10, UsageLimit: 10, OverageStatus: "ENABLED",
 	})
 
+	p.SetModelList("overage-on", []string{"some-model"})
 	got := p.GetNextForModel("some-model")
 	if got == nil || got.ID != "overage-on" {
 		t.Fatalf("upstream-enabled overage account not selected: %#v", got)
@@ -113,13 +114,12 @@ func TestCountAccountsForModelCountsOnlySupportingAccounts(t *testing.T) {
 	p.SetModelList("opus-2", []string{"claude-opus-5"})
 	p.SetModelList("sonnet-only", []string{"claude-sonnet-5"})
 
-	// opus-1, opus-2 and the uncatalogued account are all eligible; the account
-	// with a known catalog that lacks the model is not.
-	if got := p.CountAccountsForModel("claude-opus-5"); got != 3 {
-		t.Fatalf("CountAccountsForModel(claude-opus-5) = %d, want 3", got)
+	// Unknown catalogs cannot establish support.
+	if got := p.CountAccountsForModel("claude-opus-5"); got != 2 {
+		t.Fatalf("CountAccountsForModel(claude-opus-5) = %d, want 2", got)
 	}
-	if got := p.CountAccountsForModel("claude-sonnet-5"); got != 2 {
-		t.Fatalf("CountAccountsForModel(claude-sonnet-5) = %d, want 2", got)
+	if got := p.CountAccountsForModel("claude-sonnet-5"); got != 1 {
+		t.Fatalf("CountAccountsForModel(claude-sonnet-5) = %d, want 1", got)
 	}
 }
 
@@ -154,6 +154,7 @@ func TestGetNextForModelQuotaExhaustionRespectsAllowOverUsage(t *testing.T) {
 	exhausted := config.Account{ID: "exhausted", UsageCurrent: 10, UsageLimit: 10}
 
 	p := newModelPool(exhausted)
+	p.SetModelList("exhausted", []string{"claude-opus-5"})
 	if got := p.GetNextForModel("claude-opus-5"); got != nil {
 		t.Fatalf("quota-exhausted account was selected: %#v", got)
 	}
@@ -190,6 +191,9 @@ func TestGetNextForModelFindsTheOneHealthyAccount(t *testing.T) {
 		config.Account{ID: "healthy"},
 		config.Account{ID: "model-locked"},
 	)
+	for _, a := range p.accounts {
+		p.SetModelList(a.ID, []string{"claude-opus-5"})
+	}
 	p.mu.Lock()
 	p.cooldowns["cooled"] = time.Now().Add(time.Hour)
 	p.modelLocks["model-locked"] = map[string]time.Time{"claude-opus-5": time.Now().Add(time.Hour)}
@@ -209,6 +213,7 @@ func TestGetNextForModelFindsTheOneHealthyAccount(t *testing.T) {
 func TestGetNextForModelReturnsCopyNotPoolStorage(t *testing.T) {
 	initTempPoolConfig(t)
 	p := newModelPool(config.Account{ID: "acct", AccessToken: "original-token"})
+	p.SetModelList("acct", []string{"claude-opus-5"})
 
 	first := p.GetNextForModel("claude-opus-5")
 	if first == nil {

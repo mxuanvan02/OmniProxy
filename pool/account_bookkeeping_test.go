@@ -265,10 +265,9 @@ func TestGetModelListReturnsCachedCatalogAndEmptyWhenUnknown(t *testing.T) {
 		}
 	}
 
-	// An empty response means "unknown", not "supports nothing": it must not
-	// erase a catalog that was already discovered.
+	// A successful empty discovery replaces the previous catalog.
 	p.SetModelList("acct", nil)
-	if got := p.GetModelList("acct"); len(got) != 2 {
-		t.Fatalf("catalog after empty update = %v, want the previous 2 entries", got)
+	if got := p.GetModelList("acct"); len(got) != 0 {
+		t.Fatalf("catalog after empty update = %v, want empty", got)
 	}
 }

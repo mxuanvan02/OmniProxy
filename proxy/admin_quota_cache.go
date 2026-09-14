@@ -51,13 +51,13 @@ type quotaAccountRow struct {
 	// rows per account are common (Codex primary+secondary, Qoder personal+org).
 	Quotas []quotaRow `json:"quotas"`
 	// Codex (kept for backward compat)
-	CodexPlanType              string `json:"codexPlanType,omitempty"`
-	CodexPrimaryUsedPercent    int    `json:"codexPrimaryUsedPercent,omitempty"`
-	CodexSecondaryUsedPercent  int    `json:"codexSecondaryUsedPercent,omitempty"`
-	CodexPrimaryResetAt        int64  `json:"codexPrimaryResetAt,omitempty"`
-	CodexSecondaryResetAt      int64  `json:"codexSecondaryResetAt,omitempty"`
-	CodexCreditsBalance        *int   `json:"codexCreditsBalance,omitempty"`
-	CodexCreditsUnlimited      bool   `json:"codexCreditsUnlimited,omitempty"`
+	CodexPlanType             string `json:"codexPlanType,omitempty"`
+	CodexPrimaryUsedPercent   int    `json:"codexPrimaryUsedPercent,omitempty"`
+	CodexSecondaryUsedPercent int    `json:"codexSecondaryUsedPercent,omitempty"`
+	CodexPrimaryResetAt       int64  `json:"codexPrimaryResetAt,omitempty"`
+	CodexSecondaryResetAt     int64  `json:"codexSecondaryResetAt,omitempty"`
+	CodexCreditsBalance       *int   `json:"codexCreditsBalance,omitempty"`
+	CodexCreditsUnlimited     bool   `json:"codexCreditsUnlimited,omitempty"`
 	// CodexResetCreditsAvailable is intentionally NOT omitempty: the UI must
 	// be able to render "0" and disable the Bank Reset button. With omitempty
 	// a zero count disappears from the payload, which is indistinguishable

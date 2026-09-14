@@ -2425,7 +2425,9 @@ func (h *Handler) refreshModelsCache() {
 			for _, m := range codexModels {
 				modelIDs = append(modelIDs, m.ModelId)
 			}
-			h.pool.SetModelList(account.ID, modelIDs)
+			if !h.pool.SetModelListForAccount(*account, modelIDs) {
+				continue
+			}
 			h.catalogStatus.record(account.ID, CatalogStatus{
 				State:  CatalogStateVerified,
 				Count:  len(codexModels),
@@ -2485,7 +2487,9 @@ func (h *Handler) refreshModelsCache() {
 		for _, m := range models {
 			modelIDs = append(modelIDs, m.ModelId)
 		}
-		h.pool.SetModelList(account.ID, modelIDs)
+		if !h.pool.SetModelListForAccount(*account, modelIDs) {
+			continue
+		}
 		aggregated = mergeUniqueModels(aggregated, models)
 	}
 
@@ -2519,7 +2523,9 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 		for _, m := range models {
 			modelIDs = append(modelIDs, m.ModelId)
 		}
-		h.pool.SetModelList(account.ID, modelIDs)
+		if !h.pool.SetModelListForAccount(*account, modelIDs) {
+			return fmt.Errorf("account changed during model discovery")
+		}
 		h.modelsCacheMu.Lock()
 		h.cachedModels = mergeUniqueModels(h.cachedModels, models)
 		h.modelsCacheTime = time.Now().Unix()
@@ -2552,7 +2558,9 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 		for _, m := range models {
 			modelIDs = append(modelIDs, m.ModelId)
 		}
-		h.pool.SetModelList(account.ID, modelIDs)
+		if !h.pool.SetModelListForAccount(*account, modelIDs) {
+			return fmt.Errorf("account changed during model discovery")
+		}
 		h.codexRegistryCacheMu.Lock()
 		h.codexRegistryCache = models
 		h.codexRegistryCacheMu.Unlock()
@@ -2586,7 +2594,9 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 		for _, m := range models {
 			modelIDs = append(modelIDs, m.ModelId)
 		}
-		h.pool.SetModelList(account.ID, modelIDs)
+		if !h.pool.SetModelListForAccount(*account, modelIDs) {
+			return fmt.Errorf("account changed during model discovery")
+		}
 		h.modelsCacheMu.Lock()
 		h.cachedModels = mergeUniqueModels(h.cachedModels, models)
 		h.modelsCacheTime = time.Now().Unix()
@@ -2612,7 +2622,9 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 			for _, m := range models {
 				modelIDs = append(modelIDs, m.ModelId)
 			}
-			h.pool.SetModelList(account.ID, modelIDs)
+			if !h.pool.SetModelListForAccount(*account, modelIDs) {
+				return fmt.Errorf("account changed during model discovery")
+			}
 			h.modelsCacheMu.Lock()
 			h.cachedModels = mergeUniqueModels(h.cachedModels, models)
 			h.modelsCacheTime = time.Now().Unix()
@@ -2650,7 +2662,9 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 				logger.Infof("[Capabilities] %s -> %s", account.Email, strings.Join(account.DiscoveredCapabilities, ", "))
 			}
 		}
-		h.pool.SetModelList(account.ID, modelIDs)
+		if !h.pool.SetModelListForAccount(*account, modelIDs) {
+			return fmt.Errorf("account changed during model discovery")
+		}
 		h.modelsCacheMu.Lock()
 		h.cachedModels = mergeUniqueModels(h.cachedModels, models)
 		h.modelsCacheTime = time.Now().Unix()
@@ -2682,7 +2696,9 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 	for _, m := range models {
 		modelIDs = append(modelIDs, m.ModelId)
 	}
-	h.pool.SetModelList(account.ID, modelIDs)
+	if !h.pool.SetModelListForAccount(*account, modelIDs) {
+		return fmt.Errorf("account changed during model discovery")
+	}
 
 	// merge into aggregate cache
 	h.modelsCacheMu.Lock()
@@ -2709,6 +2725,17 @@ func (h *Handler) refreshExternalCredits(account *config.Account) error {
 		return err
 	}
 	now := time.Now().Unix()
+	// Persist the dialect finding before the snapshot: it is what makes the
+	// next refresh read hard_limit_usd correctly even when that refresh sees no
+	// new evidence (a restart, or a key whose spend has not moved since).
+	if me.BillingLimitIsTotal && !account.ExtBillingLimitIsTotal {
+		if err := config.SetAccountExtBillingLimitIsTotal(account.ID, true); err != nil {
+			logger.Warnf("[ExternalCredits] %s: cannot persist billing dialect: %v", account.Email, err)
+		} else {
+			account.ExtBillingLimitIsTotal = true
+			logger.Infof("[ExternalCredits] %s: hard_limit_usd reads as a total quota, not a balance", account.Email)
+		}
+	}
 	if err := config.UpdateAccountExternalCredits(
 		account.ID,
 		me.CreditLimit, me.CreditsRemaining, me.CreditsUsed,
@@ -2795,6 +2822,7 @@ func (h *Handler) apiRefreshAllAccounts(w http.ResponseWriter, r *http.Request) 
 	outcomes := h.refreshAllAccountsFull()
 
 	refreshed, banned, reauthRequired, failed, skipped := 0, 0, 0, 0, 0
+	partial := 0
 	for _, o := range outcomes {
 		switch {
 		case o.Skipped:
@@ -2805,6 +2833,8 @@ func (h *Handler) apiRefreshAllAccounts(w http.ResponseWriter, r *http.Request) 
 			reauthRequired++
 		case o.Banned:
 			banned++
+		case o.Partial:
+			partial++
 		default:
 			refreshed++
 		}
@@ -2815,8 +2845,9 @@ func (h *Handler) apiRefreshAllAccounts(w http.ResponseWriter, r *http.Request) 
 		"banned":         banned,
 		"reauthRequired": reauthRequired,
 		"failed":         failed,
+		"partial":        partial,
 		"skipped":        skipped,
-		"message":        fmt.Sprintf("Refreshed %d, banned %d, re-login required %d, failed %d, skipped %d", refreshed, banned, reauthRequired, failed, skipped),
+		"message":        fmt.Sprintf("Refreshed %d, partial %d, banned %d, re-login required %d, failed %d, skipped %d", refreshed, partial, banned, reauthRequired, failed, skipped),
 	})
 }
 
@@ -3264,11 +3295,11 @@ func mergeUniqueModels(existing []ModelInfo, incoming []ModelInfo) []ModelInfo {
 	merged := make([]ModelInfo, len(existing))
 	copy(merged, existing)
 	for i, model := range merged {
-		indexByID[strings.ToLower(strings.TrimSpace(model.ModelId))] = i
+		indexByID[canonicalCatalogModelID(model.ModelId)] = i
 	}
 
 	for _, model := range incoming {
-		key := strings.ToLower(strings.TrimSpace(model.ModelId))
+		key := canonicalCatalogModelID(model.ModelId)
 		if key == "" {
 			continue
 		}
@@ -3281,6 +3312,18 @@ func mergeUniqueModels(existing []ModelInfo, incoming []ModelInfo) []ModelInfo {
 	}
 
 	return merged
+}
+
+// canonicalCatalogModelID is the identity used for display/catalog merging.
+// Provider namespaces and client-only context suffixes do not identify a
+// different model; model variants and snapshots remain distinct.
+func canonicalCatalogModelID(modelID string) string {
+	id := strings.ToLower(strings.TrimSpace(modelID))
+	if idx := strings.IndexByte(id, '/'); idx >= 0 {
+		id = id[idx+1:]
+	}
+	id = strings.TrimSuffix(id, "[1m]")
+	return strings.TrimSpace(id)
 }
 
 func mergeModelInfo(base ModelInfo, extra ModelInfo) ModelInfo {
@@ -3336,6 +3379,8 @@ func mergeModelInfo(base ModelInfo, extra ModelInfo) ModelInfo {
 		base.TokenLimits = extra.TokenLimits
 	}
 	base.InputTypes = mergeStringLists(base.InputTypes, extra.InputTypes)
+	base.OutputTypes = mergeStringLists(base.OutputTypes, extra.OutputTypes)
+	base.Modalities = mergeStringLists(base.Modalities, extra.Modalities)
 	return base
 }
 
@@ -4288,12 +4333,14 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 					goto skipAccountHandling
 				}
 				lastErr = err
-				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
-				excluded[account.ID] = true
-				continue
+				h.usageTracker.RemoveActive(account.ID)
+				break
 			}
 			h.usageTracker.RemoveActive(account.ID)
 			excluded[account.ID] = true
+			if isTerminalRequestError(err) {
+				break
+			}
 			h.handleAccountFailure(account, err, model)
 			if !messageStarted {
 				continue
@@ -4912,12 +4959,14 @@ func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWrit
 					goto skipNonStreamHandling
 				}
 				lastErr = err
-				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
-				excluded[account.ID] = true
-				continue
+				h.usageTracker.RemoveActive(account.ID)
+				break
 			}
 			h.usageTracker.RemoveActive(account.ID)
 			excluded[account.ID] = true
+			if isTerminalRequestError(err) {
+				break
+			}
 			h.handleAccountFailure(account, err, model)
 			continue
 		}
@@ -5519,12 +5568,14 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 					goto skipOpenAIStreamHandling
 				}
 				lastErr = err
-				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
-				excluded[account.ID] = true
-				continue
+				h.usageTracker.RemoveActive(account.ID)
+				break
 			}
 			h.usageTracker.RemoveActive(account.ID)
 			excluded[account.ID] = true
+			if isTerminalRequestError(err) {
+				break
+			}
 			h.handleAccountFailure(account, err, model)
 			if !responseStarted {
 				continue
@@ -5744,12 +5795,14 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 					goto skipOpenAINonStreamHandling
 				}
 				lastErr = err
-				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
-				excluded[account.ID] = true
-				continue
+				h.usageTracker.RemoveActive(account.ID)
+				break
 			}
 			h.usageTracker.RemoveActive(account.ID)
 			excluded[account.ID] = true
+			if isTerminalRequestError(err) {
+				break
+			}
 			h.handleAccountFailure(account, err, model)
 			continue
 		}
@@ -7972,6 +8025,7 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"machineId":                 a.MachineId,
 			"weight":                    a.Weight,
 			"allowedModels":             a.AllowedModels,
+			"restrictModels":            a.RestrictModels || len(a.AllowedModels) > 0,
 			"overageStatus":             a.OverageStatus,
 			"overageCapability":         a.OverageCapability,
 			"overageCap":                a.OverageCap,
@@ -8134,6 +8188,17 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 		existing.Weight = int(v)
 	}
 	if raw, present := updates["allowedModels"]; present {
+		list, valid := raw.([]interface{})
+		if !valid {
+			http.Error(w, "allowedModels must be an array of strings", http.StatusBadRequest)
+			return
+		}
+		for _, item := range list {
+			if _, ok := item.(string); !ok {
+				http.Error(w, "allowedModels must contain only strings", http.StatusBadRequest)
+				return
+			}
+		}
 		if list, ok := raw.([]interface{}); ok {
 			normalized := make([]string, 0, len(list))
 			seen := make(map[string]bool, len(list))
@@ -8150,6 +8215,18 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 				normalized = append(normalized, model)
 			}
 			existing.AllowedModels = normalized
+			existing.RestrictModels = true
+		}
+	}
+	if raw, present := updates["restrictModels"]; present {
+		value, ok := raw.(bool)
+		if !ok {
+			http.Error(w, "restrictModels must be a boolean", http.StatusBadRequest)
+			return
+		}
+		existing.RestrictModels = value
+		if !value {
+			existing.AllowedModels = []string{}
 		}
 	}
 	if v, ok := updates["proxyURL"].(string); ok {
@@ -11736,6 +11813,7 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 	}
 
 	resp := map[string]interface{}{"success": true}
+	resp["partial"] = result.Partial
 	if result.Info != nil {
 		resp["info"] = result.Info
 	}
@@ -11795,6 +11873,8 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		"expiresAt":         account.ExpiresAt,
 		"machineId":         account.MachineId,
 		"weight":            account.Weight,
+		"allowedModels":     account.AllowedModels,
+		"restrictModels":    account.RestrictModels || len(account.AllowedModels) > 0,
 		"overageStatus":     account.OverageStatus,
 		"overageCapability": account.OverageCapability,
 		"overageCap":        account.OverageCap,
@@ -11866,7 +11946,10 @@ func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id
 		for _, m := range models {
 			modelIDs = append(modelIDs, m.ModelId)
 		}
-		h.pool.SetModelList(id, modelIDs)
+		if !h.pool.SetModelListForAccount(*account, modelIDs) {
+			http.Error(w, "account changed during model discovery", http.StatusConflict)
+			return
+		}
 		h.modelsCacheMu.Lock()
 		h.cachedModels = mergeUniqueModels(h.cachedModels, models)
 		h.modelsCacheTime = time.Now().Unix()
@@ -11910,7 +11993,10 @@ func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id
 	for _, m := range models {
 		modelIDs = append(modelIDs, m.ModelId)
 	}
-	h.pool.SetModelList(id, modelIDs)
+	if !h.pool.SetModelListForAccount(*account, modelIDs) {
+		http.Error(w, "account changed during model discovery", http.StatusConflict)
+		return
+	}
 	h.modelsCacheMu.Lock()
 	h.cachedModels = mergeUniqueModels(h.cachedModels, models)
 	h.modelsCacheTime = time.Now().Unix()

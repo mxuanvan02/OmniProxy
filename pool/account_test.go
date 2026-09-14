@@ -276,6 +276,8 @@ func TestGetNextForModelExcludingSkipsExcludedAccounts(t *testing.T) {
 		config.Account{ID: "a"},
 		config.Account{ID: "b"},
 	)
+	p.SetModelList("a", []string{"model"})
+	p.SetModelList("b", []string{"model"})
 	excluded := map[string]bool{"a": true}
 	for i := 0; i < 5; i++ {
 		acc := p.GetNextForModelExcluding("model", excluded)
@@ -376,6 +378,9 @@ func TestGetNextForModelPrefersAgentRouterForClaude(t *testing.T) {
 		config.Account{ID: "agentrouter", AuthMethod: "agentrouter"},
 		config.Account{ID: "openai", AuthMethod: "external_openai"},
 	)
+	for _, id := range []string{"kiro", "agentrouter", "openai"} {
+		p.SetModelList(id, []string{"claude-opus-5"})
+	}
 
 	got := p.GetNextForModelExcluding("claude-opus-5", nil)
 	if got == nil {
@@ -395,13 +400,13 @@ func TestAgentRouterCatalogFiltersUnsupportedModel(t *testing.T) {
 	}
 }
 
-func TestExternalCatalogMatchesClaudeAliasToSnapshot(t *testing.T) {
+func TestExternalCatalogRejectsDifferentSnapshot(t *testing.T) {
 	p := newTestPool(config.Account{ID: "external", AuthMethod: "external_openai"})
 	p.SetModelList("external", []string{"claude-opus-5-20260801"})
 
 	got := p.GetNextForModelExcluding("claude-opus-5[1m]", nil)
-	if got == nil || got.ID != "external" {
-		t.Fatalf("expected Claude alias to match dated snapshot, got %#v", got)
+	if got != nil {
+		t.Fatalf("undated model must not match dated snapshot, got %#v", got)
 	}
 }
 
@@ -418,16 +423,14 @@ func TestClaudeRoutingPrefersKnownExternalCatalogOverUnknown(t *testing.T) {
 	}
 }
 
-// An unavailable or empty external /v1/models response must not become an
-// authoritative empty catalog. Otherwise the account is filtered before the
-// upstream request, even though it may still serve the requested model.
-func TestExternalEmptyCatalogRemainsEligibleForModelRouting(t *testing.T) {
+// Without a catalog there is no evidence that the account serves the model.
+func TestExternalEmptyCatalogIsIneligibleForModelRouting(t *testing.T) {
 	p := newTestPool(config.Account{ID: "external", AuthMethod: "external_openai"})
 	p.SetModelList("external", nil)
 
 	got := p.GetNextForModelExcluding("gpt-5.6-sol", nil)
-	if got == nil || got.ID != "external" {
-		t.Fatalf("expected external account with unknown catalog to remain eligible, got %#v", got)
+	if got != nil {
+		t.Fatalf("unknown catalog must be ineligible, got %#v", got)
 	}
 }
 
@@ -664,6 +667,8 @@ func TestCacheStickinessIsModelScoped(t *testing.T) {
 		config.Account{ID: "sol-account", Enabled: true},
 		config.Account{ID: "terra-account", Enabled: true},
 	)
+	p.SetModelList("sol-account", []string{"gpt-5.6-sol"})
+	p.SetModelList("terra-account", []string{"gpt-5.6-terra"})
 	p.RecordCacheStickiness("gpt-5.6-sol", "prefix", "sol-account")
 	p.RecordCacheStickiness("gpt-5.6-terra", "prefix", "terra-account")
 

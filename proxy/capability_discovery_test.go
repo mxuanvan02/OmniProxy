@@ -8,8 +8,8 @@ import (
 
 func TestClassifyModelCapabilities(t *testing.T) {
 	cases := []struct {
-		model string
-		want  []string
+		model   string
+		want    []string
 		notWant []string
 	}{
 		{model: "text-embedding-3-large", want: []string{capabilityEmbedding}, notWant: []string{capabilityChat}},

@@ -44,7 +44,7 @@ export async function logout() { try { await request('/logout', {method:'POST'})
 
 export interface Account {
   id:string; email?:string; nickname?:string; provider?:string; providerKind?:string; authMethod?:string; baseUrl?:string; region?:string
-  enabled:boolean; banStatus?:string; banReason?:string; weight?:number; allowedModels?:string[]; modelCount?:number; catalogState?:string; catalogSource?:string
+  enabled:boolean; banStatus?:string; banReason?:string; weight?:number; allowedModels?:string[]; restrictModels?:boolean; modelCount?:number; catalogState?:string; catalogSource?:string
   catalogError?:string; catalogCheckedAt?:number; capabilities?:string[]; discoveredCapabilities?:string[]; requestCount?:number; errorCount?:number
   totalTokens?:number; totalCredits?:number; lastUsed?:number; serviceRequestCount?:number; serviceErrorCount?:number; serviceLastUsed?:number
   usagePercent?:number; usageCurrent?:number; usageLimit?:number; nextResetDate?:string; daysRemaining?:number; subscriptionType?:string

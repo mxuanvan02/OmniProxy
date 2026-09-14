@@ -1,8 +1,8 @@
 package proxy
 
 import (
-	"strings"
 	"omniproxy/config"
+	"strings"
 	"testing"
 )
 

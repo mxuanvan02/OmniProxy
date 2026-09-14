@@ -59,6 +59,7 @@ func TestRecordedErrorCarriesAccountIdentity(t *testing.T) {
 
 	p := accountpool.GetPool()
 	p.Reload()
+	p.SetModelList(accountID, []string{"claude-opus-5"})
 	tracker := &UsageTracker{
 		ringCap:    10,
 		ring:       make([]RequestRecord, 10),

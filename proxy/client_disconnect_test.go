@@ -60,6 +60,9 @@ func TestClientDisconnectDoesNotCooldownPool(t *testing.T) {
 	}
 	p := accountpool.GetPool()
 	p.Reload()
+	for i := 0; i < accounts; i++ {
+		p.SetModelList(fmt.Sprintf("disconnect-%d", i), []string{model})
+	}
 
 	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL), usageTracker: GetUsageTracker()}
 

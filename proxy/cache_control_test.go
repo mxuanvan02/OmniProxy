@@ -19,8 +19,8 @@ func TestUpdateTokensAndCacheFromEventExtractsCacheRead(t *testing.T) {
 			name: "kiro cacheReadInputTokens",
 			event: map[string]interface{}{
 				"usage": map[string]interface{}{
-					"uncachedInputTokens":  float64(100),
-					"cacheReadInputTokens": float64(800),
+					"uncachedInputTokens":   float64(100),
+					"cacheReadInputTokens":  float64(800),
 					"cacheWriteInputTokens": float64(50),
 				},
 			},

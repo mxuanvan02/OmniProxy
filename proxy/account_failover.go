@@ -62,6 +62,22 @@ func clientGone(ctx context.Context, err error) bool {
 	return errors.Is(err, context.Canceled)
 }
 
+// Request-level failures cannot be repaired by changing credentials.
+func isTerminalRequestError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if pool.IsContentBlockedError(err) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	if isQuotaErrorMessage(msg) || isAuthErrorMessage(msg) || pool.IsProviderModelUnavailableError(err) {
+		return false
+	}
+	return hasStatusToken(msg, "400") || hasStatusToken(msg, "413") || hasStatusToken(msg, "422") ||
+		strings.Contains(msg, "invalid_request_error") || strings.Contains(msg, "context_length_exceeded")
+}
+
 func isQuotaErrorMessage(msg string) bool {
 	msg = strings.ToLower(msg)
 	return strings.Contains(msg, "429") ||

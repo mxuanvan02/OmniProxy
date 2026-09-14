@@ -82,17 +82,18 @@ type accountStats struct {
 
 // AccountPool manages the account pool
 type AccountPool struct {
-	mu              sync.RWMutex
-	accounts        []config.Account
-	serviceAccounts []config.Account
-	totalAccounts   int
-	currentIndex    uint64
-	serviceIndex    uint64
-	cooldowns       map[string]time.Time            // account cooldown time
-	errorCounts     map[string]int                  // consecutive error count
-	modelLists      map[string]map[string]bool      // accountID → set of modelIDs (from ListAvailableModels)
-	modelLocks      map[string]map[string]time.Time // accountID → modelName → cooldown until
-	stats           map[string]*accountStats        // accountID → cumulative runtime stats (survives Reload)
+	mu                sync.RWMutex
+	accounts          []config.Account
+	serviceAccounts   []config.Account
+	totalAccounts     int
+	currentIndex      uint64
+	serviceIndex      uint64
+	cooldowns         map[string]time.Time       // account cooldown time
+	errorCounts       map[string]int             // consecutive error count
+	modelLists        map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
+	catalogIdentities map[string]catalogIdentity
+	modelLocks        map[string]map[string]time.Time // accountID → modelName → cooldown until
+	stats             map[string]*accountStats        // accountID → cumulative runtime stats (survives Reload)
 	// cacheSticky maps a model-scoped prompt-cache key
 	// to the account ID that last handled it. Used to pin consecutive turns
 	// from the same conversation to the same upstream account so the
@@ -152,6 +153,10 @@ func GetPool() *AccountPool {
 // Over-quota accounts are dropped unless either the per-account upstream
 // Overages switch (OverageStatus=ENABLED) or the global AllowOverUsage
 // setting permits over-quota routing.
+type catalogIdentity struct {
+	baseURL, authMethod, accessToken, refreshToken, profileARN, region string
+}
+
 func (p *AccountPool) Reload() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -171,6 +176,20 @@ func (p *AccountPool) Reload() {
 		p.stats = make(map[string]*accountStats)
 	}
 	enabled := config.GetEnabledAccounts()
+	identities := make(map[string]catalogIdentity)
+	for _, a := range config.GetAccounts() {
+		identity := catalogIdentity{a.BaseURL, a.AuthMethod, a.AccessToken, a.RefreshToken, a.ProfileArn, a.Region}
+		if previous, ok := p.catalogIdentities[a.ID]; ok && previous != identity {
+			delete(p.modelLists, a.ID)
+		}
+		identities[a.ID] = identity
+	}
+	for id := range p.modelLists {
+		if _, exists := identities[id]; !exists {
+			delete(p.modelLists, id)
+		}
+	}
+	p.catalogIdentities = identities
 	allowOverUsage := config.GetAllowOverUsage()
 	var weighted []config.Account
 	var services []config.Account
@@ -416,14 +435,9 @@ func (p *AccountPool) GetNextExcluding(excluded map[string]bool) *config.Account
 }
 
 // SetModelList caches the model set for an account (called by handler after refresh).
-// An empty response means the catalog is unavailable/unknown, not that the
-// account supports no models. Preserve any previously known catalog and leave
-// a previously uncached account optimistic so a transient /v1/models failure
-// cannot filter it out before the inference request reaches the provider.
+// A successful empty response clears capability; discovery failures must not
+// call this method. Unknown catalogs are never eligible for inference.
 func (p *AccountPool) SetModelList(accountID string, modelIDs []string) {
-	if len(modelIDs) == 0 {
-		return
-	}
 	set := make(map[string]bool, len(modelIDs))
 	for _, id := range modelIDs {
 		set[strings.ToLower(strings.TrimSpace(id))] = true
@@ -431,6 +445,22 @@ func (p *AccountPool) SetModelList(accountID string, modelIDs []string) {
 	p.mu.Lock()
 	p.modelLists[accountID] = set
 	p.mu.Unlock()
+}
+
+// SetModelListForAccount rejects discovery completed for an obsolete connection.
+func (p *AccountPool) SetModelListForAccount(account config.Account, modelIDs []string) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	identity := catalogIdentity{account.BaseURL, account.AuthMethod, account.AccessToken, account.RefreshToken, account.ProfileArn, account.Region}
+	if current, ok := p.catalogIdentities[account.ID]; !ok || current != identity {
+		return false
+	}
+	set := make(map[string]bool, len(modelIDs))
+	for _, id := range modelIDs {
+		set[strings.ToLower(strings.TrimSpace(id))] = true
+	}
+	p.modelLists[account.ID] = set
+	return true
 }
 
 // GetModelList returns cached model IDs for the account (for admin API).
@@ -450,14 +480,23 @@ func (p *AccountPool) GetModelList(accountID string) []string {
 }
 
 // accountHasModel checks if the account supports the requested model. A missing
-// catalog is treated optimistically during cold start, but once a catalog has
-// been loaded it is authoritative for every account type, including external
-// OpenAI-compatible providers.
+// catalog cannot establish capability. Permission and an exact catalog match
+// are both required for every account type.
 func (p *AccountPool) accountHasModel(accountID, model string) bool {
 	requested := normalizeCatalogModelID(model)
 	for i := range p.accounts {
-		if p.accounts[i].ID != accountID || len(p.accounts[i].AllowedModels) == 0 {
+		if p.accounts[i].ID != accountID {
 			continue
+		}
+		// A concrete request must not be redirected to another model by an
+		// account mapping. Model changes belong to explicit fallback combos.
+		for source, target := range p.accounts[i].ModelMappings {
+			if normalizeCatalogModelID(source) == requested && strings.TrimSpace(target) != "" && normalizeCatalogModelID(target) != requested {
+				return false
+			}
+		}
+		if !p.accounts[i].RestrictModels && len(p.accounts[i].AllowedModels) == 0 {
+			break
 		}
 		allowed := false
 		for _, allowedModel := range p.accounts[i].AllowedModels {
@@ -473,14 +512,14 @@ func (p *AccountPool) accountHasModel(accountID, model string) bool {
 	}
 	list, ok := p.modelLists[accountID]
 	if !ok {
-		return true // cold start: catalog not loaded yet
+		return false // Capability must be established before routing inference.
 	}
 	if len(list) == 0 {
 		return false
 	}
 	for catalogModel := range list {
 		candidate := normalizeCatalogModelID(catalogModel)
-		if candidate == requested || strings.HasPrefix(candidate, requested+"-") {
+		if candidate == requested {
 			return true
 		}
 	}
@@ -535,7 +574,7 @@ func isExternalAuthMethod(authMethod string) bool {
 
 // GetNextForModel returns the next available account supporting the given model.
 // model should be the actual model name with thinking suffix removed.
-// If no account has model list data, behaves like GetNext (optimistic routing).
+// Accounts without model list data are ineligible.
 func (p *AccountPool) GetNextForModel(model string) *config.Account {
 	return p.GetNextForModelExcluding(model, nil)
 }

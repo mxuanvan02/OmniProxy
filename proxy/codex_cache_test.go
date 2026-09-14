@@ -17,26 +17,26 @@ func TestCodexSSEForwardsCachedTokens(t *testing.T) {
 		wantFired     bool
 	}{
 		{
-			name: "response.completed with cached_tokens",
-			data: `{"type":"response.completed","response":{"usage":{"input_tokens":1500,"output_tokens":42,"input_tokens_details":{"cached_tokens":1200}}}}`,
+			name:          "response.completed with cached_tokens",
+			data:          `{"type":"response.completed","response":{"usage":{"input_tokens":1500,"output_tokens":42,"input_tokens_details":{"cached_tokens":1200}}}}`,
 			wantCacheRead: 1200,
 			wantFired:     true,
 		},
 		{
-			name: "response.completed without cached_tokens (no details)",
-			data: `{"type":"response.completed","response":{"usage":{"input_tokens":1500,"output_tokens":42}}}`,
+			name:          "response.completed without cached_tokens (no details)",
+			data:          `{"type":"response.completed","response":{"usage":{"input_tokens":1500,"output_tokens":42}}}`,
 			wantCacheRead: 0,
 			wantFired:     false,
 		},
 		{
-			name: "response.completed with zero cached_tokens",
-			data: `{"type":"response.completed","response":{"usage":{"input_tokens":1500,"output_tokens":42,"input_tokens_details":{"cached_tokens":0}}}}`,
+			name:          "response.completed with zero cached_tokens",
+			data:          `{"type":"response.completed","response":{"usage":{"input_tokens":1500,"output_tokens":42,"input_tokens_details":{"cached_tokens":0}}}}`,
 			wantCacheRead: 0,
 			wantFired:     false,
 		},
 		{
-			name: "delta event does not fire OnCacheRead",
-			data: `{"type":"response.output_text.delta","delta":"hi"}`,
+			name:          "delta event does not fire OnCacheRead",
+			data:          `{"type":"response.output_text.delta","delta":"hi"}`,
 			wantCacheRead: 0,
 			wantFired:     false,
 		},

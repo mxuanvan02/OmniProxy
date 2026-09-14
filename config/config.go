@@ -162,6 +162,8 @@ type Account struct {
 	// enforces this before consulting the discovered upstream catalog, so a
 	// cold-start or stale catalog cannot bypass an operator restriction.
 	AllowedModels []string `json:"allowedModels"`
+	// RestrictModels allows an empty allowlist to explicitly deny all models.
+	RestrictModels bool `json:"restrictModels,omitempty"`
 
 	// CacheControlPassthrough overrides the global
 	// Settings.CacheControlPassthrough switch for this account only.
@@ -322,6 +324,22 @@ type Account struct {
 	ExtKeyMasked        string  `json:"extKeyMasked,omitempty"`
 	ExtLastUsedAt       int64   `json:"extLastUsedAt,omitempty"`
 	ExtCreditsCheckedAt int64   `json:"extCreditsCheckedAt,omitempty"`
+
+	// ExtBillingLimitIsTotal records that this provider's
+	// /v1/dashboard/billing/subscription reports hard_limit_usd as the key's
+	// TOTAL quota, not its remaining balance.
+	//
+	// one-api/new-api answer that field with remain_quota/500000 — a balance
+	// that shrinks as the key is spent — and the limit is derived as
+	// remaining+used. Some forks instead answer a fixed ceiling. Reading a
+	// ceiling as a balance doubles the derived limit (a spent 60/60 key renders
+	// as 60/120, 50% used), which also keeps the pool routing to an account
+	// that has no money left.
+	//
+	// Set automatically once a refresh observes hard_limit_usd standing still
+	// while consumption rises, and settable by an operator who already knows
+	// the dialect. Off by default so one-api semantics stay intact.
+	ExtBillingLimitIsTotal bool `json:"extBillingLimitIsTotal,omitempty"`
 
 	// Codex (ChatGPT subscription) usage tracking.
 	// Populated from JWT claims at login/import and from x-codex-*
@@ -1376,6 +1394,25 @@ func UpdateAccountOverageStatus(id, status, capability string, cap, rate, curren
 			if checkedAt > 0 {
 				cfg.Accounts[i].OverageCheckedAt = checkedAt
 			}
+			return Save()
+		}
+	}
+	return nil
+}
+
+// SetAccountExtBillingLimitIsTotal records which way this provider's
+// hard_limit_usd should be read. Kept separate from UpdateAccountExternalCredits
+// because the finding is a property of the provider's dialect, not of any one
+// credit snapshot: it must survive refreshes that carry no new evidence.
+func SetAccountExtBillingLimitIsTotal(id string, isTotal bool) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			if cfg.Accounts[i].ExtBillingLimitIsTotal == isTotal {
+				return nil
+			}
+			cfg.Accounts[i].ExtBillingLimitIsTotal = isTotal
 			return Save()
 		}
 	}

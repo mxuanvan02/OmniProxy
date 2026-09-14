@@ -15,6 +15,7 @@ import (
 // the same information.
 type accountRefreshResult struct {
 	Message   string
+	Partial   bool
 	BanStatus string
 	Info      *config.AccountInfo
 }
@@ -56,7 +57,7 @@ func (h *Handler) refreshAccountFull(account *config.Account) (accountRefreshRes
 			msg = "Gommo balance refreshed; catalog unavailable: " + modelsErr.Error()
 		}
 		h.pool.Reload()
-		return accountRefreshResult{Message: msg}, nil
+		return accountRefreshResult{Message: msg, Partial: modelsErr != nil}, nil
 	}
 
 	if isServiceAccount(account) {
@@ -89,7 +90,7 @@ func (h *Handler) refreshAccountFull(account *config.Account) (accountRefreshRes
 		} else if creditsErr != nil {
 			msg = "Models refreshed; credits unavailable: " + creditsErr.Error()
 		}
-		return accountRefreshResult{Message: msg}, nil
+		return accountRefreshResult{Message: msg, Partial: modelsErr != nil || creditsErr != nil}, nil
 	}
 
 	// Antigravity accounts authenticate with Google OAuth and have no Kiro
@@ -282,6 +283,7 @@ type accountRefreshOutcome struct {
 	Banned    bool
 	Reauth    bool
 	Skipped   bool
+	Partial   bool
 	Err       error
 }
 
@@ -302,6 +304,7 @@ func (h *Handler) refreshAllAccountsFull() []accountRefreshOutcome {
 	var wg sync.WaitGroup
 
 	for i := range accounts {
+		i := i
 		wg.Add(1)
 		safeGo("refreshAll/account", func() {
 			defer wg.Done()
@@ -327,7 +330,9 @@ func (h *Handler) refreshAllAccountsFull() []accountRefreshOutcome {
 				return
 			}
 
-			if _, err := h.refreshAccountFull(account); err != nil {
+			result, err := h.refreshAccountFull(account)
+			out.Partial = result.Partial
+			if err != nil {
 				out.Err = err
 				logger.Warnf("[RefreshAll] %s: %v", label, err)
 			}

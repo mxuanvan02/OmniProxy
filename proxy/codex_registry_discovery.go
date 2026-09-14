@@ -9,8 +9,9 @@
 // with client_version=0.153.4 (2026-09-07). The endpoint requires
 // client_version query parameter (400 without it) and returns different
 // model sets depending on the version:
-//   0.142.5 -> 3 models (gpt-5.5, gpt-5.4-mini, codex-auto-review)
-//   0.153.4 -> 8 models (adds gpt-6-astra, gpt-5.6-sol/terra/luna, gpt-reserve)
+//
+//	0.142.5 -> 3 models (gpt-5.5, gpt-5.4-mini, codex-auto-review)
+//	0.153.4 -> 8 models (adds gpt-6-astra, gpt-5.6-sol/terra/luna, gpt-reserve)
 //
 // The static list in codexSubscriptionModels() serves as fallback when the
 // registry is unreachable, ensuring the proxy always has a routable model

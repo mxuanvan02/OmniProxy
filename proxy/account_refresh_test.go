@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"omniproxy/config"
@@ -8,6 +9,94 @@ import (
 	"sync/atomic"
 	"testing"
 )
+
+func TestBulkRefreshIsolatesAccountFailures(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		key := r.Header.Get("Authorization")
+		if key == "Bearer broken" || (key == "Bearer partial" && r.URL.Path == "/api/me") {
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":40100,"message":"token is malformed"}`))
+			return
+		}
+		if r.URL.Path == "/v1/models" {
+			_, _ = w.Write([]byte(`{"data":[{"id":"claude-opus-5"}]}`))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+	for _, id := range []string{"partial", "broken", "healthy"} {
+		if err := config.AddAccount(config.Account{ID: id, Enabled: true, AuthMethod: externalAuthMethod, AccessToken: id, BaseURL: server.URL}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p}
+	rec := httptest.NewRecorder()
+	h.apiRefreshAllAccounts(rec, httptest.NewRequest(http.MethodPost, "/admin/api/accounts/refresh-all", nil))
+	var result struct {
+		Refreshed int `json:"refreshed"`
+		Partial int `json:"partial"`
+		Failed int `json:"failed"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || result.Refreshed != 1 || result.Partial != 1 || result.Failed != 1 {
+		t.Fatalf("unexpected bulk result: %d %s", rec.Code, rec.Body.String())
+	}
+	for _, id := range []string{"partial", "healthy"} {
+		if len(p.GetModelList(id)) != 1 {
+			t.Errorf("account %s catalog was not refreshed", id)
+		}
+	}
+}
+
+func TestRefreshAccountReportsPartialWhenBillingRejectsToken(t *testing.T) {
+	if err := config.Init(t.TempDir() + "/config.json"); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"claude-opus-5"}]}`))
+		case "/api/me":
+			w.WriteHeader(http.StatusUnauthorized)
+			_, _ = w.Write([]byte(`{"code":40100,"message":"invalid token: token is malformed: token contains an invalid number of segments"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	account := config.Account{ID: "partial-billing", Enabled: true, AuthMethod: externalAuthMethod, AccessToken: "test-key", BaseURL: server.URL}
+	if err := config.AddAccount(account); err != nil {
+		t.Fatal(err)
+	}
+	p := accountpool.GetPool()
+	p.Reload()
+	h := &Handler{pool: p}
+	rec := httptest.NewRecorder()
+	h.apiRefreshAccount(rec, httptest.NewRequest(http.MethodPost, "/accounts/partial-billing/refresh", nil), account.ID)
+	var result struct {
+		Success bool `json:"success"`
+		Partial bool `json:"partial"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || !result.Success || !result.Partial {
+		t.Fatalf("expected partial success: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if a := p.GetByID(account.ID); a == nil || !a.Enabled {
+		t.Fatal("billing rejection disabled the inference account")
+	}
+}
 
 // TestRefreshAllCoversExternalAccountsLikePerAccountButton locks in the parity
 // fix between the two refresh entry points.

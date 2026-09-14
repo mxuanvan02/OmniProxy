@@ -11,6 +11,7 @@ import (
 // single transient blip.
 func TestRecordErrorLocksModelOnlyAfterThreeConsecutiveErrors(t *testing.T) {
 	p := newModelPool(config.Account{ID: "a"})
+	p.SetModelList("a", []string{"claude-opus-5", "claude-sonnet-5"})
 
 	for i := 1; i <= 2; i++ {
 		p.RecordError("a", false, "claude-opus-5")
@@ -47,6 +48,7 @@ func TestRecordErrorQuotaLocksModelImmediatelyForAnHour(t *testing.T) {
 // model must not take the account's other models out of rotation.
 func TestRecordErrorLocksOnlyTheFailingModel(t *testing.T) {
 	p := newModelPool(config.Account{ID: "a"})
+	p.SetModelList("a", []string{"claude-opus-5", "claude-sonnet-5"})
 	p.RecordError("a", true, "claude-opus-5")
 
 	if got := p.GetNextForModel("claude-sonnet-5"); got == nil || got.ID != "a" {
@@ -81,6 +83,7 @@ func TestRecordErrorWithEmptyModelSetsAccountLevelCooldown(t *testing.T) {
 // one further error instead of three.
 func TestRecordSuccessClearsCooldownAndResetsErrorCounter(t *testing.T) {
 	p := newModelPool(config.Account{ID: "a"})
+	p.SetModelList("a", []string{"claude-opus-5"})
 	for i := 0; i < 3; i++ {
 		p.RecordError("a", false, "")
 	}
@@ -111,6 +114,7 @@ func TestRecordSuccessClearsCooldownAndResetsErrorCounter(t *testing.T) {
 
 func TestRecordSuccessClearsOnlyTheNamedModelLock(t *testing.T) {
 	p := newModelPool(config.Account{ID: "a"})
+	p.SetModelList("a", []string{"claude-opus-5", "claude-sonnet-5"})
 	p.RecordError("a", true, "claude-opus-5")
 	p.RecordError("a", true, "claude-sonnet-5")
 
@@ -144,6 +148,7 @@ func TestRecordSuccessRemovesEmptyModelLockMap(t *testing.T) {
 // explicit success being recorded.
 func TestExpiredModelLockNoLongerBlocksRouting(t *testing.T) {
 	p := newModelPool(config.Account{ID: "a"})
+	p.SetModelList("a", []string{"claude-opus-5"})
 	p.mu.Lock()
 	p.modelLocks["a"] = map[string]time.Time{"claude-opus-5": time.Now().Add(-time.Second)}
 	p.mu.Unlock()
@@ -155,6 +160,7 @@ func TestExpiredModelLockNoLongerBlocksRouting(t *testing.T) {
 
 func TestExpiredAccountCooldownNoLongerBlocksRouting(t *testing.T) {
 	p := newModelPool(config.Account{ID: "a"})
+	p.SetModelList("a", []string{"claude-opus-5"})
 	p.mu.Lock()
 	p.cooldowns["a"] = time.Now().Add(-time.Second)
 	p.mu.Unlock()
@@ -169,6 +175,7 @@ func TestExpiredAccountCooldownNoLongerBlocksRouting(t *testing.T) {
 // after the operator was told it was reset.
 func TestClearCooldownRemovesAccountCooldownAndModelLocks(t *testing.T) {
 	p := newModelPool(config.Account{ID: "a"})
+	p.SetModelList("a", []string{"claude-opus-5", "claude-sonnet-5"})
 	p.RecordError("a", true, "claude-opus-5")
 	p.RecordError("a", true, "")
 

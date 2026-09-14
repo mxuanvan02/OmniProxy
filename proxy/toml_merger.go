@@ -29,15 +29,15 @@ type ConfigLine struct {
 
 // MergeState tracks the configuration state during merging
 type MergeState struct {
-	ActiveModel            string
-	ActiveProvider         string
-	ActiveReasoningEffort  string
-	SubagentModel          string
-	HasOmniProxySection    bool
-	HasSubagentSection     bool
-	OmniProxySectionEnd    int
-	SubagentSectionEnd     int
-	Lines                  []ConfigLine
+	ActiveModel           string
+	ActiveProvider        string
+	ActiveReasoningEffort string
+	SubagentModel         string
+	HasOmniProxySection   bool
+	HasSubagentSection    bool
+	OmniProxySectionEnd   int
+	SubagentSectionEnd    int
+	Lines                 []ConfigLine
 }
 
 // parseTomlValue strips an inline comment and matching surrounding quotes from

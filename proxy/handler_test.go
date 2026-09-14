@@ -165,6 +165,7 @@ func TestClaudeStreamConvertsLateThinkingToVisibleText(t *testing.T) {
 	}
 	p := accountpool.GetPool()
 	p.Reload()
+	p.SetModelList("late-thinking-external", []string{"gpt-5.6-sol"})
 	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL)}
 	payload := &KiroPayload{OriginalModel: "gpt-5.6-sol"}
 	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
@@ -271,6 +272,7 @@ func runClaudeExternalSSE(t *testing.T, accountID, sse string, thinking bool) []
 	}
 	p := accountpool.GetPool()
 	p.Reload()
+	p.SetModelList(accountID, []string{"gpt-5.6-sol"})
 	h := &Handler{pool: p, promptCache: newPromptCacheTracker(defaultPromptCacheTTL)}
 	payload := &KiroPayload{OriginalModel: "gpt-5.6-sol"}
 	payload.ConversationState.CurrentMessage.UserInputMessage = KiroUserInputMessage{
@@ -444,6 +446,8 @@ func TestClaudeStreamFailsOverAfterEmptyExternalSSE(t *testing.T) {
 
 	p := accountpool.GetPool()
 	p.Reload()
+	p.SetModelList("kiro-empty", []string{"claude-opus-5"})
+	p.SetModelList("opus-working", []string{"claude-opus-5"})
 	tracker := &UsageTracker{
 		ringCap:    10,
 		ring:       make([]RequestRecord, 10),
@@ -569,6 +573,8 @@ func TestClaudeNonStreamRetriesNextAccountAfterPreResponseFailure(t *testing.T) 
 
 	p := accountpool.GetPool()
 	p.Reload()
+	p.SetModelList("first", []string{"claude-sonnet-4.5"})
+	p.SetModelList("second", []string{"claude-sonnet-4.5"})
 	h := &Handler{
 		pool:        p,
 		promptCache: newPromptCacheTracker(defaultPromptCacheTTL),

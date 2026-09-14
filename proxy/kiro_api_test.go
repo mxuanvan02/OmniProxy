@@ -2,8 +2,8 @@ package proxy
 
 import (
 	"io"
-	"omniproxy/config"
 	"net/http"
+	"omniproxy/config"
 	"path/filepath"
 	"strings"
 	"testing"

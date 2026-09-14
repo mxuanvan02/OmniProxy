@@ -3,11 +3,11 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"omniproxy/auth"
 	"omniproxy/config"
 	accountpool "omniproxy/pool"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"

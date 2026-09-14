@@ -34,6 +34,7 @@ let collapsedGroups = loadCollapsedGroups();
 // saved as an empty list, which the pool reads as unrestricted.
 let detailAllowedAccountId = '';
 let detailAllowedSelected = new Set();
+let detailRestrictModels = false;
 let detailAllowedCatalog = [];
 let detailAllowedLoading = false;
 let detailAllowedError = '';
@@ -762,16 +763,18 @@ let detailAllowedError = '';
       const res = await api('/accounts/' + id + '/refresh', { method: 'POST' });
       const d = await res.json();
       if (d.success) {
-        loadAccounts();
-        if (isBanned) toast(d.message || t('accounts.reauthDone'), 'success');
+        await loadAccounts();
+        if (d.partial) toast(d.message || t('accounts.refreshFailed'), 'warning');
+        else if (isBanned) toast(d.message || t('accounts.reauthDone'), 'success');
         else if (d.message) toast(t('accounts.refreshed') + ': ' + d.message, 'success');
       } else {
         toastError(t('accounts.refreshFailed') + ': ' + (d.error || ''));
       }
     } catch (e) {
       toastError(t('accounts.refreshFailed'));
+    } finally {
+      if (card) card.classList.remove('loading');
     }
-    if (card) card.classList.remove('loading');
   }
   // refreshAccountToken forces an OAuth refresh-token flow for the account.
   // Used by the "Refresh token" button in the detail panel. Returns true
@@ -1130,6 +1133,7 @@ let detailAllowedError = '';
     try {
       const res = await api('/accounts/refresh-all', { method: 'POST' });
       const d = await res.json();
+      if (!res.ok || d.success === false) throw new Error(d.error || t('common.failed'));
       dismiss();
       loadAccounts();
       const msg = d.message || t('accounts.refreshAllDone', d.refreshed || 0);
@@ -1137,6 +1141,8 @@ let detailAllowedError = '';
       const reauthRequired = d.reauthRequired || 0;
       if (reauthRequired > 0) {
         toast(msg + ' (' + reauthRequired + ' ' + t('accounts.reauthRequired') + ')', 'warning');
+      } else if (d.failed > 0 || d.partial > 0) {
+        toast(msg, 'warning');
       } else if (banned > 0) {
         toast(msg + ' (' + banned + ' banned)', 'warning');
       } else {
@@ -1244,6 +1250,7 @@ let detailAllowedError = '';
     // so opening a detail view never blocks on an upstream model probe.
     detailAllowedAccountId = id;
     detailAllowedSelected = new Set((a.allowedModels || []).map(m => String(m).trim()).filter(Boolean));
+    detailRestrictModels = Boolean(a.restrictModels || detailAllowedSelected.size);
     detailAllowedCatalog = [];
     detailAllowedLoading = false;
     detailAllowedError = '';
@@ -1520,7 +1527,7 @@ let detailAllowedError = '';
       '</div></div>';
   }
   function allowedModelsSummaryText() {
-    return detailAllowedSelected.size === 0
+    return !detailRestrictModels
       ? t('detail.allowedModelsUnrestricted')
       : t('detail.allowedModelsCount', detailAllowedSelected.size);
   }
@@ -1557,15 +1564,19 @@ let detailAllowedError = '';
   function syncAllowedModelsFromDom() {
     const boxes = Array.from(qsa('.allowedModelBox'));
     if (boxes.length === 0) return;
+    detailRestrictModels = true;
     detailAllowedSelected = new Set(boxes.filter(b => b.checked).map(b => b.value));
     const summary = $('allowedModelsSummary');
     if (summary) summary.textContent = allowedModelsSummaryText();
   }
+  let allowedModelsRequestVersion = 0;
   async function loadAllowedModelsCatalog(id, live) {
+    const version = ++allowedModelsRequestVersion;
     detailAllowedLoading = true;
     detailAllowedError = '';
     renderAllowedModels();
     let catalog = [];
+    let error = '';
     try {
       const res = await api('/accounts/' + id + '/models' + (live ? '' : '/cached'));
       const d = await res.json();
@@ -1575,24 +1586,25 @@ let detailAllowedError = '';
           .map(s => String(s).trim())
           .filter(Boolean);
       } else {
-        detailAllowedError = t('detail.loadFailed') + (d && d.error ? ': ' + d.error : '');
+        error = t('detail.loadFailed') + (d && d.error ? ': ' + d.error : '');
       }
     } catch (e) {
-      detailAllowedError = t('detail.loadFailed');
+      error = t('detail.loadFailed');
     }
-    detailAllowedLoading = false;
     // The modal may have moved to another account while this was in flight.
-    if (detailAllowedAccountId !== id) return;
+    if (detailAllowedAccountId !== id || version !== allowedModelsRequestVersion) return;
+    detailAllowedLoading = false;
+    detailAllowedError = error;
     detailAllowedCatalog = catalog;
     renderAllowedModels();
   }
   function clearAllowedModels() {
+    detailRestrictModels = false;
     detailAllowedSelected = new Set();
     renderAllowedModels();
   }
   async function saveAllowedModels(id) {
-    syncAllowedModelsFromDom();
-    await putAccount(id, { allowedModels: Array.from(detailAllowedSelected) }, t('detail.saved'));
+    await putAccount(id, { allowedModels: Array.from(detailAllowedSelected), restrictModels: detailRestrictModels }, t('detail.saved'));
   }
   async function generateMachineId() {
     try {

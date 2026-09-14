@@ -335,6 +335,7 @@ func setupResponsesTestHandler(t *testing.T) (*Handler, func()) {
 	}
 	p := accountpool.GetPool()
 	p.Reload()
+	p.SetModelList("test-account", []string{"claude-sonnet-4.5"})
 	h := &Handler{
 		pool:        p,
 		promptCache: newPromptCacheTracker(defaultPromptCacheTTL),
@@ -415,6 +416,7 @@ func TestResponsesNonStreamRoundTrip(t *testing.T) {
 func TestResponsesNonStreamImageUsageEstimateIsBounded(t *testing.T) {
 	h, cleanup := setupResponsesTestHandler(t)
 	defer cleanup()
+	h.pool.SetModelList("test-account", []string{"gpt-5.6-sol"})
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

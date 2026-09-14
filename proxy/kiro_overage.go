@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"omniproxy/config"
-	"omniproxy/logger"
 	"net/http"
 	neturl "net/url"
+	"omniproxy/config"
+	"omniproxy/logger"
 	"strings"
 	"time"
 )

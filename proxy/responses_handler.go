@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"omniproxy/config"
-	"omniproxy/logger"
 	"omniproxy/pool"
 	"strings"
 	"time"
@@ -137,8 +136,8 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	}
 
 	thinkingCfg := config.GetThinkingConfig()
-	originalModel := stripThinkingSuffix(req.Model, thinkingCfg.Suffix)
-	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	originalModel := stripThinkingSuffix(openaiReq.Model, thinkingCfg.Suffix)
+	actualModel, thinking := ParseModelAndThinking(openaiReq.Model, thinkingCfg.Suffix)
 	openaiReq.Model = actualModel
 
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(openaiReq)
@@ -287,12 +286,14 @@ func (h *Handler) handleResponsesNonStream(
 					goto responsesNonStreamSuccess
 				}
 				lastErr = err
-				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
-				excluded[account.ID] = true
-				continue
+				h.usageTracker.RemoveActive(account.ID)
+				break
 			}
 			h.usageTracker.RemoveActive(account.ID)
 			excluded[account.ID] = true
+			if isTerminalRequestError(err) {
+				break
+			}
 			h.handleAccountFailure(account, err, model)
 			continue
 		}
@@ -677,14 +678,16 @@ func (h *Handler) handleResponsesStream(
 					goto responsesStreamSuccess
 				}
 				lastErr = err
-				logger.Warnf("[ContentBlocked] %s: upstream refused payload for model %s — skipping account (err: %s)", account.Email, model, truncateForLog(err.Error()))
-				excluded[account.ID] = true
-				continue
+				h.usageTracker.RemoveActive(account.ID)
+				break
 			}
 			if !responseStarted {
 				lastErr = err
 				h.usageTracker.RemoveActive(account.ID)
 				excluded[account.ID] = true
+				if isTerminalRequestError(err) {
+					break
+				}
 				h.handleAccountFailure(account, err, model)
 				continue
 			}

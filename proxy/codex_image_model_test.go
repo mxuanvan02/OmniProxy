@@ -10,10 +10,10 @@ import (
 // be forwarded, otherwise the upstream rejects the request.
 func TestCodexImageToolModel_RejectsTextModels(t *testing.T) {
 	cases := []struct {
-		name      string
+		name       string
 		configured string
-		requested string
-		want      string
+		requested  string
+		want       string
 	}{
 		{"empty falls back to default", "", "", defaultCodexImageToolModel},
 		{"configured image model wins", "gpt-image-1", "", "gpt-image-1"},

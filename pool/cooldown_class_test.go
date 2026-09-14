@@ -96,6 +96,7 @@ func TestRateLimitDressedAsForbiddenStaysRateLimited(t *testing.T) {
 // account on one 503 would turn a momentary upstream blip into lost capacity.
 func TestTransientErrorStillTakesThreeStrikes(t *testing.T) {
 	p := newModelPool(config.Account{ID: "flaky"})
+	p.SetModelList("flaky", []string{"claude-opus-5"})
 
 	for i := 1; i <= 2; i++ {
 		p.RecordErrorClass("flaky", errors.New(liveTransientErr), "claude-opus-5")
@@ -151,6 +152,7 @@ func TestAuthCooldownIsLongEnoughToStopTheRetryStorm(t *testing.T) {
 // legacy boolean API and the classified one must agree on scoping rules.
 func TestClassifiedErrorLocksOnlyTheFailingModel(t *testing.T) {
 	p := newModelPool(config.Account{ID: "a"})
+	p.SetModelList("a", []string{"claude-opus-5", "claude-sonnet-5"})
 	p.RecordErrorClass("a", errors.New(liveQuotaErr), "claude-opus-5")
 
 	if got := p.GetNextForModel("claude-sonnet-5"); got == nil || got.ID != "a" {
@@ -162,6 +164,7 @@ func TestClassifiedErrorLocksOnlyTheFailingModel(t *testing.T) {
 // preserved exactly, or this refactor silently changes unrelated paths.
 func TestLegacyRecordErrorBehaviourUnchanged(t *testing.T) {
 	quota := newModelPool(config.Account{ID: "q"})
+	quota.SetModelList("q", []string{"m"})
 	quota.RecordError("q", true, "m")
 	if got := quota.GetNextForModel("m"); got != nil {
 		t.Fatal("legacy quota error no longer cools down immediately")
@@ -174,6 +177,7 @@ func TestLegacyRecordErrorBehaviourUnchanged(t *testing.T) {
 	}
 
 	plain := newModelPool(config.Account{ID: "p"})
+	plain.SetModelList("p", []string{"m"})
 	for i := 1; i <= 2; i++ {
 		plain.RecordError("p", false, "m")
 		if got := plain.GetNextForModel("m"); got == nil {
@@ -190,6 +194,7 @@ func TestLegacyRecordErrorBehaviourUnchanged(t *testing.T) {
 // recovers stays parked for the full window.
 func TestRecordSuccessClearsClassifiedCooldown(t *testing.T) {
 	p := newModelPool(config.Account{ID: "a"})
+	p.SetModelList("a", []string{"claude-opus-5"})
 	p.RecordErrorClass("a", errors.New(liveAuthErr), "claude-opus-5")
 	if got := p.GetNextForModel("claude-opus-5"); got != nil {
 		t.Fatal("precondition: the model should be locked")

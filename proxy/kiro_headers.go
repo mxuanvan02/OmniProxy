@@ -4,8 +4,8 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"net/http"
-	"strings"
 	"omniproxy/config"
+	"strings"
 )
 
 const (

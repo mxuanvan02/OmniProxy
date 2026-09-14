@@ -65,7 +65,19 @@ describe('AccountsView model restrictions', () => {
 
     await waitFor(() => expect(api.updateAccount).toHaveBeenCalledWith(
       'external-1',
-      expect.objectContaining({ allowedModels: [] }),
+      expect.objectContaining({ allowedModels: [], restrictModels: false }),
+    ))
+  })
+
+  it('preserves a restricted empty allowlist when reopening and saving', async () => {
+    render(<AccountsView accounts={[{...account, allowedModels: [], restrictModels: true}]} onReload={vi.fn()}/>)
+    fireEvent.click(screen.getByRole('button', { name: /Zen/ }))
+    fireEvent.click(screen.getByRole('button', { name: 'Sửa cấu hình' }))
+    await screen.findByRole('checkbox', { name: 'model-a' })
+    expect((screen.getByRole('checkbox', { name: 'Chỉ cho phép các model đã chọn' }) as HTMLInputElement).checked).toBe(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Lưu thay đổi' }))
+    await waitFor(() => expect(api.updateAccount).toHaveBeenCalledWith(
+      'external-1', expect.objectContaining({ allowedModels: [], restrictModels: true }),
     ))
   })
 })

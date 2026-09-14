@@ -176,6 +176,7 @@ func newCacheUsageFlowHandler(t *testing.T, accountID string) (*Handler, *UsageT
 
 	p := accountpool.GetPool()
 	p.Reload()
+	p.SetModelList("cache-flow-"+strings.ReplaceAll(accountID, " ", "-"), []string{"claude-sonnet-4.5"})
 	tracker := &UsageTracker{
 		ringCap:    10,
 		ring:       make([]RequestRecord, 10),

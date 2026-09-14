@@ -354,8 +354,8 @@ func TestGetModelListRoundTripsCatalog(t *testing.T) {
 	}
 
 	p.SetModelList("acc", nil)
-	if got := p.GetModelList("acc"); len(got) != 2 {
-		t.Fatalf("empty update blanked a known catalog: %v", got)
+	if got := p.GetModelList("acc"); len(got) != 0 {
+		t.Fatalf("empty update retained stale catalog: %v", got)
 	}
 }
 

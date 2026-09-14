@@ -13,27 +13,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// modelAliases lists model names that need an explicit redirect — dated snapshots,
-// cross-family legacy IDs (claude-3-*), and non-Anthropic fallbacks.
-// Plain dash → dot version normalization is handled by claudeVersionPattern below,
-// so new versions (e.g. claude-opus-4-8) require no code changes.
-type modelMapping struct {
-	key   string
-	value string
-}
-
-var modelAliases = []modelMapping{
-	{"claude-sonnet-4-20250514", "claude-sonnet-4"},
-	{"claude-3-5-sonnet", "claude-sonnet-4.5"},
-	{"claude-3-opus", "claude-sonnet-4.5"},
-	{"claude-3-sonnet", "claude-sonnet-4"},
-	{"claude-3-haiku", "claude-haiku-4.5"},
-	{"gpt-4-turbo", "claude-sonnet-4.5"},
-	{"gpt-4o", "claude-sonnet-4.5"},
-	{"gpt-4", "claude-sonnet-4.5"},
-	{"gpt-3.5-turbo", "claude-sonnet-4.5"},
-}
-
 // claudeVersionPattern normalizes "claude-{family}-N-M" to "claude-{family}-N.M".
 // Minor is capped at 1-2 digits with a \b boundary so dated snapshots
 // (claude-sonnet-4-20250514) are not accidentally rewritten.
@@ -59,8 +38,9 @@ func stripClaudeContextSuffix(model string) string {
 // stripped; models that legitimately contain "/" deeper (none currently)
 // are unaffected. Returns the string unchanged if there is no "/".
 func stripProviderPrefix(model string) string {
+	model = strings.TrimSpace(model)
 	if i := strings.IndexByte(model, '/'); i > 0 {
-		return model[i+1:]
+		return strings.TrimSpace(model[i+1:])
 	}
 	return model
 }
@@ -111,13 +91,6 @@ func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 	}
 	model = stripClaudeContextSuffix(model)
 	lower = strings.ToLower(model)
-
-	// 1) Explicit aliases: dated snapshots, cross-family legacy IDs, non-Anthropic fallbacks.
-	for _, m := range modelAliases {
-		if strings.Contains(lower, m.key) {
-			return m.value, thinking
-		}
-	}
 
 	// 2) Format normalization: claude-{family}-N-M → claude-{family}-N.M.
 	//    New versions (claude-opus-4-8, etc.) flow through here without code changes.

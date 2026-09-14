@@ -352,11 +352,10 @@ func (h *Handler) handleComboRequest(
 		resolvedModel, _ := ParseModelAndThinking(modelStr, thinkingCfg.Suffix)
 		if resolvedModel != modelStr {
 			logger.Debugf("[COMBO] %s model=%s resolved to %s", comboName, modelStr, resolvedModel)
-			modelStr = resolvedModel
 		}
 
 		// DIAG: log pool model lists for this model to check if any account supports it
-		poolModelCount := h.pool.CountAccountsForModel(modelStr)
+		poolModelCount := h.pool.CountAccountsForModel(resolvedModel)
 		totalAccounts := h.pool.Count()
 		logger.Warnf("[COMBO] %s model=%s pool_check total_accounts=%d supporting_model=%d",
 			comboName, modelStr, totalAccounts, poolModelCount)
