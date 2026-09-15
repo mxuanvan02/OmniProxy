@@ -174,6 +174,14 @@ type Account struct {
 	// unreachable even though the dialect is correct.
 	ResponsesPath string `json:"responsesPath,omitempty"`
 
+	// AnthropicPath overrides the upstream Messages path for this account.
+	// Empty means the Anthropic default "/v1/messages".
+	//
+	// It exists for the same reason ChatPath and ResponsesPath do: resale
+	// gateways commonly nest the route ("/anthropic/v1/messages"), and the
+	// dialect alone would leave those accounts unreachable.
+	AnthropicPath string `json:"anthropicPath,omitempty"`
+
 	// ModelMappings translates public model IDs to provider-specific IDs for
 	// this account. Routing and usage continue to use the public ID; only the
 	// outbound external-provider request is rewritten.

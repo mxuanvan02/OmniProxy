@@ -64,6 +64,8 @@ func TestImportExternalProviderNormalizesDialect(t *testing.T) {
 	}{
 		{"responses", "responses", "responses"},
 		{"responses uppercase", "Responses", "responses"},
+		{"anthropic", "anthropic", "anthropic"},
+		{"anthropic uppercase", "Anthropic", "anthropic"},
 		{"chat explicit", "chat", ""},
 		{"unknown value", "grpc", ""},
 		{"empty", "", ""},
@@ -117,6 +119,52 @@ func TestImportExternalProviderStoresResponsesPathOnlyForResponses(t *testing.T)
 				t.Fatalf("ResponsesPath = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// anthropicPath is the Messages counterpart of responsesPath, with the same rule:
+// it only means something on its own dialect, and the stored value is trimmed
+// because the adapter composes it into a URL.
+func TestImportExternalProviderStoresAnthropicPathOnlyForAnthropic(t *testing.T) {
+	cases := []struct {
+		name    string
+		dialect string
+		path    string
+		want    string
+	}{
+		{"anthropic keeps a trimmed path", "anthropic", "  /anthropic/v1/messages  ", "/anthropic/v1/messages"},
+		{"responses drops the anthropic path", "responses", "/anthropic/v1/messages", ""},
+		{"chat drops the anthropic path", "chat", "/anthropic/v1/messages", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := dialectTestServer(t)
+			body := `{"baseUrl":"` + srv.URL + `","apiKey":"sk-x","name":"ap","externalApiDialect":"` +
+				tc.dialect + `","anthropicPath":"` + tc.path + `"}`
+			importExternalProvider(t, body)
+
+			if got := storedAccount(t, srv.URL).AnthropicPath; got != tc.want {
+				t.Fatalf("AnthropicPath = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The two path overrides are independent: a Responses account that arrives with
+// an anthropic path must not have it stored, and vice versa. Getting this wrong
+// leaves a field in the config that reads as if it were in use.
+func TestImportExternalProviderKeepsTheTwoPathOverridesApart(t *testing.T) {
+	srv := dialectTestServer(t)
+	body := `{"baseUrl":"` + srv.URL + `","apiKey":"sk-x","name":"both","externalApiDialect":"anthropic",` +
+		`"anthropicPath":"/anthropic/v1/messages","responsesPath":"/codex/responses"}`
+	importExternalProvider(t, body)
+
+	account := storedAccount(t, srv.URL)
+	if account.AnthropicPath != "/anthropic/v1/messages" {
+		t.Fatalf("AnthropicPath = %q", account.AnthropicPath)
+	}
+	if account.ResponsesPath != "" {
+		t.Fatalf("ResponsesPath = %q on an anthropic account", account.ResponsesPath)
 	}
 }
 

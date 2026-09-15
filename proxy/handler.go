@@ -10711,6 +10711,7 @@ func (h *Handler) apiImportExternalProvider(w http.ResponseWriter, r *http.Reque
 		ProxyURL           string `json:"proxyURL"`
 		ExternalAPIDialect string `json:"externalApiDialect"`
 		ResponsesPath      string `json:"responsesPath"`
+		AnthropicPath      string `json:"anthropicPath"`
 		Test               bool   `json:"test"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -10754,15 +10755,24 @@ func (h *Handler) apiImportExternalProvider(w http.ResponseWriter, r *http.Reque
 	// already treats an unrecognised value as chat, but storing "grpc" would leave
 	// a value in the config that reads as if it meant something. AgentRouter
 	// shares this endpoint and speaks no OpenAI dialect, so the field is dropped
-	// there; responsesPath is meaningful only on the Responses dialect, and is
+	// there; each path override is kept only on the dialect that reads it, and is
 	// trimmed because the adapter composes it into a URL.
 	externalAPIDialectValue := ""
-	if authMethod == externalAuthMethod && strings.EqualFold(strings.TrimSpace(body.ExternalAPIDialect), "responses") {
-		externalAPIDialectValue = "responses"
+	if authMethod == externalAuthMethod {
+		switch strings.ToLower(strings.TrimSpace(body.ExternalAPIDialect)) {
+		case "responses":
+			externalAPIDialectValue = "responses"
+		case "anthropic":
+			externalAPIDialectValue = "anthropic"
+		}
 	}
 	responsesPath := ""
-	if externalAPIDialectValue == "responses" {
+	anthropicPath := ""
+	switch externalAPIDialectValue {
+	case "responses":
 		responsesPath = strings.TrimSpace(body.ResponsesPath)
+	case "anthropic":
+		anthropicPath = strings.TrimSpace(body.AnthropicPath)
 	}
 
 	account := config.Account{
@@ -10782,6 +10792,7 @@ func (h *Handler) apiImportExternalProvider(w http.ResponseWriter, r *http.Reque
 		// treats ExpiresAt==0 as "always valid".
 		ExternalAPIDialect: externalAPIDialectValue,
 		ResponsesPath:      responsesPath,
+		AnthropicPath:      anthropicPath,
 	}
 
 	// Optional live validation: a tiny ping lets the UI confirm the pair works

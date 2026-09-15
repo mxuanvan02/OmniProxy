@@ -30,18 +30,22 @@ import (
 // account overrides it, mirroring defaultExternalChatPath for chat.
 const defaultExternalResponsesPath = "/v1/responses"
 
-// externalAPIDialect reports which outbound OpenAI dialect an account uses:
-// "responses" when explicitly selected, otherwise "chat". Unrecognised values
-// fall back to chat rather than erroring, so a hand-edited config can never take
-// an account offline over a typo.
+// externalAPIDialect reports which outbound dialect an account uses:
+// "responses" or "anthropic" when explicitly selected, otherwise "chat".
+// Unrecognised values fall back to chat rather than erroring, so a hand-edited
+// config can never take an account offline over a typo.
 func externalAPIDialect(account *config.Account) string {
 	if account == nil {
 		return "chat"
 	}
-	if strings.EqualFold(strings.TrimSpace(account.ExternalAPIDialect), "responses") {
+	switch {
+	case strings.EqualFold(strings.TrimSpace(account.ExternalAPIDialect), "responses"):
 		return "responses"
+	case strings.EqualFold(strings.TrimSpace(account.ExternalAPIDialect), "anthropic"):
+		return "anthropic"
+	default:
+		return "chat"
 	}
-	return "chat"
 }
 
 // externalResponsesPath returns the upstream Responses path for an account: the

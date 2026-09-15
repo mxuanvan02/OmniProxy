@@ -344,29 +344,7 @@ func kiroPayloadToOpenAIRequest(payload *KiroPayload, account *config.Account) (
 		return nil, fmt.Errorf("nil payload")
 	}
 
-	modelID := strings.TrimSpace(payload.OriginalModel)
-	if modelID == "" {
-		// Fallback to the Kiro-mapped model ID if the caller didn't preserve
-		// the original. This is suboptimal for external providers (they'd
-		// receive a Kiro alias like "claude-sonnet-4.5" instead of "gpt-4o")
-		// but never empty.
-		modelID = strings.TrimSpace(payload.ConversationState.CurrentMessage.UserInputMessage.ModelID)
-	}
-	if modelID == "" {
-		modelID = "auto"
-	}
-	// Strip internal routing prefixes that external providers don't understand.
-	// Kiro accounts advertise models with a "kr/" prefix (and OmniProxy uses
-	// "omniproxy/" internally for combo routing); external OpenAI-compatible
-	// providers receive the bare model ID so their model registry can match it.
-	modelID = stripInternalModelPrefix(modelID)
-	// External providers (e.g. bddevlab) use dash-form model IDs
-	// ("claude-opus-4-8") while OmniProxy's ParseModelAndThinking normalises
-	// to dot-form ("claude-opus-4.8"). Revert to dash-form so the external
-	// provider's model registry can match. Only applies to claude-* models;
-	// other model families (gpt-*, o1-*, etc.) pass through unchanged.
-	modelID = dotToDashClaudeVersion(modelID)
-	modelID = applyExternalModelMapping(account, modelID)
+	modelID := externalWireModelID(payload, account)
 	// Do not discover models on the inference hot path. A provider's /v1/models
 	// endpoint is optional and may be slow or unavailable even when
 	// /v1/chat/completions is healthy. Resolving a model here would delay every
@@ -522,6 +500,39 @@ func kiroPayloadToOpenAIRequest(payload *KiroPayload, account *config.Account) (
 	}
 
 	return body, nil
+}
+
+// externalWireModelID resolves the model ID an external gateway is asked for.
+// Every external dialect needs the same answer, and each one used to build it
+// separately, so the chain lives here instead of once per adapter.
+//
+// The order is: the ID the client asked for, then the Kiro-mapped ID the
+// payload carries (suboptimal for an external provider — it would receive a
+// Kiro alias like "claude-sonnet-4.5" instead of "gpt-4o" — but never empty),
+// then the literal "auto".
+func externalWireModelID(payload *KiroPayload, account *config.Account) string {
+	if payload == nil {
+		return "auto"
+	}
+	modelID := strings.TrimSpace(payload.OriginalModel)
+	if modelID == "" {
+		modelID = strings.TrimSpace(payload.ConversationState.CurrentMessage.UserInputMessage.ModelID)
+	}
+	if modelID == "" {
+		modelID = "auto"
+	}
+	// Strip internal routing prefixes that external providers don't understand.
+	// Kiro accounts advertise models with a "kr/" prefix (and OmniProxy uses
+	// "omniproxy/" internally for combo routing); external OpenAI-compatible
+	// providers receive the bare model ID so their model registry can match it.
+	modelID = stripInternalModelPrefix(modelID)
+	// External providers (e.g. bddevlab) use dash-form model IDs
+	// ("claude-opus-4-8") while OmniProxy's ParseModelAndThinking normalises
+	// to dot-form ("claude-opus-4.8"). Revert to dash-form so the external
+	// provider's model registry can match. Only applies to claude-* models;
+	// other model families (gpt-*, o1-*, etc.) pass through unchanged.
+	modelID = dotToDashClaudeVersion(modelID)
+	return applyExternalModelMapping(account, modelID)
 }
 
 // applyExternalModelMapping rewrites a public model ID to the model ID used by
@@ -1798,14 +1809,17 @@ func dispatchChat(ctx context.Context, account *config.Account, payload *KiroPay
 	}
 	if isExternalAccount(account) {
 		// The external pool is heterogeneous: most resale gateways serve chat
-		// completions only, so the Responses dialect is opt-in per account
-		// rather than a default.
+		// completions only, so the other dialects are opt-in per account rather
+		// than a default.
 		//
 		// This arm must stay after the AgentRouter one above: AgentRouter
 		// accounts also satisfy isExternalAccount, so moving it earlier would
 		// silently reroute them into the Responses adapter.
-		if externalAPIDialect(account) == "responses" {
+		switch externalAPIDialect(account) {
+		case "responses":
 			return CallExternalOpenAIResponses(ctx, account, payload, callback)
+		case "anthropic":
+			return CallExternalAnthropic(ctx, account, payload, callback)
 		}
 		return CallExternalOpenAI(ctx, account, payload, callback)
 	}
