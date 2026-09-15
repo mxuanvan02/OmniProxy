@@ -432,6 +432,12 @@ let detailAllowedError = '';
     } else {
       if (!a.hasToken)
         out.push('<span class="badge badge-error">' + escapeHtml(t('accounts.noToken')) + '</span>');
+      // An account whose owner still has a Google verification step pending can
+      // reach the upstream and is answered 403 every time, so it serves nothing.
+      // Without this it wore the green "Normal" badge and the card looked
+      // healthy, which is exactly how the state went unnoticed.
+      else if (a.antigravityVerifyUrl)
+        out.push('<span class="badge badge-warning">' + escapeHtml(t('accounts.needsVerification')) + '</span>');
       else
         out.push('<span class="badge badge-success">' + escapeHtml(t('accounts.normal')) + '</span>');
       out.push(a.enabled

@@ -45,6 +45,8 @@
   "accounts.expired": "已过期",
   "accounts.disabled": "已禁用",
   "accounts.normal": "正常",
+  "accounts.needsVerification": "需要验证",
+  "accounts.needsVerificationHint": "在账户所有者完成验证步骤之前，Google 会拒绝请求。打开验证页面即可解除。",
   "accounts.enabled": "已启用",
   "accounts.banned": "已封禁",
   "accounts.suspended": "已暂停",

@@ -45,6 +45,8 @@
   "accounts.expired": "Expired",
   "accounts.disabled": "Disabled",
   "accounts.normal": "Active",
+  "accounts.needsVerification": "Needs verification",
+  "accounts.needsVerificationHint": "Google is refusing requests until the account owner completes a verification step. Open the verification page to clear it.",
   "accounts.enabled": "Enabled",
   "accounts.banned": "Banned",
   "accounts.suspended": "Suspended",

@@ -45,6 +45,8 @@
   "accounts.expired": "Đã hết hạn",
   "accounts.disabled": "Đã tắt",
   "accounts.normal": "Hoạt động",
+  "accounts.needsVerification": "Cần xác thực",
+  "accounts.needsVerificationHint": "Google đang từ chối request cho tới khi chủ tài khoản hoàn tất bước xác minh. Mở trang xác thực để gỡ trạng thái này.",
   "accounts.enabled": "Đã bật",
   "accounts.banned": "Đã cấm",
   "accounts.suspended": "Đã đình chỉ",
