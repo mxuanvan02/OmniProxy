@@ -2837,11 +2837,11 @@ let detailAllowedError = '';
       '<input type="text" id="externalName" placeholder="' + escapeAttr(t('external.namePlaceholder')) + '" /></div>' +
       '<div class="form-group"><label>' + escapeHtml(t('external.dialectLabel')) + '</label>' +
       '<select id="externalDialect">' +
-      '<option value="chat" selected>' + escapeHtml(t('external.dialectChat')) + '</option>' +
-      '<option value="responses">' + escapeHtml(t('external.dialectResponses')) + '</option>' +
+      '<option value="responses" selected>' + escapeHtml(t('external.dialectResponses')) + '</option>' +
+      '<option value="chat">' + escapeHtml(t('external.dialectChat')) + '</option>' +
       '</select>' +
       '<span class="help-block text-xs">' + escapeHtml(t('external.dialectHelp')) + '</span></div>' +
-      '<div class="form-group hidden" id="externalResponsesPathGroup"><label>' +
+      '<div class="form-group" id="externalResponsesPathGroup"><label>' +
       escapeHtml(t('external.responsesPathLabel')) + ' <span class="muted-text">(' + escapeHtml(t('common.optional')) + ')</span></label>' +
       '<input type="text" id="externalResponsesPath" class="font-mono" placeholder="' + escapeAttr(t('external.responsesPathPlaceholder')) + '" /></div>' +
       '<div class="form-group"><label class="flex items-center gap-2"><input type="checkbox" id="externalTest" checked /> ' + escapeHtml(t('external.testNow')) + '</label>' +

@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -25,6 +26,12 @@ import (
 
 	"omniproxy/config"
 )
+
+// errExternalDialectUnsupported marks a failure that proves the account's
+// configured dialect is absent upstream, rather than that this request is bad.
+// It is what lets dispatchChat replay the turn on the chat dialect without
+// parsing an error string. Wrapped, so errors.Is still matches it.
+var errExternalDialectUnsupported = errors.New("external upstream does not implement this dialect")
 
 // defaultExternalResponsesPath is the OpenAI Responses path used unless the
 // account overrides it, mirroring defaultExternalChatPath for chat.
@@ -129,11 +136,16 @@ func CallExternalOpenAIResponses(ctx context.Context, account *config.Account, p
 		// The status stays in the message so the pool's auth-failure handling can
 		// disable the account on 401/403/402, exactly as on the chat dialect.
 		//
-		// There is deliberately no fallback to the chat path: a gateway answering
-		// 404 here means the dialect is misconfigured, and silently retrying as
-		// chat would hide that while corrupting the token accounting this dialect
-		// exists to improve.
-		return fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, account.Email, truncateErrBody(errBody))
+		// A gateway that has no Responses endpoint at all proves the account's
+		// dialect is wrong rather than that this request is. That verdict is
+		// returned as a typed error so dispatchChat can replay the turn on the
+		// chat dialect; the message is unchanged, because the caller that
+		// classifies statuses still reads it.
+		upstreamErr := fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, account.Email, truncateErrBody(errBody))
+		if externalResponsesDialectUnsupported(resp, errBody) {
+			return fmt.Errorf("%w: %w", errExternalDialectUnsupported, upstreamErr)
+		}
+		return upstreamErr
 	}
 
 	// Withhold whitespace-only text so a turn that never produces real content

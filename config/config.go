@@ -1435,6 +1435,27 @@ func UpdateAccountOverageStatus(id, status, capability string, cap, rate, curren
 	return nil
 }
 
+// SetAccountExternalAPIDialect records which outbound dialect an account's
+// gateway turned out to speak. Written as a single field rather than through an
+// account snapshot because the value is learned at request time, under
+// concurrency, and a snapshot would carry fields another goroutine is editing
+// at that moment. Skips the write when the value is unchanged, so learning
+// costs one config write per account rather than one per request.
+func SetAccountExternalAPIDialect(id, dialect string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			if cfg.Accounts[i].ExternalAPIDialect == dialect {
+				return nil
+			}
+			cfg.Accounts[i].ExternalAPIDialect = dialect
+			return Save()
+		}
+	}
+	return nil
+}
+
 // SetAccountExtBillingLimitIsTotal records which way this provider's
 // hard_limit_usd should be read. Kept separate from UpdateAccountExternalCredits
 // because the finding is a property of the provider's dialect, not of any one

@@ -113,6 +113,48 @@ func externalWAFBlocked(resp *http.Response, body []byte) bool {
 	return false
 }
 
+// externalResponsesDialectUnsupported distinguishes "this gateway has no
+// Responses endpoint" from a request the gateway understood and rejected.
+//
+// A body that names a resource — the model, the key, the request itself — is
+// describing the request whatever the status line says, so it is checked first
+// and always refuses. Gateways answer a bad model with 404 as readily as with
+// 400, and reading that as proof the dialect is absent would silently move a
+// working account onto a dialect nobody asked for.
+//
+// Past that screen, 404 and 405 name the path itself as the problem. A 400
+// usually means a malformed field, so there the body has to name the route too.
+func externalResponsesDialectUnsupported(resp *http.Response, body []byte) bool {
+	if resp == nil {
+		return false
+	}
+	text := strings.ToLower(string(body))
+	for _, marker := range []string{
+		"model_not_found", "model not found", "unknown model", "invalid model",
+		"no such model", "unsupported model", "does not exist",
+	} {
+		if strings.Contains(text, marker) {
+			return false
+		}
+	}
+	switch resp.StatusCode {
+	case http.StatusNotFound, http.StatusMethodNotAllowed:
+		return true
+	case http.StatusBadRequest:
+	default:
+		return false
+	}
+	for _, marker := range []string{
+		"unknown url", "no route", "unrecognized request url",
+		"unsupported path", "no such path", "not found",
+	} {
+		if strings.Contains(text, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // Resale gateways that broker a pool of upstream OAuth sessions (apikey.click,
 // measured 2026-09-10) intermittently answer a valid API key with HTTP 401
 // "Encountered invalidated oauth token" / "Could not parse your authentication
@@ -1815,13 +1857,7 @@ func dispatchChat(ctx context.Context, account *config.Account, payload *KiroPay
 		// This arm must stay after the AgentRouter one above: AgentRouter
 		// accounts also satisfy isExternalAccount, so moving it earlier would
 		// silently reroute them into the Responses adapter.
-		switch externalAPIDialect(account) {
-		case "responses":
-			return CallExternalOpenAIResponses(ctx, account, payload, callback)
-		case "anthropic":
-			return CallExternalAnthropic(ctx, account, payload, callback)
-		}
-		return CallExternalOpenAI(ctx, account, payload, callback)
+		return dispatchExternalDialect(ctx, account, payload, callback)
 	}
 	// Native Kiro is the only destination that rejects structured tool history,
 	// and it is reached by falling through every branch above. Shaping here
