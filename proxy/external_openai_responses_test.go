@@ -2,6 +2,9 @@ package proxy
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -20,6 +23,18 @@ func initDialectTestConfig(t *testing.T) {
 	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
 	}
+}
+
+// responsesDialectPayload is the Phase 01 golden payload with a model attached.
+//
+// The golden fixture deliberately leaves the model empty so it pins the Codex
+// dialect's own default model. A generic gateway has no default to fall back on,
+// so the builder rejects a model-less payload for this dialect by design — every
+// test that wants to reach the network has to name a model.
+func responsesDialectPayload() *KiroPayload {
+	payload := goldenResponsesPayload()
+	payload.OriginalModel = "gpt-5.6-terra"
+	return payload
 }
 
 func TestExternalAPIDialect(t *testing.T) {
@@ -66,23 +81,33 @@ func TestExternalResponsesPath(t *testing.T) {
 	}
 }
 
-// The stub returns a distinguishable error, so this test proves the branch routes
-// to the Responses adapter rather than the chat one without needing a live server.
+// dispatchChat must send a Responses-dialect account to the Responses path. The
+// upstream records every path it is asked for, so this proves the routing rather
+// than trusting an error string: a chat-dialect account reaching the same server
+// would ask for /v1/chat/completions.
 func TestDispatchChatRoutesResponsesDialect(t *testing.T) {
 	initDialectTestConfig(t)
+
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path)
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{}}}\n\n")
+	}))
+	defer srv.Close()
+
 	account := &config.Account{
 		ID:                 "dialect-route",
 		AuthMethod:         "external_openai",
-		BaseURL:            "https://example.invalid",
+		BaseURL:            srv.URL,
 		AccessToken:        "sk-test",
 		ExternalAPIDialect: "responses",
 	}
-	err := dispatchChat(context.Background(), account, &KiroPayload{}, &KiroStreamCallback{})
-	if err == nil {
-		t.Fatal("expected the responses stub to return an error")
+	if err := dispatchChat(context.Background(), account, responsesDialectPayload(), &KiroStreamCallback{}); err != nil {
+		t.Fatalf("dispatchChat: %v", err)
 	}
-	if !strings.Contains(err.Error(), "responses dialect") {
-		t.Fatalf("dispatchChat routed to the wrong adapter: %v", err)
+	if len(paths) != 1 || paths[0] != "/v1/responses" {
+		t.Fatalf("upstream saw %v, want exactly [/v1/responses]", paths)
 	}
 }
 
@@ -90,8 +115,14 @@ func TestDispatchChatRoutesResponsesDialect(t *testing.T) {
 // accounts satisfy isExternalAccount too. The Responses branch therefore has to
 // sit after the AgentRouter arm; if it is moved earlier, every AgentRouter
 // account that happens to carry the dialect field is silently rerouted and the
-// positive routing test still passes. Pin the precedence by asserting the
-// Responses stub is NOT what these accounts reach.
+// positive routing test still passes. Pin the precedence by asserting these
+// accounts do NOT reach the Responses adapter.
+//
+// The discriminator is the Responses adapter's own error prefix
+// ("external responses call"), which the chat path ("external call ") and the
+// other adapters never emit. A path-recording server would not work here: the
+// misrouted account fails model resolution before any request is sent, so no
+// path would be recorded either way.
 func TestDialectFieldDoesNotRerouteOtherAccountTypes(t *testing.T) {
 	initDialectTestConfig(t)
 	cases := []struct {
@@ -112,7 +143,7 @@ func TestDialectFieldDoesNotRerouteOtherAccountTypes(t *testing.T) {
 				ExternalAPIDialect: "responses",
 			}
 			err := dispatchChat(context.Background(), account, &KiroPayload{}, &KiroStreamCallback{})
-			if err != nil && strings.Contains(err.Error(), "responses dialect") {
+			if err != nil && strings.Contains(err.Error(), "external responses call") {
 				t.Fatalf("%s account was rerouted into the Responses adapter: %v", tc.authMethod, err)
 			}
 		})
