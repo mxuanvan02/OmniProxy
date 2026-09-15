@@ -46,19 +46,30 @@ export interface Account {
   id:string; email?:string; nickname?:string; provider?:string; providerKind?:string; authMethod?:string; baseUrl?:string; region?:string
   enabled:boolean; banStatus?:string; banReason?:string; weight?:number; allowedModels?:string[]; restrictModels?:boolean; modelCount?:number; catalogState?:string; catalogSource?:string
   catalogError?:string; catalogCheckedAt?:number; capabilities?:string[]; discoveredCapabilities?:string[]; requestCount?:number; errorCount?:number
-  totalTokens?:number; totalCredits?:number; lastUsed?:number; serviceRequestCount?:number; serviceErrorCount?:number; serviceLastUsed?:number
+  totalTokens?:number; totalCredits?:number; lastUsed?:number; serviceRequestCount?:number; serviceErrorCount?:number; serviceQuotaErrorCount?:number; serviceLastUsed?:number
   usagePercent?:number; usageCurrent?:number; usageLimit?:number; nextResetDate?:string; daysRemaining?:number; subscriptionType?:string
   extCreditLimit?:number; extCreditsRemaining?:number; extCreditsUsed?:number; extCreditsCheckedAt?:number; extStatus?:string
   codexPlanType?:string; codexPrimaryUsedPercent?:number; codexSecondaryUsedPercent?:number; codexPrimaryResetAt?:number; codexSecondaryResetAt?:number
   [key:string]: unknown
 }
 export interface Status { accounts:number; available:number; totalAccounts:number; totalRequests:number; successRequests:number; failedRequests:number; totalTokens:number; totalCredits:number; availableModels:number; modelIds:string[]; uptime:number }
-export interface PeriodSummary { requests:number; promptTokens:number; completionTokens:number; realCost?:number; cost?:number; effectiveTokens?:number; cacheReadTokens?:number }
-export interface UsageStats extends PeriodSummary { totalRequests:number; totalPromptTokens:number; totalCompletionTokens:number; totalRealCost?:number; totalCost:number; totalEffectiveTokens?:number; totalCacheReadTokens?:number; activeRequests?:Array<{provider:string; model:string; accountId:string}>; recentRequests?:Record<string,unknown>[]; byModel:Record<string,PeriodSummary>; byAccount:Record<string,PeriodSummary>; byAPIKey:Record<string,PeriodSummary>; byEndpoint:Record<string,PeriodSummary>; accountNames?:Record<string,string> }
+export interface PeriodSummary { requests:number; promptTokens:number; completionTokens:number; realCost?:number; cost?:number; effectiveTokens?:number; cacheReadTokens?:number; errors?:number }
+/** One entry of the tracker's 500-record ring, newest first. `provider` here is
+ *  the coarse routing family ("External OpenAI"), shared by every external
+ *  vendor — attribute by accountId instead. */
+export interface RecentRequest { timestamp?:string; model?:string; provider?:string; accountId?:string; accountName?:string; status?:string; endpoint?:string; error?:string; inputTokens?:number; outputTokens?:number; realCost?:number }
+export interface UsageStats extends PeriodSummary { totalRequests:number; totalPromptTokens:number; totalCompletionTokens:number; totalRealCost?:number; totalCost:number; totalEffectiveTokens?:number; totalCacheReadTokens?:number; activeRequests?:Array<{provider:string; model:string; accountId:string}>; recentRequests?:RecentRequest[]; byModel:Record<string,PeriodSummary>; byAccount:Record<string,PeriodSummary>; byAPIKey:Record<string,PeriodSummary>; byEndpoint:Record<string,PeriodSummary>; accountNames?:Record<string,string> }
 export interface ChartPoint { label:string; tokens:number; cost:number }
 export interface QuotaRow { name:string; used:number; total:number; remaining:number; resetAt?:number; recurring:boolean; unit?:string }
 export interface QuotaAccount { id:string; email?:string; nickname?:string; provider:string; providerLabel:string; enabled:boolean; status?:string; banStatus?:string; subscriptionType?:string; quotas?:QuotaRow[]; usagePercent?:number; extCreditsRemaining?:number }
 export interface QuotaOverview { providers:Record<string,{provider:string; label:string; accounts:number; activeAccounts:number; usageCurrent:number; usageLimit:number; usagePercent:number}>; accounts:QuotaAccount[]; timestamp:string }
+/** Deadline is unix seconds, not an ISO string: the server sends an int so that
+ *  omitempty applies. A zero means "no cooldown". */
+export interface ModelLock { until:number; reason?:string }
+export interface AccountHealth { cooldownUntil?:number; cooldownReason?:string; consecutiveErrors?:number; modelLocks?:Record<string,ModelLock> }
+/** In-memory pool state. Empty after a restart, so `since` is the process start
+ *  time and the UI must present this as "since startup", never as history. */
+export interface PoolHealth { accounts:Record<string,AccountHealth>; since:number; uptimeSeconds:number }
 export interface Settings { apiKey?:string; requireApiKey:boolean; port:number; host:string; allowOverUsage:boolean }
 export interface Combo { id?:string; name?:string; enabled?:boolean; models?:unknown[]; [key:string]:unknown }
 
@@ -84,6 +95,7 @@ export const api = {
   usage: (period='24h') => request<UsageStats>(`/usage/stats?period=${encodeURIComponent(period)}`),
   usageChart: (period='24h') => request<ChartPoint[]>(`/usage/chart?period=${encodeURIComponent(period)}`),
   quota: () => request<QuotaOverview>('/quota/overview'), settings: () => request<Settings>('/settings'),
+  poolHealth: () => request<PoolHealth>('/pool/health'),
   logs: () => request<{lines:string[]}>('/logs'), combos: () => request<Combo[]>('/combos'),
   cliStatus: () => request<Record<string,unknown>>('/cli-tools/status'), capabilities: () => request<CapabilityMatrix>('/capabilities'),
   probeCapabilities: (id:string, includeCostly=false) => request<CapabilityProbeResponse>(`/accounts/${encodeURIComponent(id)}/probe-capabilities${includeCostly?'?includeCostly=true':''}`, {method:'POST'}),
