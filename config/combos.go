@@ -195,6 +195,25 @@ func SetExtraModels(ids []string) error {
 	return saveLocked()
 }
 
+// PublishDiscoveredModels reports whether the default /v1/models response
+// includes the account-discovered model cache. See Config.PublishDiscoveredModels.
+func PublishDiscoveredModels() bool {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	return cfg != nil && cfg.PublishDiscoveredModels
+}
+
+// SetPublishDiscoveredModels toggles discovery publishing and persists it.
+func SetPublishDiscoveredModels(on bool) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return errors.New("config not initialized")
+	}
+	cfg.PublishDiscoveredModels = on
+	return saveLocked()
+}
+
 // GetAdaptiveRouting returns an isolated snapshot safe for request-time use.
 // Maps and slices are copied because callers rank candidates outside cfgLock;
 // returning aliases into cfg would race an admin/config reload.

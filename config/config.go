@@ -613,6 +613,13 @@ type Config struct {
 	// downstream agents (e.g. Hermes) don't auto-correct them away.
 	ExtraModels []string `json:"extraModels,omitempty"`
 
+	// PublishDiscoveredModels advertises the account-discovered model cache in
+	// the default /v1/models response — the same set ?catalog=all exposes.
+	// Off by default so conservative clients keep the canonical catalog;
+	// enable it when a downstream picker (e.g. Hermes) validates every model
+	// against the live listing and must see what the pool actually serves.
+	PublishDiscoveredModels bool `json:"publishDiscoveredModels,omitempty"`
+
 	// ComboStrategy is the global default strategy: "fallback" or "round-robin".
 	ComboStrategy string `json:"comboStrategy,omitempty"`
 
