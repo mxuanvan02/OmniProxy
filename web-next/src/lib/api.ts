@@ -69,7 +69,9 @@ export interface ModelLock { until:number; reason?:string }
 export interface AccountHealth { cooldownUntil?:number; cooldownReason?:string; consecutiveErrors?:number; modelLocks?:Record<string,ModelLock> }
 /** In-memory pool state. Empty after a restart, so `since` is the process start
  *  time and the UI must present this as "since startup", never as history. */
-export interface PoolHealth { accounts:Record<string,AccountHealth>; since:number; uptimeSeconds:number }
+/** No uptime field: the route is ETag-wrapped and a wall-clock value would
+ *  change the digest every second, so the 304 could never fire. */
+export interface PoolHealth { accounts:Record<string,AccountHealth>; since:number }
 export interface Settings { apiKey?:string; requireApiKey:boolean; port:number; host:string; allowOverUsage:boolean }
 export interface Combo { id?:string; name?:string; enabled?:boolean; models?:unknown[]; [key:string]:unknown }
 

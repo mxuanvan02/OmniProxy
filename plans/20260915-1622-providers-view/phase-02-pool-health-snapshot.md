@@ -77,7 +77,7 @@ path also answers 401 and the two are indistinguishable from outside.
   state: its cooldown deadline and reason, its consecutive error count, and its
   per-model locks with deadlines and reasons.
 - Expired cooldowns and expired model locks are absent from the response.
-- The response carries `since` and `uptimeSeconds` so the client can disclose
+- The response carries `since` so the client can disclose
   that the state is in-memory and resets on restart.
 - ETag-wrapped, like `/accounts` and `/status`.
 - Admin-session authenticated, like every other `/admin/api/` route.
@@ -101,7 +101,7 @@ RecordSuccess / ClearCooldown ── delete the matching lockReasons entries
         AccountPool.HealthSnapshot()  ── RLock, filter expired, project to int64 unix
                     │
                     ▼
-GET /admin/api/pool/health → {"accounts": {...}, "since": ..., "uptimeSeconds": ...}
+GET /admin/api/pool/health → {"accounts": {...}, "since": ...}
 ```
 
 ## Related code files
@@ -551,16 +551,12 @@ func TestPoolHealthRouteReturnsSnapshotEnvelope(t *testing.T) {
 	var body struct {
 		Accounts      map[string]AccountHealth `json:"accounts"`
 		Since         int64                    `json:"since"`
-		UptimeSeconds int64                    `json:"uptimeSeconds"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v — body was %s", err, rec.Body.String())
 	}
 	if body.Accounts == nil {
 		t.Fatalf("accounts decoded as null; it must be an empty object: %s", rec.Body.String())
-	}
-	if body.UptimeSeconds < 89 || body.UptimeSeconds > 120 {
-		t.Fatalf("uptimeSeconds = %d, want ~90 — the handler is not reading h.startTime", body.UptimeSeconds)
 	}
 	if body.Since != h.startTime {
 		t.Fatalf("since = %d, want %d", body.Since, h.startTime)
@@ -620,7 +616,6 @@ func (h *Handler) apiGetPoolHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"accounts":      h.pool.HealthSnapshot(),
 		"since":         h.startTime,
-		"uptimeSeconds": time.Now().Unix() - h.startTime,
 	})
 }
 ```
@@ -690,7 +685,7 @@ EOF
 
 - `TestPoolHealthRouteReturnsSnapshotEnvelope` passes: HTTP 200 through
   `handleAdminAPI` with a session token, and a body with exactly the keys
-  `accounts`, `since`, `uptimeSeconds`.
+  `accounts`, `since`.
 - `TestPoolHealthRouteRequiresAdminSession` passes: HTTP 401 without a token.
 - With no recent failures, `accounts` encodes as `{}` — an empty object, not
   `null` (asserted in the route test, which decodes it into a non-nil map).
@@ -730,5 +725,5 @@ EOF
 
 Phase 03 mirrors `AccountHealth` / `ModelLock` / `PoolHealth` into
 `web-next/src/lib/api.ts` and adds `api.poolHealth()`. Phase 04 renders it and
-must label the panel with `since` / `uptimeSeconds` rather than presenting it as
+must label the panel with `since` rather than presenting it as
 history.

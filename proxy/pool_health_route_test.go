@@ -29,9 +29,8 @@ func TestPoolHealthRouteReturnsSnapshotEnvelope(t *testing.T) {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 	}
 	var body struct {
-		Accounts      map[string]accountpool.AccountHealth `json:"accounts"`
-		Since         int64                                `json:"since"`
-		UptimeSeconds int64                                `json:"uptimeSeconds"`
+		Accounts map[string]accountpool.AccountHealth `json:"accounts"`
+		Since    int64                                `json:"since"`
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v — body was %s", err, rec.Body.String())
@@ -39,11 +38,50 @@ func TestPoolHealthRouteReturnsSnapshotEnvelope(t *testing.T) {
 	if body.Accounts == nil {
 		t.Fatalf("accounts decoded as null; it must be an empty object: %s", rec.Body.String())
 	}
-	if body.UptimeSeconds < 89 || body.UptimeSeconds > 120 {
-		t.Fatalf("uptimeSeconds = %d, want ~90 — the handler is not reading h.startTime", body.UptimeSeconds)
-	}
 	if body.Since != h.startTime {
 		t.Fatalf("since = %d, want %d", body.Since, h.startTime)
+	}
+	// The envelope is exactly these two keys. A wall-clock field must not come
+	// back: it would advance on every read and defeat the ETag below.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("decode envelope: %v", err)
+	}
+	for key := range raw {
+		if key != "accounts" && key != "since" {
+			t.Fatalf("unexpected envelope key %q — a time-varying field makes the response un-revalidatable: %s", key, rec.Body.String())
+		}
+	}
+}
+
+// The ETag is a digest of the body, so any field that advances with the wall
+// clock changes it at least once a second and the 304 can never fire. The sleep
+// is deliberate: without crossing a second boundary both requests land inside
+// the same second and this passes even when such a field is present.
+func TestPoolHealthRouteRevalidatesOnRepeatRequest(t *testing.T) {
+	initConfigForTests(t)
+	h := &Handler{pool: getServiceTestPool(t), startTime: time.Now().Add(-90 * time.Second).Unix()}
+
+	first := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/admin/api/pool/health", nil)
+	req.Header.Set(adminTokenHeader, issueAdminTestToken(t))
+	h.handleAdminAPI(first, req)
+
+	etag := first.Header().Get("ETag")
+	if etag == "" {
+		t.Fatalf("first response carried no ETag: %s", first.Body.String())
+	}
+
+	time.Sleep(time.Until(time.Unix(time.Now().Unix()+1, 0)) + 50*time.Millisecond)
+
+	second := httptest.NewRecorder()
+	again := httptest.NewRequest(http.MethodGet, "/admin/api/pool/health", nil)
+	again.Header.Set(adminTokenHeader, issueAdminTestToken(t))
+	again.Header.Set("If-None-Match", etag)
+	h.handleAdminAPI(second, again)
+
+	if second.Code != http.StatusNotModified {
+		t.Fatalf("repeat request = %d, want 304 — the pool did not change, so the body must not have: %s", second.Code, second.Body.String())
 	}
 }
 

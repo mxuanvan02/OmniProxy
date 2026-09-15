@@ -11313,12 +11313,14 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 // reach it.
 //
 // "since" is the process start time, not the age of the oldest entry, because
-// the snapshot is empty after a restart and the client has to say so.
+// the snapshot is empty after a restart and the client has to say so. Uptime is
+// deliberately NOT sent: withETag digests this body, so a field that advances
+// with the wall clock changes the ETag every second and the 304 can never fire.
+// A caller that wants the uptime derives it from "since".
 func (h *Handler) apiGetPoolHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"accounts":      h.pool.HealthSnapshot(),
-		"since":         h.startTime,
-		"uptimeSeconds": time.Now().Unix() - h.startTime,
+		"accounts": h.pool.HealthSnapshot(),
+		"since":    h.startTime,
 	})
 }
 

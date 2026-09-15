@@ -160,7 +160,11 @@ Four design constraints, each verified in source:
    must not serialise against chat routing through cfgLock").
 
 New route `GET /admin/api/pool/health`, ETag-wrapped like its neighbours,
-returning the per-account map plus `since` and `uptimeSeconds`.
+returning the per-account map plus `since`. An uptime in seconds was specified
+alongside `since` and then removed during the final review: `withETag` digests
+the body, so a field that advances with the wall clock changes the digest every
+second and the 304 this section relies on could never fire. A caller that wants
+the uptime derives it from `since`.
 
 **Restart blindness, handled by disclosure rather than persistence.** All three
 maps are created empty in `GetPool()` (:130-135) and nothing restores them;

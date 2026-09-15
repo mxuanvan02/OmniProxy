@@ -44,7 +44,6 @@ const usage: UsageStats = {
 
 const coolingPool: PoolHealth = {
   since: 1_760_000_000,
-  uptimeSeconds: 600,
   accounts: {
     'go-1': { cooldownUntil: 1_760_000_900, cooldownReason: 'auth_failed', consecutiveErrors: 4, modelLocks: { 'qwen3.8-max': { until: 1_760_000_600, reason: 'rate_limited' } } },
   },

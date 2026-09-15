@@ -152,7 +152,6 @@ describe('groupByVendor', () => {
   it('surfaces a cooldown, its reason and the affected models', () => {
     const health: PoolHealth = {
       since: 1_760_000_000,
-      uptimeSeconds: 600,
       accounts: {
         a: { cooldownUntil: 1_760_000_900, cooldownReason: 'auth_failed', consecutiveErrors: 4, modelLocks: { 'qwen3.8-max': { until: 1_760_000_600, reason: 'rate_limited' } } },
       },
@@ -180,7 +179,7 @@ describe('groupByVendor', () => {
   // traffic must not be buried under one that merely served the most, even
   // though the busy vendor has more than twice the error rate.
   it('sorts a blocked vendor above a busier one', () => {
-    const health: PoolHealth = { since: 1, uptimeSeconds: 1, accounts: { broken: { cooldownUntil: 1_760_000_900, cooldownReason: 'auth_failed' } } }
+    const health: PoolHealth = { since: 1, accounts: { broken: { cooldownUntil: 1_760_000_900, cooldownReason: 'auth_failed' } } }
     const rows = groupByVendor([
       account({ id: 'busy', baseUrl: 'https://busy.example', requestCount: 10_000 }),
       account({ id: 'broken', baseUrl: 'https://broken.example', requestCount: 1 }),

@@ -258,7 +258,6 @@ describe('groupByVendor', () => {
   it('surfaces a cooldown, its reason and the affected models', () => {
     const health: PoolHealth = {
       since: 1_760_000_000,
-      uptimeSeconds: 600,
       accounts: {
         a: { cooldownUntil: 1_760_000_900, cooldownReason: 'auth_failed', consecutiveErrors: 4, modelLocks: { 'qwen3.8-max': { until: 1_760_000_600, reason: 'rate_limited' } } },
       },
@@ -286,7 +285,7 @@ describe('groupByVendor', () => {
   // traffic must not be buried under one that merely served the most, even
   // though the busy vendor has more than twice the error rate.
   it('sorts a blocked vendor above a busier one', () => {
-    const health: PoolHealth = { since: 1, uptimeSeconds: 1, accounts: { broken: { cooldownUntil: 1_760_000_900, cooldownReason: 'auth_failed' } } }
+    const health: PoolHealth = { since: 1, accounts: { broken: { cooldownUntil: 1_760_000_900, cooldownReason: 'auth_failed' } } }
     const rows = groupByVendor([
       account({ id: 'busy', baseUrl: 'https://busy.example', requestCount: 10_000 }),
       account({ id: 'broken', baseUrl: 'https://broken.example', requestCount: 1 }),
@@ -414,7 +413,7 @@ export interface ModelLock { until:number; reason?:string }
 export interface AccountHealth { cooldownUntil?:number; cooldownReason?:string; consecutiveErrors?:number; modelLocks?:Record<string,ModelLock> }
 /** In-memory pool state. Empty after a restart, so `since` is the process start
  *  time and the UI must present this as "since startup", never as history. */
-export interface PoolHealth { accounts:Record<string,AccountHealth>; since:number; uptimeSeconds:number }
+export interface PoolHealth { accounts:Record<string,AccountHealth>; since:number }
 ```
 
 **3e.** In the `api` object (`:82-108`), add after the `quota` line (`:86`):
@@ -697,7 +696,7 @@ EOF
 ## Next steps
 
 Phase 04 renders `VendorRow[]` and `RecentErrorRow[]`. It must:
-- label the health panel with `health.since` / `health.uptimeSeconds`;
+- label the health panel with `health.since`;
 - state that the error source is a 500-record buffer;
 - use `v === '' || v == null ? '—' : v` in its local `KV`, so a vendor with zero
   errors renders "0".
