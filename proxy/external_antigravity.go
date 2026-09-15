@@ -30,6 +30,7 @@ import (
 	"omniproxy/logger"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -1205,10 +1206,10 @@ func fetchAntigravityModels(account *config.Account) ([]ModelInfo, error) {
 		return antigravityFallbackModels(), nil
 	}
 
-	body, _ := json.Marshal(map[string]interface{}{
-		"project":  projectID,
-		"metadata": antigravityMetadata(projectID),
-	})
+	// FetchAvailableModelsRequest carries project, request_id, entitlement and
+	// location. It has no metadata field — sending one is answered with
+	// `400 Invalid JSON payload received. Unknown name "metadata"`.
+	body, _ := json.Marshal(map[string]interface{}{"project": projectID})
 	raw, err := antigravityPostJSON(account, antigravityModelsAction, body)
 	if err != nil {
 		logger.Warnf("[Antigravity] fetchAvailableModels for %s failed, using static list: %v", account.Email, err)
@@ -1222,47 +1223,38 @@ func fetchAntigravityModels(account *config.Account) ([]ModelInfo, error) {
 	return models, nil
 }
 
-// parseAntigravityModels reads the fetchAvailableModels payload. The field names
-// vary between gateway versions, so each known spelling is accepted rather than
-// failing the whole catalog on an unexpected key.
+// parseAntigravityModels reads the fetchAvailableModels payload.
+// FetchAvailableModelsResponse carries `models` as a map keyed by model id
+// (ModelsEntry → ModelDetails), not as an array, and names the context window
+// maxTokens with maxOutputTokens beside it.
 func parseAntigravityModels(raw []byte) []ModelInfo {
 	var payload struct {
-		Models []struct {
-			Name             string `json:"name"`
-			ModelID          string `json:"modelId"`
-			ID               string `json:"id"`
-			DisplayName      string `json:"displayName"`
-			Description      string `json:"description"`
-			InputTokenLimit  int    `json:"inputTokenLimit"`
-			OutputTokenLimit int    `json:"outputTokenLimit"`
+		Models map[string]struct {
+			DisplayName     string `json:"displayName"`
+			Description     string `json:"description"`
+			MaxTokens       int    `json:"maxTokens"`
+			MaxOutputTokens int    `json:"maxOutputTokens"`
 		} `json:"models"`
-		AvailableModels []struct {
-			Name             string `json:"name"`
-			ModelID          string `json:"modelId"`
-			ID               string `json:"id"`
-			DisplayName      string `json:"displayName"`
-			Description      string `json:"description"`
-			InputTokenLimit  int    `json:"inputTokenLimit"`
-			OutputTokenLimit int    `json:"outputTokenLimit"`
-		} `json:"availableModels"`
 	}
-	if json.Unmarshal(raw, &payload) != nil {
+	if json.Unmarshal(raw, &payload) != nil || len(payload.Models) == 0 {
 		return nil
 	}
-	entries := payload.Models
-	if len(entries) == 0 {
-		entries = payload.AvailableModels
-	}
 
-	out := make([]ModelInfo, 0, len(entries))
-	seen := make(map[string]bool, len(entries))
-	for _, entry := range entries {
-		id := firstNonEmpty(entry.ModelID, entry.ID, entry.Name)
-		id = strings.TrimPrefix(strings.TrimSpace(id), "models/")
-		if id == "" || seen[id] {
+	// Iterate in a stable order: the catalog is user-visible and a map walk
+	// would reshuffle the model picker on every refresh.
+	keys := make([]string, 0, len(payload.Models))
+	for key := range payload.Models {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	out := make([]ModelInfo, 0, len(keys))
+	for _, key := range keys {
+		entry := payload.Models[key]
+		id := strings.TrimPrefix(strings.TrimSpace(key), "models/")
+		if id == "" {
 			continue
 		}
-		seen[id] = true
 		name := strings.TrimSpace(entry.DisplayName)
 		if name == "" {
 			name = id
@@ -1275,8 +1267,8 @@ func parseAntigravityModels(raw []byte) []ModelInfo {
 			RateMultiplier: 1.0,
 			Provider:       "antigravity",
 		}
-		if entry.InputTokenLimit > 0 || entry.OutputTokenLimit > 0 {
-			model.TokenLimits = &ModelTokenLimits{MaxInputTokens: entry.InputTokenLimit, MaxOutputTokens: entry.OutputTokenLimit}
+		if entry.MaxTokens > 0 || entry.MaxOutputTokens > 0 {
+			model.TokenLimits = &ModelTokenLimits{MaxInputTokens: entry.MaxTokens, MaxOutputTokens: entry.MaxOutputTokens}
 		}
 		out = append(out, model)
 	}

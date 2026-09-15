@@ -1483,6 +1483,18 @@ func (p *AccountPool) UpdateToken(id, accessToken, refreshToken string, expiresA
 			p.serviceAccounts[i].ExpiresAt = expiresAt
 		}
 	}
+	// The token is part of catalogIdentity. A rotation is the same connection
+	// with a new credential, not a different one, so the stored identity has to
+	// move with it — otherwise SetModelListForAccount rejects every discovery
+	// completed after the rotation as "account changed during model discovery"
+	// and the account keeps an empty catalog until the next Reload.
+	if current, ok := p.catalogIdentities[id]; ok {
+		current.accessToken = accessToken
+		if refreshToken != "" {
+			current.refreshToken = refreshToken
+		}
+		p.catalogIdentities[id] = current
+	}
 }
 
 // Count returns total number of accounts

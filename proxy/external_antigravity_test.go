@@ -620,3 +620,95 @@ func TestAntigravityFallbackModelsAreChatCapable(t *testing.T) {
 		}
 	}
 }
+
+// TestParseAntigravityModelsReadsTheMapShape pins the wire shape of
+// FetchAvailableModelsResponse: `models` is a map keyed by model id
+// (ModelsEntry → ModelDetails), and the context window is maxTokens, not
+// inputTokenLimit. Parsing it as an array made Unmarshal fail and the caller
+// silently fall back to the static catalog, so every account reported no live
+// models.
+func TestParseAntigravityModelsReadsTheMapShape(t *testing.T) {
+	raw := []byte(`{
+		"models": {
+			"gemini-3-pro-high": {
+				"displayName": "Gemini 3 Pro (High)",
+				"description": "Thinking model",
+				"maxTokens": 1000000,
+				"maxOutputTokens": 65536
+			},
+			"claude-sonnet-4-5": {
+				"displayName": "Claude Sonnet 4.5",
+				"maxTokens": 200000,
+				"maxOutputTokens": 64000
+			}
+		}
+	}`)
+
+	models := parseAntigravityModels(raw)
+	if len(models) != 2 {
+		t.Fatalf("parsed %d models, want 2: %+v", len(models), models)
+	}
+
+	byID := make(map[string]ModelInfo, len(models))
+	for _, model := range models {
+		byID[model.ModelId] = model
+	}
+
+	pro, ok := byID["gemini-3-pro-high"]
+	if !ok {
+		t.Fatalf("model ids = %v, want gemini-3-pro-high among them", byID)
+	}
+	if pro.ModelName != "Gemini 3 Pro (High)" {
+		t.Errorf("ModelName = %q, want the displayName", pro.ModelName)
+	}
+	if pro.Description != "Thinking model" {
+		t.Errorf("Description = %q, want the description", pro.Description)
+	}
+	if pro.TokenLimits == nil || pro.TokenLimits.MaxInputTokens != 1000000 || pro.TokenLimits.MaxOutputTokens != 65536 {
+		t.Errorf("TokenLimits = %+v, want 1000000/65536 from maxTokens/maxOutputTokens", pro.TokenLimits)
+	}
+	if pro.Provider != "antigravity" {
+		t.Errorf("Provider = %q, want antigravity", pro.Provider)
+	}
+
+	// Models missing maxTokens keep a nil limit rather than reporting 0/0.
+	if sonnet := byID["claude-sonnet-4-5"]; sonnet.TokenLimits == nil || sonnet.TokenLimits.MaxInputTokens != 200000 {
+		t.Errorf("TokenLimits = %+v, want 200000/64000", sonnet.TokenLimits)
+	}
+
+	// The order is stable, so a refresh does not reshuffle the model picker.
+	if models[0].ModelId != "claude-sonnet-4-5" || models[1].ModelId != "gemini-3-pro-high" {
+		t.Errorf("order = %q,%q, want claude-sonnet-4-5 then gemini-3-pro-high",
+			models[0].ModelId, models[1].ModelId)
+	}
+}
+
+// TestParseAntigravityModelsHandlesEmptyAndInvalid covers the paths that must
+// report "no catalog" so the caller can fall back instead of publishing an
+// empty list over a working one.
+func TestParseAntigravityModelsHandlesEmptyAndInvalid(t *testing.T) {
+	// A model id already carrying the "models/" prefix, and one with no
+	// displayName, both have to come out usable.
+	models := parseAntigravityModels([]byte(`{"models":{"models/gemini-2.5-flash":{}}}`))
+	if len(models) != 1 {
+		t.Fatalf("parsed %d models, want 1", len(models))
+	}
+	if models[0].ModelId != "gemini-2.5-flash" {
+		t.Errorf("ModelId = %q, want the models/ prefix stripped", models[0].ModelId)
+	}
+	if models[0].ModelName != "gemini-2.5-flash" {
+		t.Errorf("ModelName = %q, want the id when displayName is absent", models[0].ModelName)
+	}
+
+	for _, raw := range []string{
+		``,
+		`not json`,
+		`{"models":[]}`,
+		`{"models":{}}`,
+		`{"availableModels":[{"modelId":"gemini-2.5-pro"}]}`,
+	} {
+		if got := parseAntigravityModels([]byte(raw)); len(got) != 0 {
+			t.Errorf("parseAntigravityModels(%q) = %+v, want nil so the caller falls back", raw, got)
+		}
+	}
+}
