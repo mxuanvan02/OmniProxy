@@ -73,6 +73,14 @@
         "type": "object"
       },
       "type": "function"
+    },
+    {
+      "description": "Lifecycle constraint: call TaskStop only for a task that is currently running. A completed, failed, or stopped notification is terminal and requires no cleanup. If that task is later resumed, it may be stopped again until its next terminal notification. Never retry an ID after a 'No task found' result.",
+      "name": "TaskStop",
+      "parameters": {
+        "type": "object"
+      },
+      "type": "function"
     }
   ]
 }

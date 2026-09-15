@@ -8,53 +8,102 @@ import (
 	"testing"
 )
 
-// updateResponsesGolden rewrites the golden file instead of comparing against it.
-// Used once before the Phase 01 refactor, and any time the Codex request shape is
-// intentionally changed.
+// updateResponsesGolden rewrites the golden files instead of comparing against
+// them. Used once before the Phase 01 refactor, and any time the Codex request
+// shape is intentionally changed.
 var updateResponsesGolden = flag.Bool("update-responses-golden", false,
-	"rewrite proxy/testdata/codex_responses_body.golden.json")
+	"rewrite the proxy/testdata/codex_responses_*.golden.json files")
+
+// responsesGoldenCase pairs a hand-built payload with the golden file that pins
+// the exact body the Codex dialect emits for it.
+type responsesGoldenCase struct {
+	name    string
+	golden  string
+	payload func() *KiroPayload
+}
 
 // TestCodexResponsesBodyGolden pins the exact request body the Codex dialect
-// produces for a payload covering every branch: system priming pair, history with
-// tool use, tool result, image, assistant text, and inference config.
+// produces, in two shapes:
+//
+//   - "full" — system priming pair, history with tool use, tool result, image,
+//     assistant text, tool catalog (including an empty-description TaskStop
+//     alias) and inference config.
+//   - "bare-system-prompt" — no priming pair; history[0] is a lone user message
+//     opening with "You are ", which the builder lifts into "instructions"
+//     through its second, otherwise-unreachable instructions source.
 //
 // The body is produced by the shared builder through the Codex wrapper, so this
-// test fails if moving the builder to responses_upstream.go changes a single byte
-// of Codex behaviour.
+// test fails if moving the builder to responses_upstream.go changes a single
+// byte of Codex behaviour.
+//
+// Both payloads deliberately leave OriginalModel and
+// CurrentMessage.UserInputMessage.ModelID empty, so the builder's hardcoded
+// default model is on the only path that can supply "model" — mutating that
+// literal fails these tests. Setting either field would satisfy the precedence
+// chain earlier and silently make the default dead code.
 func TestCodexResponsesBodyGolden(t *testing.T) {
-	payload := goldenResponsesPayload()
-	body, err := kiroPayloadToCodexResponsesRequest(payload, nil)
-	if err != nil {
-		t.Fatalf("build codex responses body: %v", err)
-	}
-	got, err := json.MarshalIndent(body, "", "  ")
-	if err != nil {
-		t.Fatalf("marshal body: %v", err)
-	}
-	got = append(got, '\n')
-
-	path := filepath.Join("testdata", "codex_responses_body.golden.json")
-	if *updateResponsesGolden {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			t.Fatalf("mkdir testdata: %v", err)
-		}
-		if err := os.WriteFile(path, got, 0o644); err != nil {
-			t.Fatalf("write golden: %v", err)
-		}
-		t.Logf("wrote %s (%d bytes)", path, len(got))
-		return
+	cases := []responsesGoldenCase{
+		{
+			name:    "full",
+			golden:  "codex_responses_body.golden.json",
+			payload: goldenResponsesPayload,
+		},
+		{
+			name:    "bare-system-prompt",
+			golden:  "codex_responses_bare_system_prompt.golden.json",
+			payload: goldenBareSystemPromptResponsesPayload,
+		},
 	}
 
-	want, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read golden (run with -update-responses-golden first): %v", err)
-	}
-	if string(got) != string(want) {
-		t.Fatalf("codex responses body changed.\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := tc.payload()
+
+			// Guard the gate itself: if a future edit re-populates either model
+			// source the golden would keep passing while no longer pinning the
+			// builder's default model.
+			if payload.OriginalModel != "" {
+				t.Fatalf("fixture sets OriginalModel=%q; the builder's default model would no longer be gated", payload.OriginalModel)
+			}
+			if id := payload.ConversationState.CurrentMessage.UserInputMessage.ModelID; id != "" {
+				t.Fatalf("fixture sets CurrentMessage.UserInputMessage.ModelID=%q; the builder's default model would no longer be gated", id)
+			}
+
+			body, err := kiroPayloadToCodexResponsesRequest(payload, nil)
+			if err != nil {
+				t.Fatalf("build codex responses body: %v", err)
+			}
+			got, err := json.MarshalIndent(body, "", "  ")
+			if err != nil {
+				t.Fatalf("marshal body: %v", err)
+			}
+			got = append(got, '\n')
+
+			path := filepath.Join("testdata", tc.golden)
+			if *updateResponsesGolden {
+				if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+					t.Fatalf("mkdir testdata: %v", err)
+				}
+				if err := os.WriteFile(path, got, 0o644); err != nil {
+					t.Fatalf("write golden: %v", err)
+				}
+				t.Logf("wrote %s (%d bytes)", path, len(got))
+				return
+			}
+
+			want, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("read golden (run with -update-responses-golden first): %v", err)
+			}
+			if string(got) != string(want) {
+				t.Fatalf("codex responses body changed.\n--- got ---\n%s\n--- want ---\n%s", got, want)
+			}
+		})
 	}
 }
 
-// goldenResponsesPayload hand-builds the payload the golden was captured from.
+// goldenResponsesPayload hand-builds the payload the "full" golden was captured
+// from.
 //
 // It is deliberately assembled with struct literals rather than by calling
 // ClaudeToKiro or OpenAIToKiro: the golden must record the Codex response body
@@ -62,25 +111,42 @@ func TestCodexResponsesBodyGolden(t *testing.T) {
 // golden churn whenever that translator changes, destroying its value as a
 // regression gate.
 //
-// Every branch of kiroPayloadToCodexResponsesRequest is exercised:
+// Branches of the builder this payload exercises:
 //   - the priming pair (history[0] user / history[1] assistant "i will follow")
 //     is lifted into top-level "instructions" and dropped from history
 //   - a history user message with tool results → function_call_output items
 //   - a history assistant message with text and tool uses → message +
 //     function_call items
 //   - the current message carries text plus an image → message with array content
-//   - tools are rewritten by codexToolDescription, including the TaskStop guidance
+//   - tools are rewritten by codexToolDescription: the plain pass-through, the
+//     described-TaskStop arm, and (via the "taskStopBare" alias) the
+//     empty-description arm
 //   - inference config contributes reasoning.effort but never temperature/top_p
 //   - an explicit tool choice is translated to the flat Responses vocabulary
+//   - a nil account skips model remapping
+//
+// Branches this payload does NOT reach (they are not pinned here):
+//   - the nil-payload early error return
+//   - a non-nil account, and any model carrying an internal prefix
+//   - a history user message that is image-only (no text)
+//   - a tool result with an empty Content slice
+//   - InferenceConfig non-nil but with an empty ReasoningEffort
+//   - instructions == "" and no tools, i.e. a body with neither key — the
+//     "bare-system-prompt" case covers the no-tools half of that
+//   - codexMessageContent with images but empty text
 func goldenResponsesPayload() *KiroPayload {
 	payload := &KiroPayload{
 		ToolNameMap: map[string]string{
-			"read":     "Read",
-			"taskStop": "TaskStop",
+			"read":         "Read",
+			"taskStop":     "TaskStop",
+			"taskStopBare": "TaskStop",
 		},
 		ToolChoice: map[string]interface{}{"type": "tool", "name": "read"},
 	}
-	payload.OriginalModel = "gpt-5.6-sol"
+	// NOTE: OriginalModel and CurrentMessage.UserInputMessage.ModelID are
+	// deliberately left EMPTY. Setting either would satisfy the model
+	// precedence chain before it reaches the builder's hardcoded default,
+	// making that default dead code and leaving the golden blind to it.
 	payload.ConversationState.ConversationID = "conv-golden"
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.InferenceConfig = &InferenceConfig{
@@ -155,15 +221,70 @@ func goldenResponsesPayload() *KiroPayload {
 	stopTool.ToolSpecification.InputSchema = InputSchema{JSON: map[string]interface{}{"type": "object"}}
 	ctx.Tools = append(ctx.Tools, stopTool)
 
+	// A second alias that maps back to TaskStop but advertises no description,
+	// driving codexToolDescription's empty-description arm (guidance returned
+	// verbatim, with no leading blank line).
+	stopBareTool := KiroToolWrapper{}
+	stopBareTool.ToolSpecification.Name = "taskStopBare"
+	stopBareTool.ToolSpecification.Description = ""
+	stopBareTool.ToolSpecification.InputSchema = InputSchema{JSON: map[string]interface{}{"type": "object"}}
+	ctx.Tools = append(ctx.Tools, stopBareTool)
+
 	image := KiroImage{Format: "png"}
 	image.Source.Bytes = "iVBORw0KGgoAAAANSUhEUg=="
 
 	cur := &payload.ConversationState.CurrentMessage.UserInputMessage
 	cur.Content = "Summarize the entry point in the attached screenshot."
-	cur.ModelID = "gpt-5.6-sol"
 	cur.Origin = "AI_EDITOR"
 	cur.Images = []KiroImage{image}
 	cur.UserInputMessageContext = ctx
+
+	return payload
+}
+
+// goldenBareSystemPromptResponsesPayload hand-builds the payload behind the
+// "bare-system-prompt" golden: no priming pair, so the builder's second
+// instructions source (a lone leading user message opening with "You are ")
+// is the one that fires.
+//
+// That arm is dead in goldenResponsesPayload because the priming pair wins
+// first, and the Phase 01 refactor relocates it to proxy/responses_upstream.go
+// — a wrong history index during the move would otherwise go unnoticed.
+//
+// Like the full fixture it leaves OriginalModel and
+// CurrentMessage.UserInputMessage.ModelID empty, so this case gates the
+// builder's default model too. It carries no tools, no images, no tool results
+// and no inference config, which additionally pins the "omit these keys when
+// absent" behaviour.
+func goldenBareSystemPromptResponsesPayload() *KiroPayload {
+	payload := &KiroPayload{}
+	payload.ConversationState.ConversationID = "conv-bare-system-prompt"
+	payload.ConversationState.ChatTriggerType = "MANUAL"
+
+	// Opens with "You are " so the fallback recognises it. The assistant turn
+	// that follows deliberately does NOT contain "i will follow", otherwise the
+	// priming-pair branch would claim it instead.
+	systemUser := &KiroUserInputMessage{
+		Content: "You are a bare system prompt injected by a non-Claude client.",
+		Origin:  "AI_EDITOR",
+	}
+	systemAck := &KiroAssistantResponseMessage{
+		Content: "Understood, starting now.",
+	}
+	historyUser := &KiroUserInputMessage{
+		Content: "inspect the repository",
+		Origin:  "AI_EDITOR",
+	}
+
+	payload.ConversationState.History = []KiroHistoryMessage{
+		{UserInputMessage: systemUser},
+		{AssistantResponseMessage: systemAck},
+		{UserInputMessage: historyUser},
+	}
+
+	cur := &payload.ConversationState.CurrentMessage.UserInputMessage
+	cur.Content = "Summarize the plan."
+	cur.Origin = "AI_EDITOR"
 
 	return payload
 }

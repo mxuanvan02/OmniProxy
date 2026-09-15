@@ -1,0 +1,23 @@
+{
+  "input": [
+    {
+      "content": "Understood, starting now.",
+      "role": "assistant",
+      "type": "message"
+    },
+    {
+      "content": "inspect the repository",
+      "role": "user",
+      "type": "message"
+    },
+    {
+      "content": "Summarize the plan.",
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "instructions": "You are a bare system prompt injected by a non-Claude client.",
+  "model": "gpt-5.6-sol",
+  "store": false,
+  "stream": true
+}
