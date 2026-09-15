@@ -1014,6 +1014,7 @@ let customSelectRefreshQueued = false;
       if (action === 'refresh') refreshAccount(id, btn.closest('.account-card'));
       else if (action === 'detail') showDetail(id);
       else if (action === 'copyJSON') copyAccountJSON(id, btn);
+      else if (action === 'copyVerifyLink') copyVerifyLink(btn.dataset.copyVerifyLink, btn);
       else if (action === 'toggle') toggleAccount(id, btn.dataset.enabled === 'true');
       else if (action === 'test') testAccount(id);
       else if (action === 'delete') deleteAccount(id);
@@ -1137,6 +1138,10 @@ let customSelectRefreshQueued = false;
     $('testBody').addEventListener('click', e => {
       if (e.target.id === 'testLogClear') { clearTestLog(); return; }
       if (e.target.id === 'testModalCancelBtn') { closeTestModal(); return; }
+      // Same copy action as the account card's, reached from the test log's
+      // verification link.
+      const copyLink = e.target.closest('[data-action="copyVerifyLink"]');
+      if (copyLink) { copyVerifyLink(copyLink.dataset.copyVerifyLink, copyLink); return; }
       const mode = e.target.closest('[data-test-mode]');
       if (mode) {
         testModalMode = mode.dataset.testMode === 'image' ? 'image' : mode.dataset.testMode === 'search' ? 'search' : 'chat';

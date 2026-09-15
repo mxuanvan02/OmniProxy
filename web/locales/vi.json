@@ -62,6 +62,8 @@
   "accounts.trialDays": "ngày còn lại",
   "accounts.copyJSON": "Sao chép JSON",
   "accounts.copyJSONSuccess": "Đã sao chép JSON vào clipboard",
+"accounts.copyVerifyLink": "Sao chép link xác thực",
+  "accounts.copyVerifyLinkSuccess": "Đã sao chép link xác thực",
   "accounts.overage": "Vượt hạn mức",
   "accounts.overageOn": "Vượt hạn mức:BẬT",
   "accounts.overageOff": "Vượt hạn mức:TẮT",

@@ -691,7 +691,13 @@ let detailAllowedError = '';
         // not banned and not broken — the credential is fine. The link comes from
         // the upstream 403 body and is the only thing that clears the state, so
         // it is offered as an action instead of being left in the error text.
-        (a.antigravityVerifyUrl ? '<a class="btn btn-sm btn-primary" href="' + escapeAttr(a.antigravityVerifyUrl) + '" target="_blank" rel="noopener noreferrer" title="' + escapeAttr(t('accounts.verifyAccountHint')) + '">' + escapeHtml(t('accounts.verifyAccount')) + '</a>' : '') +
+        (a.antigravityVerifyUrl ?
+          '<a class="btn btn-sm btn-primary" href="' + escapeAttr(a.antigravityVerifyUrl) + '" target="_blank" rel="noopener noreferrer" title="' + escapeAttr(t('accounts.verifyAccountHint')) + '">' + escapeHtml(t('accounts.verifyAccount')) + '</a>' +
+          // Clicking opens whichever Chrome profile the dashboard is running in,
+          // which is normally not the profile holding that Google account. The
+          // URL has to be pasteable for the flow to be completable at all.
+          '<button class="btn btn-icon btn-sm btn-ghost" data-action="copyVerifyLink" data-copy-verify-link="' + escapeAttr(a.antigravityVerifyUrl) + '" title="' + escapeAttr(t('accounts.copyVerifyLink')) + '">' + copySvg + '</button>'
+          : '') +
         (banned ? '' :
           '<button class="btn btn-sm ' + (a.enabled ? 'btn-outline' : 'btn-primary') + '" data-action="toggle" data-id="' + idAttr + '" data-enabled="' + (!a.enabled) + '">' +
           escapeHtml(a.enabled ? t('accounts.disable') : t('accounts.enable')) +
@@ -1023,6 +1029,20 @@ let detailAllowedError = '';
       await copyText(jsonPromise);
       flashCopySuccess(btn);
       toastPrimary(t('accounts.copyJSONSuccess'));
+    } catch (e) {
+      toastError(t('common.failed'));
+    }
+  }
+  // The Google verification page only clears the state when it is opened while
+  // signed in as the account's own user, which is usually a different Chrome
+  // profile from the one running this dashboard. Clicking therefore lands on the
+  // wrong account, so the URL is offered as text to paste instead.
+  async function copyVerifyLink(url, btn) {
+    if (!url) return;
+    try {
+      await copyText(url);
+      flashCopySuccess(btn);
+      toastPrimary(t('accounts.copyVerifyLinkSuccess'));
     } catch (e) {
       toastError(t('common.failed'));
     }
@@ -1797,10 +1817,13 @@ let detailAllowedError = '';
       // validationUrl is the Google page that clears a VALIDATION_REQUIRED
       // account. It is rendered as a link rather than part of the message so it
       // stays clickable; the raw error the API returns is truncated and cuts
-      // the URL off mid-query.
+      // the URL off mid-query. The copy button next to it covers the common
+      // case where the link must be opened in the account's own browser profile.
       const link = log.link
         ? ' <a class="test-log-link" href="' + escapeAttr(log.link) + '" target="_blank" rel="noopener noreferrer">' +
-          escapeHtml(log.linkText || t('accounts.verifyAccount')) + '</a>'
+          escapeHtml(log.linkText || t('accounts.verifyAccount')) + '</a>' +
+          ' <button class="test-log-copy" data-action="copyVerifyLink" data-copy-verify-link="' + escapeAttr(log.link) + '" title="' + escapeAttr(t('accounts.copyVerifyLink')) + '">' +
+          escapeHtml(t('accounts.copyVerifyLink')) + '</button>'
         : '';
       return '<div class="test-log-line ' + escapeAttr(log.type || 'info') + '">' +
         '<span class="test-log-time">' + escapeHtml(log.time) + '</span>' +

@@ -3150,6 +3150,22 @@ img.brand-icon {
 .test-log-link:hover {
   text-decoration: none;
 }
+/* The verification link usually has to be pasted into the browser profile that
+   holds that Google account, so the copy affordance sits right beside it. */
+.test-log-copy {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font-size: 0.6875rem;
+  cursor: pointer;
+}
+.test-log-copy:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
 .test-log-line.ok {
   color: var(--success);
 }
