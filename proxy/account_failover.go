@@ -168,6 +168,20 @@ func isTransientNetworkError(msg string) bool {
 		strings.Contains(lower, "client.timeout") || // Go http.Client error prefix
 		strings.Contains(lower, "context deadline exceeded") || // Request context timeout
 		strings.Contains(lower, "stream idle timeout") || // idleTimeoutReader
+		// The transport's own response-header deadline (ResponseHeaderTimeout),
+		// in both its HTTP/1 and HTTP/2 spellings. The upstream answered nothing,
+		// so the account is only a suspect, never a convicted one — yet neither
+		// string matched a marker, so every occurrence fell through to
+		// handleAccountFailure's default branch and charged a cooldown. Where one
+		// account serves the model, that turned a single stalled request into a
+		// full minute of instant "no account found" aborts.
+		strings.Contains(lower, "timeout awaiting response headers") ||
+		// EADDRNOTAVAIL against a pooled connection the local stack has already
+		// torn down. Seen on macOS in the minute after the network drops, where
+		// two requests reuse the same dead socket in the same second. Like the
+		// header deadline this says nothing about the credential: every account
+		// reaches the same endpoint through the same local stack.
+		strings.Contains(lower, "can't assign requested address") ||
 		isTransientHTTP2StreamReset(lower)
 }
 

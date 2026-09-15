@@ -1,9 +1,11 @@
 package proxy
 
 import (
+	"errors"
 	"testing"
 
 	"omniproxy/config"
+	accountpool "omniproxy/pool"
 )
 
 func TestNetworkErrorClassifier(t *testing.T) {
@@ -25,6 +27,12 @@ func TestNetworkErrorClassifier(t *testing.T) {
 		{msg: "HTTP 401 from Kiro IDE: unauthorized", exp: false},
 		{msg: "HTTP 429: quota exhausted", exp: false},
 		{msg: "no available Kiro profile", exp: false},
+		// Both transport shapes that used to reach the default branch and park
+		// a healthy account. See TestHeaderTimeoutDoesNotCoolDownTheOnlyAccount.
+		{msg: `external call example-provider: Post "https://api.example.com/v1/chat/completions": ` +
+			`http2: timeout awaiting response headers`, exp: true},
+		{msg: `external call example-provider: Post "https://api.example.com/v1/chat/completions": ` +
+			`read tcp 192.0.2.10:54102->192.0.2.20:443: read: can't assign requested address`, exp: true},
 	}
 
 	for _, tc := range tests {
@@ -60,6 +68,46 @@ func TestRateLimit403IsNotAuthenticationFailure(t *testing.T) {
 	msg := `HTTP 403 from 10k: {"error":{"type":"rate_limit_error"}}`
 	if isAuthErrorMessage(msg) {
 		t.Fatalf("rate-limit response must not trigger token refresh: %s", msg)
+	}
+}
+
+// TestHeaderTimeoutDoesNotCoolDownTheOnlyAccount pins what an operator actually
+// saw: requests to a model only one provider serves kept aborting instantly
+// ("no account found after 0 attempts") instead of failing once and recovering.
+//
+// The chain was: the transport's response-header deadline fired, the message
+// matched no classifier, handleAccountFailure's default branch charged a
+// cooldown, and three consecutive stalls parked the account for a minute. During
+// that minute every request for the model found no candidate at all.
+func TestHeaderTimeoutDoesNotCoolDownTheOnlyAccount(t *testing.T) {
+	initConfigForTests(t)
+	const id = "ext-header-timeout"
+	if err := config.AddAccount(config.Account{
+		ID:          id,
+		Email:       "timeout@example.com",
+		AuthMethod:  externalAuthMethod,
+		Enabled:     true,
+		AccessToken: "key",
+		BaseURL:     "https://api.example.com",
+	}); err != nil {
+		t.Fatalf("AddAccount: %v", err)
+	}
+	p := accountpool.GetPool()
+	p.Reload()
+	p.SetModelList(id, []string{"qwen3.8-max"})
+
+	h := &Handler{pool: p, catalogStatus: newCatalogStatusStore()}
+	err := errors.New(`external call timeout@example.com: Post "https://api.example.com/v1/chat/completions": ` +
+		`http2: timeout awaiting response headers`)
+
+	// Three consecutive failures is what trips the strike counter.
+	for i := 0; i < 3; i++ {
+		h.handleAccountFailure(p.GetByID(id), err, "qwen3.8-max")
+	}
+
+	if !p.HasAvailableAccountForModel("qwen3.8-max") {
+		t.Fatal("a stalled response header parked the only account for the model; " +
+			"the next request aborts with \"no account found\" instead of retrying")
 	}
 }
 
