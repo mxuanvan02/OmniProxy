@@ -632,7 +632,7 @@ func (t *UsageTracker) GetChartData(period string) []ChartDataPoint {
 	defer t.mu.RUnlock()
 
 	now := time.Now().UTC()
-	switch period {
+	switch resolveUsagePeriod(period) {
 	case "today":
 		return t.bucketByHour(now, true)
 	case "24h":
@@ -641,8 +641,16 @@ func (t *UsageTracker) GetChartData(period string) []ChartDataPoint {
 		return t.bucketByDay(now, 7)
 	case "30d":
 		return t.bucketByDay(now, 30)
+	case "60d", "all":
+		// Both used to fall through to the 7-day default, so an all-time chart
+		// showed a week. 60 is the widest window the ring and the daily map are
+		// worth charting at one bucket per day; "all" shares it rather than
+		// inventing a second shape.
+		return t.bucketByDay(now, 60)
 	default:
-		return t.bucketByDay(now, 7)
+		// Unreachable: resolveUsagePeriod only ever returns a member of
+		// usagePeriods.
+		return t.bucketByHour(now, false)
 	}
 }
 
@@ -849,7 +857,7 @@ func (t *UsageTracker) sumDailyTotalsLocked(stats *UsageStats, period string) {
 // used by getPeriodCutoff for the recent-requests feed and chart.
 func dailyCutoffDate(period string) string {
 	now := time.Now().UTC()
-	switch period {
+	switch resolveUsagePeriod(period) {
 	case "all":
 		return ""
 	case "today":
@@ -863,7 +871,10 @@ func dailyCutoffDate(period string) string {
 	case "60d":
 		return now.AddDate(0, 0, -59).Format("2006-01-02")
 	default:
-		return now.AddDate(0, 0, -6).Format("2006-01-02")
+		// Unreachable: resolveUsagePeriod only ever returns a member of
+		// usagePeriods. It answers with the 24h cutoff rather than the 7-day one
+		// it used to, because that mismatch is the bug this arm used to hide.
+		return now.AddDate(0, 0, -1).Format("2006-01-02")
 	}
 }
 
@@ -933,11 +944,37 @@ func (t *UsageTracker) UnsubscribeSSE(l *sseListener) {
 	}
 }
 
+// usagePeriods is the one supported set of usage periods. Every surface that
+// resolves a period — getPeriodCutoff and dailyCutoffDate for the totals and
+// the recent-requests feed, GetChartData for the chart — goes through
+// resolveUsagePeriod, so two surfaces can no longer silently land on different
+// windows. The set is the union of what those aggregators already implement:
+// nothing that worked before stops working, and nothing new is invented.
+//
+// "1h" is deliberately absent, and that absence is what the UI must mirror.
+// dailyData is keyed by the UTC day, so no sub-day total can be aggregated from
+// it, and the chart has no bucket shape finer than one hour. The admin client
+// offered it anyway; getPeriodCutoff then fell back to 24h while
+// dailyCutoffDate fell back to 7 days, so one label showed three windows.
+var usagePeriods = []string{"today", "24h", "7d", "30d", "60d", "all"}
+
+// resolveUsagePeriod maps any period, including an unsupported one, to a member
+// of usagePeriods. An unknown value resolves to 24h on every surface — the same
+// window everywhere is the whole point.
+func resolveUsagePeriod(period string) string {
+	for _, supported := range usagePeriods {
+		if supported == period {
+			return period
+		}
+	}
+	return "24h"
+}
+
 // getPeriodCutoff returns the oldest record timestamp to include. UTC, to match
 // the UTC record timestamps and the UTC dailyData keys used by dailyCutoffDate.
 func getPeriodCutoff(period string) time.Time {
 	now := time.Now().UTC()
-	switch period {
+	switch resolveUsagePeriod(period) {
 	case "all":
 		return time.Time{} // zero time includes all records
 	case "today":
@@ -951,6 +988,8 @@ func getPeriodCutoff(period string) time.Time {
 	case "60d":
 		return now.Add(-60 * 24 * time.Hour)
 	default:
+		// Unreachable: resolveUsagePeriod only ever returns a member of
+		// usagePeriods.
 		return now.Add(-24 * time.Hour)
 	}
 }
