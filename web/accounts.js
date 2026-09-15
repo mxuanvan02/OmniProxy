@@ -2793,6 +2793,15 @@ let detailAllowedError = '';
       '<input type="password" id="externalApiKey" class="font-mono" placeholder="' + escapeAttr(t('external.apiKeyPlaceholder')) + '" autocomplete="off" /></div>' +
       '<div class="form-group"><label>' + escapeHtml(t('external.nameLabel')) + '</label>' +
       '<input type="text" id="externalName" placeholder="' + escapeAttr(t('external.namePlaceholder')) + '" /></div>' +
+      '<div class="form-group"><label>' + escapeHtml(t('external.dialectLabel')) + '</label>' +
+      '<select id="externalDialect">' +
+      '<option value="chat" selected>' + escapeHtml(t('external.dialectChat')) + '</option>' +
+      '<option value="responses">' + escapeHtml(t('external.dialectResponses')) + '</option>' +
+      '</select>' +
+      '<span class="help-block text-xs">' + escapeHtml(t('external.dialectHelp')) + '</span></div>' +
+      '<div class="form-group hidden" id="externalResponsesPathGroup"><label>' +
+      escapeHtml(t('external.responsesPathLabel')) + ' <span class="muted-text">(' + escapeHtml(t('common.optional')) + ')</span></label>' +
+      '<input type="text" id="externalResponsesPath" class="font-mono" placeholder="' + escapeAttr(t('external.responsesPathPlaceholder')) + '" /></div>' +
       '<div class="form-group"><label class="flex items-center gap-2"><input type="checkbox" id="externalTest" checked /> ' + escapeHtml(t('external.testNow')) + '</label>' +
       '<span class="help-block text-xs">' + escapeHtml(t('external.testHelp')) + '</span></div>' +
       '<div class="modal-footer">' +
@@ -2800,6 +2809,13 @@ let detailAllowedError = '';
       '<button class="btn btn-primary" id="importExternalBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
       '</div>';
     $('importExternalBtn').addEventListener('click', importExternal);
+    // The path override is meaningful only on the Responses dialect. Hiding it
+    // until then is the signal that it is not a general-purpose field.
+    const dialectSelect = $('externalDialect');
+    const responsesPathGroup = $('externalResponsesPathGroup');
+    dialectSelect.addEventListener('change', function () {
+      responsesPathGroup.classList.toggle('hidden', dialectSelect.value !== 'responses');
+    });
   }
 
   function modalAgentRouter(title, body) {
@@ -2849,10 +2865,16 @@ let detailAllowedError = '';
     if (!apiKey) return toastWarning(t('external.apiKeyLabel') + ' is required');
     const name = $('externalName').value.trim();
     const test = $('externalTest').checked;
+    const externalApiDialect = $('externalDialect').value;
+    // Only send the path when it applies; the backend drops it otherwise, and
+    // reading a hidden input invites sending whatever was typed before hiding it.
+    const responsesPath = externalApiDialect === 'responses'
+      ? $('externalResponsesPath').value.trim()
+      : '';
     const btn = $('importExternalBtn');
     btn.disabled = true; btn.textContent = t('common.loading') || '...';
     try {
-      const res = await api('/auth/external-provider', { method: 'POST', body: JSON.stringify({ baseUrl, apiKey, name, test }) });
+      const res = await api('/auth/external-provider', { method: 'POST', body: JSON.stringify({ baseUrl, apiKey, name, test, externalApiDialect, responsesPath }) });
       const d = await res.json();
       if (d.success) {
         closeModal(); loadAccounts(); loadStats();

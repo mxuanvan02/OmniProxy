@@ -10699,14 +10699,16 @@ func (h *Handler) apiImportKiroApiKey(w http.ResponseWriter, r *http.Request) {
 // before being persisted.
 func (h *Handler) apiImportExternalProvider(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		BaseURL    string `json:"baseUrl"`
-		ApiKey     string `json:"apiKey"`
-		Name       string `json:"name"`
-		Nickname   string `json:"nickname"`
-		AuthMethod string `json:"authMethod"`
-		Weight     int    `json:"weight"`
-		ProxyURL   string `json:"proxyURL"`
-		Test       bool   `json:"test"`
+		BaseURL            string `json:"baseUrl"`
+		ApiKey             string `json:"apiKey"`
+		Name               string `json:"name"`
+		Nickname           string `json:"nickname"`
+		AuthMethod         string `json:"authMethod"`
+		Weight             int    `json:"weight"`
+		ProxyURL           string `json:"proxyURL"`
+		ExternalAPIDialect string `json:"externalApiDialect"`
+		ResponsesPath      string `json:"responsesPath"`
+		Test               bool   `json:"test"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		w.WriteHeader(400)
@@ -10745,6 +10747,21 @@ func (h *Handler) apiImportExternalProvider(w http.ResponseWriter, r *http.Reque
 		providerName = "AgentRouter"
 	}
 
+	// Normalize the dialect rather than trust the client. externalAPIDialect
+	// already treats an unrecognised value as chat, but storing "grpc" would leave
+	// a value in the config that reads as if it meant something. AgentRouter
+	// shares this endpoint and speaks no OpenAI dialect, so the field is dropped
+	// there; responsesPath is meaningful only on the Responses dialect, and is
+	// trimmed because the adapter composes it into a URL.
+	externalAPIDialectValue := ""
+	if authMethod == externalAuthMethod && strings.EqualFold(strings.TrimSpace(body.ExternalAPIDialect), "responses") {
+		externalAPIDialectValue = "responses"
+	}
+	responsesPath := ""
+	if externalAPIDialectValue == "responses" {
+		responsesPath = strings.TrimSpace(body.ResponsesPath)
+	}
+
 	account := config.Account{
 		ID:          uuid.New().String(),
 		Email:       name,
@@ -10760,6 +10777,8 @@ func (h *Handler) apiImportExternalProvider(w http.ResponseWriter, r *http.Reque
 		ProxyURL:    strings.TrimSpace(body.ProxyURL),
 		// No ExpiresAt — external API keys don't auto-refresh; ensureValidToken
 		// treats ExpiresAt==0 as "always valid".
+		ExternalAPIDialect: externalAPIDialectValue,
+		ResponsesPath:      responsesPath,
 	}
 
 	// Optional live validation: a tiny ping lets the UI confirm the pair works
@@ -10793,10 +10812,11 @@ func (h *Handler) apiImportExternalProvider(w http.ResponseWriter, r *http.Reque
 	resp := map[string]interface{}{
 		"success": true,
 		"account": map[string]string{
-			"id":       account.ID,
-			"email":    account.Email,
-			"provider": providerName,
-			"baseUrl":  account.BaseURL,
+			"id":                 account.ID,
+			"email":              account.Email,
+			"provider":           providerName,
+			"baseUrl":            account.BaseURL,
+			"externalApiDialect": account.ExternalAPIDialect,
 		},
 	}
 	if body.Test {
