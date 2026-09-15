@@ -224,17 +224,20 @@ func TestCandidateRankingPrefersDistinctiveTokens(t *testing.T) {
 	}
 }
 
-// Evasion must never engage on its own: it works around a provider's content
-// control, and only the operator can accept that risk per credential.
-func TestEvasionIsOptInPerAccount(t *testing.T) {
+func TestEvasionIsRestrictedToAgentRouter(t *testing.T) {
 	if contentBlockEvasionEnabled(nil) {
 		t.Error("nil account must not be treated as opted in")
 	}
 	if contentBlockEvasionEnabled(&config.Account{Email: "x"}) {
 		t.Error("account defaults to evasion enabled — must be opt-in")
 	}
-	if !contentBlockEvasionEnabled(&config.Account{ContentBlockEvasion: true}) {
-		t.Error("explicit opt-in was not honoured")
+	if contentBlockEvasionEnabled(&config.Account{AuthMethod: "openai", ContentBlockEvasion: true}) {
+		t.Error("non-AgentRouter account enabled evasion")
+	}
+	for _, method := range []string{"agentrouter", "external_agentrouter"} {
+		if !contentBlockEvasionEnabled(&config.Account{AuthMethod: method}) {
+			t.Errorf("%s account was not enabled automatically", method)
+		}
 	}
 }
 

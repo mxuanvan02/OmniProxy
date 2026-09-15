@@ -6,11 +6,12 @@
 //
 // See content_block_evasion.go for the experimental basis (the scanner compares
 // raw bytes and does not normalise Unicode) and for the risk note: this works
-// around a provider's own content control and is opt-in per account.
+// around a provider's own content control and is restricted to AgentRouter
+// accounts.
 //
 // # SHAPE OF THE LOOP
 //
-// On a content-blocked verdict, for an account with ContentBlockEvasion on:
+// On a content-blocked verdict, for an AgentRouter account:
 //
 //	attempt 1..N  obfuscate a shrinking set of candidate terms, retry
 //	on success    record the terms that worked, so later requests pre-empt them
@@ -40,13 +41,11 @@ import (
 	"omniproxy/pool"
 )
 
-// contentBlockEvasionEnabled reports whether this account opted in.
-//
-// Deliberately requires an explicit per-account flag: the technique is evasion
-// of a provider's content control, and only the operator can accept that risk
-// for a given credential.
+// contentBlockEvasionEnabled reports whether the AgentRouter recovery policy
+// may run. The policy is intentionally provider-scoped: a content-block
+// response from another provider must retain its normal semantics.
 func contentBlockEvasionEnabled(account *config.Account) bool {
-	return account != nil && account.ContentBlockEvasion
+	return account != nil && isAgentRouterAccount(account)
 }
 
 // cloneKiroPayload returns an independent retry payload. JSON round-tripping

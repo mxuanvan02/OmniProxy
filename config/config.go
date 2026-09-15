@@ -370,16 +370,14 @@ type Account struct {
 	ImageModel          string `json:"imageModel,omitempty"`          // model used by image-generation tests/requests
 	CodexImageModel     string `json:"codexImageModel,omitempty"`     // model used with the Codex image_generation tool
 
-	// ContentBlockEvasion opts this account into retrying a payload that the
+	// ContentBlockEvasion records legacy opt-in state for a payload that the
 	// upstream rejected with a content/sensitive-words verdict, with the
 	// offending term split by a zero-width character so the provider's raw
 	// substring scan no longer matches while the text still reads identically
 	// to the model.
 	//
-	// Off by default, and deliberately per-account rather than global: this
-	// works around a provider's own content control, which its terms of service
-	// may treat as a violation. Only the operator can judge that trade-off for
-	// a given credential, so nothing here turns itself on.
+	// Content-block recovery is currently restricted to AgentRouter accounts by
+	// the proxy policy; this field is retained for config compatibility.
 	ContentBlockEvasion bool `json:"contentBlockEvasion,omitempty"`
 }
 

@@ -41,10 +41,9 @@
 // # OPERATOR-VISIBLE RISK
 //
 // Splitting tokens to get past a provider's content filter is evasion. The
-// provider may treat it as a terms violation and suspend the account. That is
-// why this is opt-in per account (Account.ContentBlockEvasion) and off unless
-// an operator turns it on. Enabled deliberately for AgentRouter accounts by
-// request of the operator, who accepted that risk explicitly.
+// provider may treat it as a terms violation and suspend the account. This
+// recovery is therefore restricted to AgentRouter accounts and never applies
+// to other providers.
 package proxy
 
 import (
