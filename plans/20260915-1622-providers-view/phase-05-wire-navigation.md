@@ -197,7 +197,7 @@ npm test 2>&1 | tail -25
 ```
 
 Expected: all suites pass, including the three new Shell tests and phase 04's
-ten.
+eleven.
 
 ### Step 6: Typecheck and lint
 

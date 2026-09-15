@@ -424,7 +424,7 @@ cd /Users/van/Tools/OmniProxy/web-next
 npm test -- ProvidersView.test.tsx 2>&1 | tail -25
 ```
 
-Expected: 10 passed.
+Expected: 11 passed.
 
 If `renders one card per vendor` fails on the account count, check
 `groupByVendor`'s grouping before touching the view — the bug is in phase 03,
@@ -490,10 +490,10 @@ EOF
 
 ## Todo list
 
-- [ ] Step 1: write `ProvidersView.test.tsx` with all 10 tests
+- [ ] Step 1: write `ProvidersView.test.tsx` with all 11 tests
 - [ ] Step 2: confirm it fails to resolve `./ProvidersView`
 - [ ] Step 3: write `ProvidersView.tsx`
-- [ ] Step 4: all 10 tests pass
+- [ ] Step 4: all 11 tests pass
 - [ ] Step 5: full suite still green
 - [ ] Step 6: `tsc -b` and `npm run lint` clean
 - [ ] Step 7: file under 200 lines
@@ -501,7 +501,7 @@ EOF
 
 ## Success criteria
 
-- 10 tests pass and the four pre-existing suites are untouched.
+- 11 tests pass and the four pre-existing suites are untouched.
 - A vendor with zero errors renders `"0"`, not `"—"`.
 - A vendor whose catalog refresh failed shows the failure, and one that was never
   probed shows `Chưa nạp` rather than a bare `0`.
