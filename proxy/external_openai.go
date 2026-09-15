@@ -863,7 +863,7 @@ func parseExternalOpenAISSE(body io.Reader, callback *KiroStreamCallback) error 
 	callback = gate.callback()
 	br := bufio.NewReaderSize(body, 16*1024)
 
-	// SSE idle watchdog — same rationale as parseCodexResponsesSSE.
+	// SSE idle watchdog — same rationale as parseResponsesSSE.
 	var watchdog *sseIdleWatchdog
 	if rc, ok := body.(io.ReadCloser); ok {
 		watchdog = newSSEIdleWatchdog(rc)

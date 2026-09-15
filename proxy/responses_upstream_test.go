@@ -5,6 +5,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -37,10 +38,10 @@ type responsesGoldenCase struct {
 // byte of Codex behaviour.
 //
 // Both payloads deliberately leave OriginalModel and
-// CurrentMessage.UserInputMessage.ModelID empty, so the builder's hardcoded
-// default model is on the only path that can supply "model" — mutating that
-// literal fails these tests. Setting either field would satisfy the precedence
-// chain earlier and silently make the default dead code.
+// CurrentMessage.UserInputMessage.ModelID empty, so the Codex dialect's own
+// default model is on the only path that can supply "model" — mutating it in
+// codexResponsesOptions fails these tests. Setting either field would satisfy
+// the precedence chain earlier and silently make the default dead code.
 func TestCodexResponsesBodyGolden(t *testing.T) {
 	cases := []responsesGoldenCase{
 		{
@@ -107,17 +108,19 @@ func TestCodexResponsesBodyGolden(t *testing.T) {
 //
 //  1. payload.OriginalModel (the client's requested model)
 //  2. payload.ConversationState.CurrentMessage.UserInputMessage.ModelID
-//  3. the hardcoded default "gpt-5.6-sol"
+//  3. responsesDialectOptions.DefaultModel, which the Codex dialect sets to
+//     "gpt-5.6-sol" and a generic external gateway leaves empty
 //
 // Both golden payloads leave levels 1 and 2 empty on purpose, so they pin level
 // 3 and nothing else — without this test a dropped or reordered level above the
 // default would be silent, and every request would quietly resolve to a
-// lower-precedence model. Phase 01 relocates exactly this chain into
+// lower-precedence model. Phase 01 relocated exactly this chain into
 // proxy/responses_upstream.go, which is what makes the pin load-bearing.
 //
-// Phase 01 also replaces level 3 with a configurable
-// responsesDialectOptions.DefaultModel and adds an error branch for the
-// no-model case; whoever makes that change must extend this test.
+// Level 3 stopped being a literal inside the builder in that same change, so an
+// empty default became reachable for the first time; the error it now produces,
+// and the fact that an empty default is the only difference, are pinned by
+// TestResponsesBuilderRejectsAnEmptyModel below.
 func TestCodexResponsesModelPrecedence(t *testing.T) {
 	// Three distinct literals so a mix-up between any two levels cannot pass.
 	const (
@@ -191,7 +194,7 @@ func TestCodexResponsesModelPrecedence(t *testing.T) {
 //   - InferenceConfig non-nil but with an empty ReasoningEffort
 //   - instructions == "" and no tools, i.e. a body with neither key — the
 //     "bare-system-prompt" case covers the no-tools half of that
-//   - codexMessageContent with images but empty text
+//   - responsesMessageContent with images but empty text
 func goldenResponsesPayload() *KiroPayload {
 	payload := &KiroPayload{
 		ToolNameMap: map[string]string{
@@ -203,7 +206,7 @@ func goldenResponsesPayload() *KiroPayload {
 	}
 	// NOTE: OriginalModel and CurrentMessage.UserInputMessage.ModelID are
 	// deliberately left EMPTY. Setting either would satisfy the model
-	// precedence chain before it reaches the builder's hardcoded default,
+	// precedence chain before it reaches the Codex dialect's own default,
 	// making that default dead code and leaving the golden blind to it.
 	payload.ConversationState.ConversationID = "conv-golden"
 	payload.ConversationState.ChatTriggerType = "MANUAL"
@@ -345,4 +348,43 @@ func goldenBareSystemPromptResponsesPayload() *KiroPayload {
 	cur.Origin = "AI_EDITOR"
 
 	return payload
+}
+
+// TestResponsesBuilderRejectsAnEmptyModel pins the guard the builder added when
+// the Codex default became configurable.
+//
+// Before that change the Codex path ended in a hardcoded "gpt-5.6-sol"
+// literal, so the model could never be empty by the time the body was built.
+// Moving the default into responsesDialectOptions made emptiness reachable, and
+// for Codex it stays unreachable — codexResponsesOptions always supplies a
+// default — which is exactly why the golden and precedence tests above cannot
+// reach this arm. The first caller that leaves DefaultModel empty is the
+// generic external gateway, where a missing model must surface as an error here
+// rather than as an empty "model" field the upstream rejects with a 400.
+//
+// Both directions are asserted on purpose. A lone "it returns an error" check
+// would also pass if the builder rejected this payload for some unrelated
+// reason, so the second case proves the same payload succeeds once a default is
+// supplied, leaving the empty default as the only difference.
+func TestResponsesBuilderRejectsAnEmptyModel(t *testing.T) {
+	payload := func() *KiroPayload {
+		p := &KiroPayload{}
+		p.ConversationState.CurrentMessage.UserInputMessage.Content = "hello"
+		return p
+	}
+
+	if _, err := kiroPayloadToResponsesRequest(payload(), nil, responsesDialectOptions{}); err == nil {
+		t.Fatal("builder accepted a payload with no model and no default")
+	} else if !strings.Contains(err.Error(), "carries no model id") {
+		t.Fatalf("error does not name the missing model: %v", err)
+	}
+
+	body, err := kiroPayloadToResponsesRequest(payload(), nil,
+		responsesDialectOptions{DefaultModel: "gpt-5.6-sol"})
+	if err != nil {
+		t.Fatalf("builder rejected the same payload once a default was supplied: %v", err)
+	}
+	if got := body["model"]; got != "gpt-5.6-sol" {
+		t.Fatalf("model = %v, want the supplied default", got)
+	}
 }
