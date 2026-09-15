@@ -18,10 +18,12 @@ The request: a dedicated page per provider showing the API link, how many calls
 it served, and what its errors are.
 
 "Provider" here means **vendor**, i.e. one upstream `baseUrl`
-(`api.apiforcode.com`, `AgentRouter`, `kiro.pix4k.com`, …). Accounts that are not
-external OpenAI-compatible providers (Kiro, Codex, Antigravity, Gommo) have no
-`baseUrl` (config/config.go:130-134); they fall back to their
-`provider`/`providerKind` and appear as vendor rows on the same page.
+(`api.apiforcode.com`, `AgentRouter`, `kiro.pix4k.com`, …). Eight accounts have
+no `baseUrl` (config/config.go:130-134) — the two Google Antigravity accounts,
+one OpenAI Codex, one Gommo AutoAI, and four search services (`tavily`,
+`jina-reader`, `firecrawl`, `exa`) — so they fall back to their `provider` label
+and appear as vendor rows on the same page. Hiding them would make the page's
+totals disagree with `/admin/api/accounts`.
 
 ## 2. Current state
 
@@ -306,6 +308,9 @@ the type-level half is guarded.
 **Created**
 - `web-next/src/lib/providers.ts`, `web-next/src/components/ProvidersView.tsx`
 - `web-next/src/lib/providers.test.ts`, `web-next/src/components/ProvidersView.test.tsx`, `web-next/src/components/Shell.test.tsx`
+- `proxy/pool_health_route_test.go` — the route's 200/401 pair; the session gate
+  at `proxy/handler.go:6151` runs before the route switch, so a shell probe
+  cannot distinguish a registered route from an unregistered one
 
 **Not touched**
 - `web/` (the legacy client) and `web-next/src/components/AccountsView.tsx`
