@@ -243,6 +243,85 @@ func classifyAntigravityFailure(status int, body string) antigravityFailureKind 
 	return antigravityFailureOther
 }
 
+// antigravityValidationLink pulls the verification page out of a
+// VALIDATION_REQUIRED body. Google states it twice — as
+// metadata.validation_url on the ErrorInfo detail, and again as the first
+// google.rpc.Help link — so both spellings are read.
+//
+// The link is the only thing that clears the state, and the error body is
+// truncated to 400 characters on its way to the admin UI, which cuts the URL
+// off mid-query. Reading it from the full response is what makes it usable.
+func antigravityValidationLink(body string) string {
+	var payload struct {
+		Error struct {
+			Details []struct {
+				Metadata map[string]string `json:"metadata"`
+				Links    []struct {
+					URL string `json:"url"`
+				} `json:"links"`
+			} `json:"details"`
+		} `json:"error"`
+	}
+	if json.Unmarshal([]byte(body), &payload) != nil {
+		return ""
+	}
+	for _, detail := range payload.Error.Details {
+		if url := antigravityWebLink(detail.Metadata["validation_url"]); url != "" {
+			return url
+		}
+	}
+	for _, detail := range payload.Error.Details {
+		for _, link := range detail.Links {
+			if url := antigravityWebLink(link.URL); url != "" {
+				return url
+			}
+		}
+	}
+	return ""
+}
+
+// antigravityWebLink keeps only absolute https URLs. The value is rendered as a
+// clickable link on the admin origin, which holds the session token, and the
+// account's endpoint is operator-editable — so a response from a swapped
+// upstream must not be able to plant a javascript: target there. Google only
+// ever answers with https, so nothing legitimate is lost.
+func antigravityWebLink(raw string) string {
+	url := strings.TrimSpace(raw)
+	if !strings.HasPrefix(strings.ToLower(url), "https://") {
+		return ""
+	}
+	return url
+}
+
+// markAntigravityNeedsVerification stores the page the account owner has to
+// open. The account keeps its credentials, its project and its enabled state —
+// only the link is recorded, so the admin UI can offer the action instead of a
+// raw 403.
+func markAntigravityNeedsVerification(account *config.Account, body string) {
+	url := antigravityValidationLink(body)
+	if account == nil || url == "" || account.AntigravityVerifyURL == url {
+		return
+	}
+	account.AntigravityVerifyURL = url
+	if err := config.SetAntigravityVerifyURL(account.ID, url); err != nil {
+		logger.Errorf("[Antigravity] failed to persist the verification link for %s: %v", account.Email, err)
+		return
+	}
+	logger.Warnf("[Antigravity] account %s needs owner verification: %s", account.Email, url)
+}
+
+// clearAntigravityVerification drops a stored link once the account answers a
+// request again, so the UI stops asking for an action that is already done.
+func clearAntigravityVerification(account *config.Account) {
+	if account == nil || account.AntigravityVerifyURL == "" {
+		return
+	}
+	account.AntigravityVerifyURL = ""
+	if err := config.SetAntigravityVerifyURL(account.ID, ""); err != nil {
+		logger.Errorf("[Antigravity] failed to clear the verification link for %s: %v", account.Email, err)
+	}
+}
+
 // markAntigravityBanned records the terminal state so the pool stops selecting
 // the account and the admin UI can show why.
 func markAntigravityBanned(account *config.Account, body string) {
@@ -507,10 +586,9 @@ func antigravityPostJSON(account *config.Account, action string, body []byte) ([
 				continue
 			}
 		case antigravityFailureValidation:
-			// Recoverable, but only by a human: say so once instead of leaving
-			// the operator to guess why the account stopped serving.
-			logger.Warnf("[Antigravity] account %s needs owner verification before it can serve requests: %s",
-				account.Email, truncateAntigravityReason(text))
+			// Recoverable, but only by a human: store the page that clears it
+			// rather than leaving the operator to guess.
+			markAntigravityNeedsVerification(account, text)
 		}
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateErrBody(raw))
 	}
@@ -1100,13 +1178,16 @@ func CallExternalAntigravity(ctx context.Context, account *config.Account, paylo
 			logger.Warnf("[Antigravity] auth failure for %s: HTTP %d", account.Email, resp.StatusCode)
 		case antigravityFailureValidation:
 			// Not a ban and not a retryable failure: the account stays selectable
-			// until an operator finishes the check, so name the one action that
+			// until an operator finishes the check, so store the page that
 			// clears it rather than recording a terminal state.
-			logger.Warnf("[Antigravity] account %s needs owner verification before it can serve requests: %s",
-				account.Email, truncateAntigravityReason(text))
+			markAntigravityNeedsVerification(account, text)
 		}
 		return fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, account.Email, truncateErrBody(errBody))
 	}
+
+	// The account answered a real request, so whatever verification it was
+	// asked for has been done.
+	clearAntigravityVerification(account)
 
 	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
 		return parseAntigravitySSE(resp.Body, payload, callback)

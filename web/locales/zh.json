@@ -393,6 +393,8 @@
   "accounts.confirmReauth": "刷新该 banned Codex 账号的 OAuth token 并重新获取 usage？不会清除 ban — 刷新后需按 Test 验证账号已恢复并清除 ban。",
   "accounts.reauthDone": "Token + usage 已刷新。按 Test 清除 ban。",
   "accounts.reauthFailed": "刷新 token 失败 — refresh token 可能已失效，需要手动重新登录",
+  "accounts.verifyAccount": "验证账户",
+  "accounts.verifyAccountHint": "Google 要求账户所有者完成验证步骤。打开验证页面即可解除。",
   "accounts.reauthRequired": "需要重新登录",
   "accounts.loginAgain": "重新登录",
   "accounts.changeCodexPassword": "修改 OpenAI 密码",

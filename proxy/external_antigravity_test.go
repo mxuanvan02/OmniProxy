@@ -301,23 +301,42 @@ func TestClassifyAntigravityFailure(t *testing.T) {
 // TestAntigravityValidationDoesNotBan drives the real adapter against a fake
 // upstream and pins the consequence of the classification: an owner who still
 // has a verification step outstanding must leave the account enabled and
-// un-banned, because the remedy is a human action on the Google account.
+// un-banned, because the remedy is a human action on the Google account — and
+// the page that carries out that action has to survive the round trip.
 //
 // A terminated account returns the same 403, and that one must still be
 // recorded — otherwise the fix would have turned the guard into a no-op.
 func TestAntigravityValidationDoesNotBan(t *testing.T) {
+	const verifyURL = "https://accounts.google.com/signin/continue?sarp=1&continue=https://developers.google.com/gemini-code-assist/auth/auth_success_gemini&authuser"
+
 	cases := []struct {
 		name       string
 		status     int
 		body       string
 		wantBanned bool
+		wantVerify string
 	}{
 		{
+			// The shape Google actually returns: the link is stated twice, once
+			// as ErrorInfo metadata and once as a google.rpc.Help link.
 			name:   "verification required",
 			status: http.StatusForbidden,
 			body: `{"error":{"code":403,"message":"Verify your account to continue.","status":"PERMISSION_DENIED",` +
-				`"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"VALIDATION_REQUIRED"}]}}`,
-			wantBanned: false,
+				`"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"VALIDATION_REQUIRED",` +
+				`"domain":"cloudcode-pa.googleapis.com","metadata":{"validation_url":"` + verifyURL + `",` +
+				`"validation_url_link_text":"Verify your account"}},` +
+				`{"@type":"type.googleapis.com/google.rpc.Help","links":[{"description":"Verify your account",` +
+				`"url":"` + verifyURL + `"}]}]}}`,
+			wantVerify: verifyURL,
+		},
+		{
+			// Only the Help detail present, as some responses omit the metadata.
+			name:   "link only in the help detail",
+			status: http.StatusForbidden,
+			body: `{"error":{"code":403,"message":"Verify your account to continue.","details":[` +
+				`{"@type":"type.googleapis.com/google.rpc.Help","links":[{"description":"Verify",` +
+				`"url":"` + verifyURL + `"}]}]}}`,
+			wantVerify: verifyURL,
 		},
 		{
 			name:       "account disabled",
@@ -364,6 +383,9 @@ func TestAntigravityValidationDoesNotBan(t *testing.T) {
 				if account.BanStatus != "BANNED" {
 					t.Fatalf("BanStatus = %q, want BANNED for a disabled account", account.BanStatus)
 				}
+				if account.AntigravityVerifyURL != "" {
+					t.Errorf("AntigravityVerifyURL = %q, want empty for a terminated account", account.AntigravityVerifyURL)
+				}
 				return
 			}
 			if account.BanStatus != "" {
@@ -372,7 +394,69 @@ func TestAntigravityValidationDoesNotBan(t *testing.T) {
 			if !account.Enabled {
 				t.Error("account was disabled, want it left enabled")
 			}
+			if account.AntigravityVerifyURL != tc.wantVerify {
+				t.Errorf("AntigravityVerifyURL = %q, want %q", account.AntigravityVerifyURL, tc.wantVerify)
+			}
 		})
+	}
+}
+
+// TestAntigravityVerifyURLClearsOnSuccess pins the other half of the stored
+// link: once the account serves a request again, the UI must stop asking the
+// operator to do something they have already done.
+func TestAntigravityVerifyURLClearsOnSuccess(t *testing.T) {
+	initConfigForTests(t)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"response\":{\"candidates\":[{\"content\":{\"role\":\"model\","+
+			"\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}}\n\n")
+	}))
+	defer upstream.Close()
+
+	account := &config.Account{
+		ID:                          "ag",
+		Email:                       "owner@example.com",
+		AuthMethod:                  "antigravity",
+		Enabled:                     true,
+		BaseURL:                     upstream.URL,
+		AccessToken:                 "token",
+		ExpiresAt:                   time.Now().Add(time.Hour).Unix(),
+		GoogleProjectID:             "aicode-consumers",
+		AntigravityProjectCheckedAt: time.Now().Unix(),
+		AntigravityVerifyURL:        "https://accounts.google.com/signin/continue?stale",
+	}
+
+	if err := CallExternalAntigravity(context.Background(), account,
+		buildAntigravityPayload(), &KiroStreamCallback{}); err != nil {
+		t.Fatalf("call: %v", err)
+	}
+	if account.AntigravityVerifyURL != "" {
+		t.Errorf("AntigravityVerifyURL = %q, want it cleared after a successful call", account.AntigravityVerifyURL)
+	}
+}
+
+// TestAntigravityValidationLinkIgnoresUnusableBodies covers the inputs the
+// parser must not invent a link from. A truncated body is the live case: the
+// admin UI caps error text at 400 characters, which cuts the URL mid-query, so
+// a partial link has to be rejected rather than stored and offered as a button.
+func TestAntigravityValidationLinkIgnoresUnusableBodies(t *testing.T) {
+	for _, raw := range []string{
+		``,
+		`not json`,
+		`{"error":{"code":403,"message":"Verify your account to continue."}}`,
+		`{"error":{"details":[{"metadata":{"validation_url":"   "}}]}}`,
+		// A body cut off partway through the URL, as truncateErrBody produces.
+		`{"error":{"details":[{"metadata":{"validation_url":"https://accounts.google.com/signin/con`,
+		// A swapped upstream must not be able to plant a script target: the link
+		// is rendered on the admin origin, which holds the session token.
+		`{"error":{"details":[{"metadata":{"validation_url":"javascript:alert(1)"}}]}}`,
+		`{"error":{"details":[{"links":[{"url":"http://evil.example/verify"}]}]}}`,
+		`{"error":{"details":[{"links":[{"url":"data:text/html,<script>alert(1)</script>"}]}]}}`,
+	} {
+		if got := antigravityValidationLink(raw); got != "" {
+			t.Errorf("antigravityValidationLink(%q) = %q, want empty", raw, got)
+		}
 	}
 }
 

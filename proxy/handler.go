@@ -8093,6 +8093,10 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"imageModel":                 a.ImageModel,
 			"codexImageModel":            a.CodexImageModel,
 			"tokenRefreshedAt":           a.TokenRefreshedAt,
+			// Google's verification page for an Antigravity account whose owner
+			// still has a check to complete. The card renders it as a button, so
+			// the operator can act on it without reading the truncated 403.
+			"antigravityVerifyUrl": a.AntigravityVerifyURL,
 		}
 	}
 	json.NewEncoder(w).Encode(result)
@@ -11748,6 +11752,12 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 				body["banned"] = true
 				body["banReason"] = account.BanReason
 			}
+			// The stored link, not the error text: the message is capped at 400
+			// characters and cuts the URL off mid-query, and the URL is the whole
+			// remedy for an account whose owner still has a check to complete.
+			if account.AntigravityVerifyURL != "" {
+				body["validationUrl"] = account.AntigravityVerifyURL
+			}
 			w.WriteHeader(403)
 			json.NewEncoder(w).Encode(body)
 			return
@@ -11942,6 +11952,10 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		"totalTokens":       account.TotalTokens,
 		"totalCredits":      account.TotalCredits,
 		"lastUsed":          account.LastUsed,
+		// Kept in step with the list serializer: the details modal and the
+		// account card must not disagree about whether a verification step is
+		// still outstanding.
+		"antigravityVerifyUrl": account.AntigravityVerifyURL,
 	}
 
 	json.NewEncoder(w).Encode(result)

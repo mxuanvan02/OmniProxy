@@ -681,6 +681,11 @@ let detailAllowedError = '';
         // to be seen to be verified, so Gommo gets its own run-a-prompt view.
         (isGommo ? '<button class="btn btn-xs btn-outline" data-action="gommoPlayground" data-id="' + idAttr + '">' + escapeHtml(t('gommo.playground') || 'Playground') + '</button>' : '') +
         (reauthRequired ? '<button class="btn btn-sm btn-danger" data-action="loginAgain" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.reauthRequiredHint')) + '">' + escapeHtml(t('accounts.loginAgain')) + '</button>' : '') +
+        // An account whose owner still has a Google verification step pending is
+        // not banned and not broken — the credential is fine. The link comes from
+        // the upstream 403 body and is the only thing that clears the state, so
+        // it is offered as an action instead of being left in the error text.
+        (a.antigravityVerifyUrl ? '<a class="btn btn-sm btn-primary" href="' + escapeAttr(a.antigravityVerifyUrl) + '" target="_blank" rel="noopener noreferrer" title="' + escapeAttr(t('accounts.verifyAccountHint')) + '">' + escapeHtml(t('accounts.verifyAccount')) + '</a>' : '') +
         (banned ? '' :
           '<button class="btn btn-sm ' + (a.enabled ? 'btn-outline' : 'btn-primary') + '" data-action="toggle" data-id="' + idAttr + '" data-enabled="' + (!a.enabled) + '">' +
           escapeHtml(a.enabled ? t('accounts.disable') : t('accounts.enable')) +
@@ -1782,17 +1787,25 @@ let detailAllowedError = '';
       c.innerHTML = '<div class="test-log-empty">' + escapeHtml(t('accounts.testLog.empty')) + '</div>';
       return;
     }
-    c.innerHTML = testLogs.map(log =>
-      '<div class="test-log-line ' + escapeAttr(log.type || 'info') + '">' +
-      '<span class="test-log-time">' + escapeHtml(log.time) + '</span>' +
-      '<span class="test-log-message">' + escapeHtml(log.msg) + '</span>' +
-      '</div>'
-    ).join('');
+    c.innerHTML = testLogs.map(log => {
+      // validationUrl is the Google page that clears a VALIDATION_REQUIRED
+      // account. It is rendered as a link rather than part of the message so it
+      // stays clickable; the raw error the API returns is truncated and cuts
+      // the URL off mid-query.
+      const link = log.link
+        ? ' <a class="test-log-link" href="' + escapeAttr(log.link) + '" target="_blank" rel="noopener noreferrer">' +
+          escapeHtml(log.linkText || t('accounts.verifyAccount')) + '</a>'
+        : '';
+      return '<div class="test-log-line ' + escapeAttr(log.type || 'info') + '">' +
+        '<span class="test-log-time">' + escapeHtml(log.time) + '</span>' +
+        '<span class="test-log-message">' + escapeHtml(log.msg) + link + '</span>' +
+        '</div>';
+    }).join('');
     c.scrollTop = c.scrollHeight;
   }
-  function addTestLog(msg, type) {
+  function addTestLog(msg, type, link, linkText) {
     const time = new Date().toLocaleTimeString();
-    testLogs.push({ time, msg, type });
+    testLogs.push({ time, msg, type, link, linkText });
     if (testLogs.length > 100) testLogs.shift();
     renderTestLog();
   }
@@ -2193,10 +2206,10 @@ let detailAllowedError = '';
           loadAccounts();
         }
       } else {
-        addTestLog(t('accounts.testLog.failed', accountIdentity, elapsed, d.error || t('common.unknownError')), 'err');
+        addTestLog(t('accounts.testLog.failed', accountIdentity, elapsed, d.error || t('common.unknownError')), 'err', d.validationUrl);
         // If the account was banned during the test, reload accounts to reflect
         // the new BANNED badge and disable state immediately.
-        if (d.banned || d.banStatus === 'BANNED') {
+        if (d.banned || d.banStatus === 'BANNED' || d.validationUrl) {
           loadAccounts();
         }
       }

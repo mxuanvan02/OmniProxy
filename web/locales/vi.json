@@ -393,6 +393,8 @@
   "accounts.confirmReauth": "Refresh OAuth token và lấy lại usage cho tài khoản Codex bị banned? KHÔNG xóa ban — sau khi refresh cần bấm Test để xác minh tài khoản đã phục hồi và xóa ban.",
   "accounts.reauthDone": "Token + usage đã refresh. Bấm Test để xóa ban.",
   "accounts.reauthFailed": "Refresh token thất bại — refresh token có thể đã chết, cần re-login thủ công",
+  "accounts.verifyAccount": "Xác thực tài khoản",
+  "accounts.verifyAccountHint": "Google yêu cầu chủ tài khoản hoàn tất bước xác minh. Mở trang xác thực để gỡ trạng thái này.",
   "accounts.reauthRequired": "Cần đăng nhập lại",
   "accounts.loginAgain": "Đăng nhập lại",
   "accounts.changeCodexPassword": "Đổi mật khẩu OpenAI",

@@ -3139,6 +3139,17 @@ img.brand-icon {
 .test-log-message {
   min-width: 0;
 }
+/* The line's colour is the log level (destructive for a failure), so the link
+   has to opt back into a readable colour and carry its own affordance. */
+.test-log-link {
+  color: var(--primary);
+  text-decoration: underline;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.test-log-link:hover {
+  text-decoration: none;
+}
 .test-log-line.ok {
   color: var(--success);
 }

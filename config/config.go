@@ -233,6 +233,13 @@ type Account struct {
 	// AntigravityProjectCheckedAt records the last successful project
 	// resolution (Unix seconds), so a restart does not re-run onboarding.
 	AntigravityProjectCheckedAt int64 `json:"antigravityProjectCheckedAt,omitempty"`
+	// AntigravityVerifyURL is the Google page this account's owner must open
+	// before the backend will serve it. Set when a request is answered with
+	// VALIDATION_REQUIRED and cleared on the next success. The API returns the
+	// link inside the 403 body, so without storing it the admin UI could only
+	// offer the operator a raw error dump: the URL is the sole action that
+	// clears the state.
+	AntigravityVerifyURL string `json:"antigravityVerifyUrl,omitempty"`
 
 	// ---- Gommo AutoAI (media generation) ----
 	// AuthMethod == "gommo" only.
@@ -1502,6 +1509,25 @@ func SetAccountBanStatus(id, status, reason string) error {
 			if status == "BANNED" || status == "DISABLED" || status == "REAUTH_REQUIRED" {
 				cfg.Accounts[i].Enabled = false
 			}
+			return Save()
+		}
+	}
+	return nil
+}
+
+// SetAntigravityVerifyURL persists the Google verification page an Antigravity
+// account's owner has to open, or clears it when url is empty. It never touches
+// Enabled or BanStatus: an unverified account is intact and still has valid
+// credentials, so it must not be switched off the way a banned one is.
+func SetAntigravityVerifyURL(id, url string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			if cfg.Accounts[i].AntigravityVerifyURL == url {
+				return nil
+			}
+			cfg.Accounts[i].AntigravityVerifyURL = url
 			return Save()
 		}
 	}
