@@ -100,6 +100,12 @@ type PeriodSummary struct {
 	EstimatedCacheReadTokens   int `json:"estimatedCacheReadTokens,omitempty"`
 	EstimatedCacheCreateTokens int `json:"estimatedCacheCreateTokens,omitempty"`
 
+	// Errors counts failed requests in this bucket. Failure is not derivable
+	// from the counters above: a request that fails still records whatever
+	// tokens the upstream reported first, so a healthy-looking token total can
+	// sit next to a 100% failure rate.
+	Errors int `json:"errors,omitempty"`
+
 	ByModel    map[string]*PeriodSummary `json:"byModel,omitempty"`
 	ByAccount  map[string]*PeriodSummary `json:"byAccount,omitempty"`
 	ByAPIKey   map[string]*PeriodSummary `json:"byApiKey,omitempty"`
@@ -737,6 +743,9 @@ func addToSummaryMap(m map[string]*PeriodSummary, key string, r RequestRecord) {
 		m[key] = s
 	}
 	s.Requests++
+	if r.Status == statusError {
+		s.Errors++
+	}
 	s.PromptTokens += r.InputTokens
 	s.CompletionTokens += r.OutputTokens
 	s.Cost += r.Cost
@@ -770,6 +779,7 @@ func mergeSummaryMapInto(dst, src map[string]*PeriodSummary) {
 			dst[key] = d
 		}
 		d.Requests += s.Requests
+		d.Errors += s.Errors
 		d.PromptTokens += s.PromptTokens
 		d.CompletionTokens += s.CompletionTokens
 		d.Cost += s.Cost
