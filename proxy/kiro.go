@@ -203,6 +203,14 @@ type KiroPayload struct {
 	// PublicModel is the model ID returned to the client. Empty falls back to the
 	// routing model for callers that do not need an alias.
 	PublicModel string `json:"-"`
+
+	// hasPriming records that the translator injected the two-entry system
+	// priming pair at the head of history. Truncation has to preserve that pair
+	// as a unit, and the flag cannot be recovered from the payload alone: a
+	// client-supplied history can start with a user turn and an assistant turn
+	// that says the same thing. The translator is the only place that knows, so
+	// it records the fact here rather than leaving truncation to guess.
+	hasPriming bool
 }
 
 type KiroUserInputMessage struct {

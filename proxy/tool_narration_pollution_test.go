@@ -27,7 +27,9 @@ func TestNoToolInvocationTextInAssistantHistory(t *testing.T) {
 	}
 	msgs = append(msgs, OpenAIMessage{Role: "user", Content: "summarize"})
 
-	payload := OpenAIToKiro(&OpenAIRequest{Model: "claude-opus-4.8", Messages: msgs}, false)
+	// Scrubbing tool-call narration out of history is Kiro-bound shaping and now
+	// runs at dispatch; see kiro_payload_prepare_test.go.
+	payload := prepareKiroPayload(OpenAIToKiro(&OpenAIRequest{Model: "claude-opus-4.8", Messages: msgs}, false))
 
 	for i, h := range payload.ConversationState.History {
 		a := h.AssistantResponseMessage
@@ -91,7 +93,8 @@ func TestCollapsesConsecutiveIdenticalToolResults(t *testing.T) {
 	}
 	msgs = append(msgs, OpenAIMessage{Role: "user", Content: "final"})
 
-	payload := OpenAIToKiro(&OpenAIRequest{Model: "claude-opus-4.8", Messages: msgs}, false)
+	// Kiro-bound: the duplicate collapsing this asserts is part of sanitize.
+	payload := prepareKiroPayload(OpenAIToKiro(&OpenAIRequest{Model: "claude-opus-4.8", Messages: msgs}, false))
 
 	count := 0
 	for _, h := range payload.ConversationState.History {
@@ -125,7 +128,7 @@ func TestDropsDotPollutedAssistantTurns(t *testing.T) {
 	}
 	msgs = append(msgs, ClaudeMessage{Role: "user", Content: "final question"})
 
-	payload := ClaudeToKiro(&ClaudeRequest{Model: "claude-opus-4.8", Messages: msgs}, false)
+	payload := prepareKiroPayload(ClaudeToKiro(&ClaudeRequest{Model: "claude-opus-4.8", Messages: msgs}, false))
 
 	for i, h := range payload.ConversationState.History {
 		a := h.AssistantResponseMessage
@@ -159,7 +162,7 @@ func TestScrubsClientReplayedToolCallText(t *testing.T) {
 		},
 	}
 
-	payload := ClaudeToKiro(req, false)
+	payload := prepareKiroPayload(ClaudeToKiro(req, false))
 
 	for i, h := range payload.ConversationState.History {
 		if a := h.AssistantResponseMessage; a != nil {

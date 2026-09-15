@@ -1808,7 +1808,13 @@ func dispatchChat(ctx context.Context, account *config.Account, payload *KiroPay
 		}
 		return CallExternalOpenAI(ctx, account, payload, callback)
 	}
-	return CallKiroAPI(ctx, account, payload, callback)
+	// Native Kiro is the only destination that rejects structured tool history,
+	// and it is reached by falling through every branch above. Shaping here
+	// rather than in the translators keeps that constraint off the external
+	// accounts, which accept the structured history and lose it when flattened.
+	// prepareKiroPayload returns a copy, so the account rotation loop still holds
+	// the raw payload for any external attempt that follows this one.
+	return CallKiroAPI(ctx, account, prepareKiroPayload(payload), callback)
 }
 
 // resolveExternalTestModel picks a concrete model ID for the provider-validation

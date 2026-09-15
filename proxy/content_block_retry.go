@@ -70,6 +70,7 @@ func cloneKiroPayload(payload *KiroPayload) (*KiroPayload, error) {
 	}
 	clone.OriginalModel = payload.OriginalModel
 	clone.PublicModel = payload.PublicModel
+	clone.hasPriming = payload.hasPriming
 	if payload.InferenceConfig != nil && clone.InferenceConfig != nil {
 		clone.InferenceConfig.ReasoningEffort = payload.InferenceConfig.ReasoningEffort
 		if payload.InferenceConfig.Thinking != nil {

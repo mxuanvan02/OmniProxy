@@ -355,16 +355,14 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 	// the last history assistant must carry matching structured toolUses. If not
 	// (orphaned tool results, e.g. after context compaction), flatten them into
 	// the current message text so the upstream does not reject the request.
+	//
+	// Deciding here is not the same as acting here. The flattening that Kiro
+	// needs is applied in prepareKiroPayload, at dispatch time, because it is a
+	// constraint of the Kiro API rather than of the request: an external account
+	// serving the same payload accepts the full structured history, and it does
+	// not know which account the pool will pick.
 	currentToolResultIDs := collectToolResultIDs(currentToolResults)
 	keepCurrentToolResults := currentToolResultsMatchLastAssistant(history, currentToolResultIDs)
-
-	// Flatten structured tool calls/results that live in history; upstream only
-	// accepts a single active tool turn (last assistant toolUses ⟺ current toolResults).
-	if keepCurrentToolResults {
-		history = sanitizeKiroHistory(history, currentToolResultIDs)
-	} else {
-		history = sanitizeKiroHistory(history, nil)
-	}
 
 	// build final content
 	finalContent := buildCurrentMessageContent(currentContent, currentImages, currentToolResults, keepCurrentToolResults)
@@ -374,6 +372,7 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 
 	// build payload
 	payload := &KiroPayload{}
+	payload.hasPriming = systemPrompt != ""
 	payload.ToolNameMap = toolNameMap
 	payload.ToolChoice = cloneToolChoice(req.ToolChoice)
 	payload.ConversationState.ChatTriggerType = "MANUAL"
@@ -416,7 +415,12 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 		}
 	}
 
-	truncatePayloadToLimit(payload, systemPrompt != "")
+	// Last history mutation, so the pairing invariant is checked on the final
+	// shape this translator produces. Every dialect rejects a tool result whose
+	// call is absent — terminal, so the request dies instead of rotating — and
+	// external accounts receive this history unsanitized, which is exactly when
+	// the orphan becomes reachable.
+	payload.ConversationState.History = stripOrphanedToolResults(payload.ConversationState.History)
 
 	return payload
 }
@@ -1372,15 +1376,10 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	}
 
 	// Decide whether current tool results form a valid active tool turn; if not,
-	// flatten them into the current message text (see ClaudeToKiro for rationale).
+	// flatten them into the current message text (see ClaudeToKiro for rationale,
+	// including why the flattening itself happens at dispatch time instead).
 	currentToolResultIDs := collectToolResultIDs(currentToolResults)
 	keepCurrentToolResults := currentToolResultsMatchLastAssistant(history, currentToolResultIDs)
-
-	if keepCurrentToolResults {
-		history = sanitizeKiroHistory(history, currentToolResultIDs)
-	} else {
-		history = sanitizeKiroHistory(history, nil)
-	}
 
 	// build final content
 	finalContent := buildCurrentMessageContent(currentContent, currentImages, currentToolResults, keepCurrentToolResults)
@@ -1390,6 +1389,7 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 
 	// build payload
 	payload := &KiroPayload{}
+	payload.hasPriming = systemPrompt != ""
 	payload.ToolChoice = cloneToolChoice(req.ToolChoice)
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.ConversationID = buildConversationID(modelID, systemPrompt, firstOpenAIConversationAnchor(nonSystemMessages))
@@ -1423,7 +1423,9 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 		}
 	}
 
-	truncatePayloadToLimit(payload, systemPrompt != "")
+	// Last history mutation, so the pairing invariant is checked on the final
+	// shape this translator produces (see ClaudeToKiro for why it matters here).
+	payload.ConversationState.History = stripOrphanedToolResults(payload.ConversationState.History)
 
 	payload.ToolNameMap = toolNameMap
 
@@ -1944,6 +1946,76 @@ func trimLeadingAssistantHistory(history []KiroHistoryMessage) []KiroHistoryMess
 		return nil
 	}
 	return history[idx:]
+}
+
+// stripOrphanedToolResults removes history tool results whose tool call is no
+// longer present earlier in the same history. Nothing does this today because
+// nothing needs to: sanitizeKiroHistory narrates every history tool result into
+// plain text before the history is trimmed, so the orphan it can create never
+// reaches an upstream. Removing that narration is what exposes the orphan, and
+// every dialect rejects it — the OpenAI chat dialect as a role:"tool" message
+// with no preceding tool_calls, the Responses dialect as a function_call_output
+// with no function_call, and Gemini as a functionResponse whose name matches no
+// call. Those failures are terminal, so the request dies instead of rotating to
+// another account.
+//
+// The orphan is created by trimming the head of the history
+// (dropLeadingAssistant, trimLeadingAssistantHistory), which drops the assistant
+// turn and leaves the user turn answering it behind. Results are stripped rather
+// than the whole turn: a turn that also carries text or an image is real content
+// that must survive.
+//
+// IDs are collected in a forward pass, so a result only counts as paired when
+// its call appears strictly before it.
+//
+// The result slice is rebuilt rather than compacted in place, so a caller still
+// holding the original slice sees it untouched. The message structs themselves
+// are reassigned through their pointers, so callers that need full isolation
+// must copy those too.
+func stripOrphanedToolResults(history []KiroHistoryMessage) []KiroHistoryMessage {
+	live := make(map[string]bool)
+	for i := range history {
+		msg := &history[i]
+
+		if a := msg.AssistantResponseMessage; a != nil {
+			for _, u := range a.ToolUses {
+				if u.ToolUseID != "" {
+					live[u.ToolUseID] = true
+				}
+			}
+			continue
+		}
+
+		u := msg.UserInputMessage
+		if u == nil || u.UserInputMessageContext == nil {
+			continue
+		}
+		results := u.UserInputMessageContext.ToolResults
+		if len(results) == 0 {
+			continue
+		}
+
+		// results[:0:0] forces append to allocate, so the caller's backing array
+		// is never written through — the payload may share these slices.
+		kept := results[:0:0]
+		for _, r := range results {
+			if live[r.ToolUseID] {
+				kept = append(kept, r)
+			}
+		}
+		if len(kept) == len(results) {
+			continue
+		}
+		if len(kept) > 0 {
+			u.UserInputMessageContext.ToolResults = kept
+			continue
+		}
+		u.UserInputMessageContext.ToolResults = nil
+		if len(u.UserInputMessageContext.Tools) == 0 {
+			u.UserInputMessageContext = nil
+		}
+	}
+	return history
 }
 
 func firstClaudeConversationAnchor(messages []ClaudeMessage) string {

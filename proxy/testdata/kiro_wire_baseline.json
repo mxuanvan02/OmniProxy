@@ -1,0 +1,64 @@
+{
+  "active-tool-turn-no-system": {
+    "hash": "1603f69b22fb9a86f7613e85ebac197e55ea4a77ae97c84562e3ea09a2cc2841",
+    "size": 1267,
+    "digest": "u(content=313,imgs=0,results=0,tools=0) a(content=33,uses=0) u(content=6,imgs=0,results=0,tools=0) a(content=0,uses=1) current(content=20,imgs=0,results=1,tools=1)"
+  },
+  "active-tool-turn-with-system": {
+    "hash": "daeff2e9bc12e3f37171c5ab705cdfb0f2125f73c60f7aab78d9e9ab20728ea7",
+    "size": 1295,
+    "digest": "u(content=339,imgs=0,results=0,tools=0) a(content=33,uses=0) u(content=6,imgs=0,results=0,tools=0) a(content=0,uses=1) current(content=20,imgs=0,results=1,tools=1)"
+  },
+  "assistant-first-orphan": {
+    "hash": "2fdc97cae8e119527fbe0bea80e43944d4d3b8d3f8bb8da3084ed84c270492df",
+    "size": 1060,
+    "digest": "u(content=313,imgs=0,results=0,tools=0) a(content=33,uses=0) u(content=1,imgs=0,results=0,tools=0) current(content=21,imgs=0,results=0,tools=1)",
+    "note": "Intentional. History opens with an assistant tool_use that trimLeadingAssistantHistory removes, leaving its tool_result answering a call that is no longer in the payload. Before the refactor sanitizeKiroHistory narrated that stale result into the user turn (content=20); now stripOrphanedToolResults removes it first, so the turn is empty and takes the minimal fallback (content=1). The alternate account path emits nothing for an empty user turn (external_openai.go:418), so no empty role:user reaches an upstream."
+  },
+  "assistant-first-orphan-with-system": {
+    "hash": "1280c368c2c22ae96882791dc5cd977e95d5f4bd47d4f474c247801546ac6a31",
+    "size": 1088,
+    "digest": "u(content=339,imgs=0,results=0,tools=0) a(content=33,uses=0) u(content=1,imgs=0,results=0,tools=0) current(content=21,imgs=0,results=0,tools=1)",
+    "note": "Intentional, same as assistant-first-orphan."
+  },
+  "duplicate-retry-loop": {
+    "hash": "e30f0278ffbcbe9b99f865a40d6cabd6a3342844da350cb96cf5be54c3ec72bf",
+    "size": 1173,
+    "digest": "u(content=313,imgs=0,results=0,tools=0) a(content=33,uses=0) u(content=5,imgs=0,results=0,tools=0) u(content=39,imgs=0,results=0,tools=0) current(content=4,imgs=0,results=0,tools=1)"
+  },
+  "oversized-forces-truncate": {
+    "hash": "e53b382916d7b03bb48129989e5dfa4a54ba0f23e9bbaf1d1dd183cd0cbeb878",
+    "size": 903235,
+    "digest": "u(content=313,imgs=0,results=0,tools=0) a(content=33,uses=0) u(content=128,imgs=0,results=0,tools=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) current(content=14,imgs=0,results=0,tools=1)"
+  },
+  "oversized-forces-truncate-with-system": {
+    "hash": "945bf8be94140cb163d6666ae07d422d73faa89a07088d69c302f237c8b16ccb",
+    "size": 903263,
+    "digest": "u(content=339,imgs=0,results=0,tools=0) a(content=33,uses=0) u(content=128,imgs=0,results=0,tools=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) u(content=30004,imgs=0,results=0,tools=0) a(content=30004,uses=0) current(content=14,imgs=0,results=0,tools=1)"
+  },
+  "oversized-with-system-and-tools": {
+    "hash": "56c4301ab38b1414560eb57ceb749446820eb5aa627734065c210575c7f45503",
+    "size": 904798,
+    "digest": "u(content=339,imgs=0,results=0,tools=0) a(content=33,uses=0) u(content=128,imgs=0,results=0,tools=0) u(content=30032,imgs=0,results=0,tools=0) u(content=30032,imgs=0,results=0,tools=0) u(content=30032,imgs=0,results=0,tools=0) u(content=30032,imgs=0,results=0,tools=0) u(content=30032,imgs=0,results=0,tools=0) u(content=30032,imgs=0,results=0,tools=0) u(content=30032,imgs=0,results=0,tools=0) u(content=30032,imgs=0,results=0,tools=0) u(content=30032,imgs=0,results=0,tools=0) u(content=30032,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) u(content=30033,imgs=0,results=0,tools=0) current(content=14,imgs=0,results=0,tools=1)"
+  },
+  "plain-history-no-system": {
+    "hash": "f5979d8f7fdba5657a2d4dd7e39407e9dcbaf757d19a1d7b3536ffce430b8408",
+    "size": 433,
+    "digest": "u(content=5,imgs=0,results=0,tools=0) a(content=8,uses=0) current(content=11,imgs=0,results=0,tools=0)"
+  },
+  "plain-history-with-system": {
+    "hash": "03aae902b9d760ec54e50ff3ad2214c0fb3908c49dde4194c3176a26dc8cdab3",
+    "size": 619,
+    "digest": "u(content=24,imgs=0,results=0,tools=0) a(content=33,uses=0) u(content=5,imgs=0,results=0,tools=0) a(content=8,uses=0) current(content=11,imgs=0,results=0,tools=0)"
+  },
+  "tool-cycles-30": {
+    "hash": "a7429d967020acd4936f4e07d58ef3692932382fae9e2839ed95d1f5a7944e2f",
+    "size": 4703,
+    "digest": "u(content=313,imgs=0,results=0,tools=0) a(content=33,uses=0) u(content=5,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) current(content=10,imgs=0,results=0,tools=1)"
+  },
+  "tool-cycles-30-with-system": {
+    "hash": "ade1b34907bd4a6755b0ab69747ccb8c5085be0cdb2e5094e8e9f9afcab70981",
+    "size": 4731,
+    "digest": "u(content=339,imgs=0,results=0,tools=0) a(content=33,uses=0) u(content=5,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=34,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) u(content=35,imgs=0,results=0,tools=0) current(content=10,imgs=0,results=0,tools=1)"
+  }
+}

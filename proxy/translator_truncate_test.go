@@ -31,7 +31,9 @@ func TestClaudeToKiroTruncatesOversizedHistory(t *testing.T) {
 		Messages: msgs,
 	}
 
-	payload := ClaudeToKiro(req, false)
+	// Truncation is Kiro-bound and now runs at dispatch; see
+	// kiro_payload_prepare_test.go.
+	payload := prepareKiroPayload(ClaudeToKiro(req, false))
 
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -81,7 +83,10 @@ func TestClaudeToKiroSmallPayloadNotTruncated(t *testing.T) {
 			{Role: "user", Content: "how are you?"},
 		},
 	}
-	payload := ClaudeToKiro(req, false)
+	// Wrapped like the oversized case above: without it this test would pass
+	// even if truncation were deleted outright, because the translator no longer
+	// truncates at all.
+	payload := prepareKiroPayload(ClaudeToKiro(req, false))
 	for _, h := range payload.ConversationState.History {
 		if h.UserInputMessage != nil && strings.Contains(h.UserInputMessage.Content, "truncated to fit") {
 			t.Fatalf("small payload should not be truncated")

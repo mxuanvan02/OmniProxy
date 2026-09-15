@@ -313,7 +313,9 @@ func TestOpenAIToKiroAssistantToolCallsDoNotInjectPlaceholder(t *testing.T) {
 		},
 	}
 
-	payload := OpenAIToKiro(req, false)
+	// Kiro-bound: clearing the non-active tool turn is what sanitize does, and it
+	// now runs at dispatch; see kiro_payload_prepare_test.go.
+	payload := prepareKiroPayload(OpenAIToKiro(req, false))
 
 	// The mid-history assistant turn carried ONLY a tool call (no text) and is
 	// not the active tool turn, so its structured toolUses are cleared. That
@@ -787,7 +789,9 @@ func TestOpenAIToolResultImageCarriedWhenFollowedByUser(t *testing.T) {
 		},
 	}
 
-	payload := OpenAIToKiro(req, false)
+	// Kiro-bound: the tool-result flattening that carries the image is sanitize's
+	// narration; see kiro_payload_prepare_test.go.
+	payload := prepareKiroPayload(OpenAIToKiro(req, false))
 
 	var toolHistImages int
 	for _, h := range payload.ConversationState.History {

@@ -34,7 +34,9 @@ func TestClaudeToKiroFlattensHistoryToolCyclesForCompaction(t *testing.T) {
 		},
 	}
 
-	payload := ClaudeToKiro(req, false)
+	// The flattening asserted below is a Kiro constraint, so the pipeline under
+	// test is the Kiro one; see kiro_payload_prepare_test.go.
+	payload := prepareKiroPayload(ClaudeToKiro(req, false))
 
 	// No history entry may carry structured tool calls or tool results.
 	for i, h := range payload.ConversationState.History {
@@ -112,7 +114,10 @@ func TestClaudeToKiroKeepsActiveToolTurnStructured(t *testing.T) {
 		},
 	}
 
-	payload := ClaudeToKiro(req, false)
+	// Wrapped deliberately. Without it this test passes even when nothing
+	// preserves the active turn, because nothing strips it in the translator any
+	// more — a green test asserting a guarantee no code provides.
+	payload := prepareKiroPayload(ClaudeToKiro(req, false))
 
 	hist := payload.ConversationState.History
 	if len(hist) == 0 {
