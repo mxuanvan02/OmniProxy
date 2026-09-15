@@ -152,6 +152,28 @@ type Account struct {
 	// minimal curl-shaped headers for providers that block that fingerprint.
 	ExternalHeaderProfile string `json:"externalHeaderProfile,omitempty"`
 
+	// ExternalAPIDialect selects the outbound OpenAI dialect for this external
+	// account. Empty and "chat" both mean Chat Completions
+	// ({BaseURL}/v1/chat/completions), which is what every external account used
+	// before this field existed. "responses" routes the same payload through the
+	// Responses API shape instead, which is required by gateways whose backend
+	// only speaks Responses — for example a reseller of ChatGPT Codex
+	// subscription capacity.
+	//
+	// It is opt-in per account because the external pool is heterogeneous: most
+	// resale gateways serve chat only, so a global default would break accounts
+	// the operator never touched.
+	ExternalAPIDialect string `json:"externalApiDialect,omitempty"`
+
+	// ResponsesPath overrides the upstream Responses path for this account.
+	// Empty means the OpenAI default "/v1/responses".
+	//
+	// It exists for the same reason ChatPath does: a gateway whose Responses
+	// route sits behind a prefix (Codex-style resellers commonly serve
+	// ".../codex/responses" rather than "/v1/responses") would otherwise be
+	// unreachable even though the dialect is correct.
+	ResponsesPath string `json:"responsesPath,omitempty"`
+
 	// ModelMappings translates public model IDs to provider-specific IDs for
 	// this account. Routing and usage continue to use the public ID; only the
 	// outbound external-provider request is rewritten.

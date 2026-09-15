@@ -1796,6 +1796,16 @@ func dispatchChat(ctx context.Context, account *config.Account, payload *KiroPay
 		return CallExternalAgentRouter(ctx, account, payload, callback)
 	}
 	if isExternalAccount(account) {
+		// The external pool is heterogeneous: most resale gateways serve chat
+		// completions only, so the Responses dialect is opt-in per account
+		// rather than a default.
+		//
+		// This arm must stay after the AgentRouter one above: AgentRouter
+		// accounts also satisfy isExternalAccount, so moving it earlier would
+		// silently reroute them into the Responses adapter.
+		if externalAPIDialect(account) == "responses" {
+			return CallExternalOpenAIResponses(ctx, account, payload, callback)
+		}
 		return CallExternalOpenAI(ctx, account, payload, callback)
 	}
 	return CallKiroAPI(ctx, account, payload, callback)
