@@ -130,7 +130,7 @@ export function App() {
   }, [load])
 
   useEffect(() => {
-    if (!authed || !['accounts', 'overview'].includes(section)) return
+    if (!authed || !['accounts', 'overview', 'usage'].includes(section)) return
     const id = window.setInterval(() => {
       if (!document.hidden) void load()
     }, 15_000)
@@ -147,7 +147,7 @@ export function App() {
       : section === 'providers'
         ? <ProvidersView accounts={accounts} usage={usage} pool={pool} period={usagePeriod} onPeriod={setUsagePeriod} onReload={load} />
         : section === 'usage'
-          ? <Suspense fallback={<div className="grid min-h-96 place-items-center text-sm text-slate-500">Đang tải biểu đồ…</div>}><UsageView usage={usage} chart={chart} period={usagePeriod} onPeriod={setUsagePeriod} /></Suspense>
+          ? <Suspense fallback={<div className="grid min-h-96 place-items-center text-sm text-slate-500">Đang tải biểu đồ…</div>}><UsageView usage={usage} chart={chart} period={usagePeriod} onPeriod={setUsagePeriod} status={status} updatedAt={updatedAt} /></Suspense>
           : section === 'quota'
             ? <QuotaView data={quota} onReload={load} />
             : section === 'api'

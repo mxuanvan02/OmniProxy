@@ -2,11 +2,8 @@ import { useMemo, useState } from 'react'
 import type { Account, PoolHealth, UsageStats } from '../lib/api'
 import { accountLabel, exactNumber, health, relativeTime } from '../lib/format'
 import { groupByVendor, recentErrors, vendorErrorRate, type RecentErrorRow, type VendorRow } from '../lib/providers'
+import { USAGE_PERIODS } from '../lib/usage'
 import { Card, PageHeader } from './Shell'
-
-/** No `1h`: getPeriodCutoff defaults an unknown period to 24h while
- *  dailyCutoffDate defaults it to 7 days, so the backend cannot serve it. */
-const PERIODS = [['24h', '24 giờ'], ['7d', '7 ngày'], ['30d', '30 ngày']] as const
 
 /** Keys are CooldownClass.String() from pool/cooldown_class.go. An unmapped one
  *  renders verbatim rather than being hidden, so a new class shows up instead
@@ -56,7 +53,7 @@ export function ProvidersView({ accounts, usage, pool, period, onPeriod, onReloa
       action={<button className="btn-primary" disabled={busy} onClick={() => void reload()}>{busy ? 'Đang làm mới…' : 'Làm mới'}</button>}
     />
     <div className="mb-4 flex flex-wrap items-center gap-2">
-      {PERIODS.map(([value, label]) => <button key={value} onClick={() => onPeriod(value)} aria-pressed={period === value} className={`rounded-lg border px-3 py-2 text-sm ${period === value ? 'border-blue-600 bg-blue-600 font-semibold text-white' : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'}`}>{label}</button>)}
+      {USAGE_PERIODS.map(([value, label]) => <button key={value} onClick={() => onPeriod(value)} aria-pressed={period === value} className={`rounded-lg border px-3 py-2 text-sm ${period === value ? 'border-blue-600 bg-blue-600 font-semibold text-white' : 'border-slate-300 bg-white text-slate-600 hover:bg-slate-50'}`}>{label}</button>)}
       <input className="input min-w-56 flex-1" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Tìm nhà cung cấp hoặc tài khoản…" aria-label="Tìm nhà cung cấp" />
       <span className="text-xs text-slate-500">Kỳ này: {exactNumber(totalRequests)} lượt gọi · {exactNumber(totalErrors)} lỗi{blocked > 0 ? ` · ${blocked} đang bị chặn` : ''}</span>
     </div>
