@@ -139,13 +139,19 @@ old hashed files are gone — confirm with `ls -1 webnext/dist/assets/`.
 cd /Users/van/Tools/OmniProxy
 GOCACHE="$TMPDIR/gocache" ./build.sh
 shasum -a 256 omniproxy
-strings omniproxy | grep -c 'Token hiệu dụng'
+LC_ALL=C grep -ac 'Token hiệu dụng' omniproxy
 ```
 
 Expected: the hash differs from step 1, and the marker count is at least 1 — the
-new page's own Vietnamese label is now inside the binary. A count of 0 means the
-embed did not pick up `webnext/dist/`, so check step 2 wrote there and that
-`webnext/embed.go:19` still says `all:dist`.
+new page's own Vietnamese label is now inside the binary.
+
+Use `grep -a`, not `strings | grep`. `strings` only prints runs of ASCII
+printable bytes, so a diacritic terminates the run and the marker never appears:
+the count reads 0 on a correctly embedded binary, which sends you off to suspect
+`embed.go` for a build that is fine. Measured on the shipped binary: the marker
+sits at byte offset 6840182 and `LC_ALL=C grep -ac` returns 1. The ASCII chunk
+name is a sound `strings` target, so `strings omniproxy | grep -c
+'UsageView-<newhash>'` works as a cross-check — it returned 3.
 
 Run this and step 4 with the sandbox disabled (Key insight 5).
 
