@@ -2839,11 +2839,15 @@ let detailAllowedError = '';
       '<select id="externalDialect">' +
       '<option value="responses" selected>' + escapeHtml(t('external.dialectResponses')) + '</option>' +
       '<option value="chat">' + escapeHtml(t('external.dialectChat')) + '</option>' +
+      '<option value="anthropic">' + escapeHtml(t('external.dialectAnthropic')) + '</option>' +
       '</select>' +
       '<span class="help-block text-xs">' + escapeHtml(t('external.dialectHelp')) + '</span></div>' +
       '<div class="form-group" id="externalResponsesPathGroup"><label>' +
       escapeHtml(t('external.responsesPathLabel')) + ' <span class="muted-text">(' + escapeHtml(t('common.optional')) + ')</span></label>' +
       '<input type="text" id="externalResponsesPath" class="font-mono" placeholder="' + escapeAttr(t('external.responsesPathPlaceholder')) + '" /></div>' +
+      '<div class="form-group hidden" id="externalAnthropicPathGroup"><label>' +
+      escapeHtml(t('external.anthropicPathLabel')) + ' <span class="muted-text">(' + escapeHtml(t('common.optional')) + ')</span></label>' +
+      '<input type="text" id="externalAnthropicPath" class="font-mono" placeholder="' + escapeAttr(t('external.anthropicPathPlaceholder')) + '" /></div>' +
       '<div class="form-group"><label class="flex items-center gap-2"><input type="checkbox" id="externalTest" checked /> ' + escapeHtml(t('external.testNow')) + '</label>' +
       '<span class="help-block text-xs">' + escapeHtml(t('external.testHelp')) + '</span></div>' +
       '<div class="modal-footer">' +
@@ -2851,13 +2855,18 @@ let detailAllowedError = '';
       '<button class="btn btn-primary" id="importExternalBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
       '</div>';
     $('importExternalBtn').addEventListener('click', importExternal);
-    // The path override is meaningful only on the Responses dialect. Hiding it
-    // until then is the signal that it is not a general-purpose field.
+    // Each dialect has its own optional path override. Show only the one that
+    // matches the selected dialect so the form stays focused.
     const dialectSelect = $('externalDialect');
     const responsesPathGroup = $('externalResponsesPathGroup');
-    dialectSelect.addEventListener('change', function () {
-      responsesPathGroup.classList.toggle('hidden', dialectSelect.value !== 'responses');
-    });
+    const anthropicPathGroup = $('externalAnthropicPathGroup');
+    function updatePathVisibility() {
+      const v = dialectSelect.value;
+      responsesPathGroup.classList.toggle('hidden', v !== 'responses');
+      anthropicPathGroup.classList.toggle('hidden', v !== 'anthropic');
+    }
+    dialectSelect.addEventListener('change', updatePathVisibility);
+    updatePathVisibility();
   }
 
   function modalAgentRouter(title, body) {
@@ -2913,10 +2922,13 @@ let detailAllowedError = '';
     const responsesPath = externalApiDialect === 'responses'
       ? $('externalResponsesPath').value.trim()
       : '';
+    const anthropicPath = externalApiDialect === 'anthropic'
+      ? $('externalAnthropicPath').value.trim()
+      : '';
     const btn = $('importExternalBtn');
     btn.disabled = true; btn.textContent = t('common.loading') || '...';
     try {
-      const res = await api('/auth/external-provider', { method: 'POST', body: JSON.stringify({ baseUrl, apiKey, name, test, externalApiDialect, responsesPath }) });
+      const res = await api('/auth/external-provider', { method: 'POST', body: JSON.stringify({ baseUrl, apiKey, name, test, externalApiDialect, responsesPath, anthropicPath }) });
       const d = await res.json();
       if (d.success) {
         closeModal(); loadAccounts(); loadStats();

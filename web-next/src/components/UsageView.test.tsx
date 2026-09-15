@@ -12,7 +12,7 @@ function usage(overrides: Partial<UsageStats> = {}): UsageStats {
   return {
     requests: 10, promptTokens: 100, completionTokens: 50, totalCost: 0.5,
     totalRequests: 10, totalPromptTokens: 100, totalCompletionTokens: 50,
-    byModel: {}, byAccount: {}, byAPIKey: {}, byEndpoint: {}, byDialect: {},
+    byModel: {}, byAccount: {}, byAPIKey: {}, byEndpoint: {},
     ...overrides,
   }
 }
