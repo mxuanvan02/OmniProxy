@@ -1,0 +1,351 @@
+{
+  "info": {
+    "name": "OmniProxy — đo chi phí Responses vs Chat",
+    "description": "## Mục đích\n\nĐo xem **cùng một hội thoại**, gửi qua dialect `responses` có tốn ít input token hơn dialect `chat` không. Đây là phép đo còn thiếu của Phase 05 (§5.3).\n\n## Chuẩn bị\n\nMở **Variables** của collection và điền:\n\n| Biến | Giá trị |\n|---|---|\n| `baseUrl` | `http://127.0.0.1:8080` (đã đúng sẵn) |\n| `clientKey` | API key của OmniProxy — Admin UI → tab **API Keys** |\n| `adminPassword` | mật khẩu admin |\n| `upstreamBaseUrl` | `https://token.vietshare.site/codex-api` |\n| `upstreamApiKey` | key của vietshare |\n| `responsesPath` | đường dẫn Responses **tương đối** so với `upstreamBaseUrl`. Để `/v1/responses` nếu gateway phục vụ ở đó; nếu gateway phục vụ ở `token.vietshare.site/codex-api/responses` thì sửa `upstreamBaseUrl` thành `https://token.vietshare.site/codex-api` và để `/responses` |\n\n## Thứ tự chạy\n\n1. **A. Setup** → chạy lần lượt 01, 02, 03, 04.\n2. **B. Đo CHAT** → chạy 05 (tắt responses) rồi 06.\n3. **C. Đo RESPONSES** → chạy 07 (tắt chat) rồi 08.\n4. **D. Đối chiếu** → chạy 09.\n\nMở **Postman Console** (View → Show Postman Console) để thấy số in ra.\n\n## Vì sao phải tắt/bật account\n\nPool chọn account theo round-robin. Bật cả hai thì request sẽ luân phiên, không so sánh được. Tắt một cái để ép request đi vào account còn lại.\n\n## Lưu ý\n\n- Hai account dùng **cùng** `upstreamBaseUrl` + `upstreamApiKey`, chỉ khác `externalApiDialect`. Đó là biến duy nhất.\n- Body gửi đi giống hệt nhau, `temperature: 0` để output ổn định.\n- Nếu gateway từ chối `max_tokens`, xoá field đó khỏi body (giữ nguyên ở cả hai lần đo).\n",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://127.0.0.1:8080" },
+    { "key": "clientKey", "value": "" },
+    { "key": "adminPassword", "value": "" },
+    { "key": "adminToken", "value": "" },
+    { "key": "upstreamBaseUrl", "value": "https://token.vietshare.site/codex-api" },
+    { "key": "upstreamApiKey", "value": "" },
+    { "key": "responsesPath", "value": "/v1/responses" },
+    { "key": "model", "value": "" },
+    { "key": "chatAccountId", "value": "" },
+    { "key": "responsesAccountId", "value": "" },
+    { "key": "chatInput", "value": "" },
+    { "key": "chatOutput", "value": "" },
+    { "key": "chatCached", "value": "" },
+    { "key": "respInput", "value": "" },
+    { "key": "respOutput", "value": "" },
+    { "key": "respCached", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "A. Setup",
+      "item": [
+        {
+          "name": "01 · Đăng nhập admin",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "pm.test('login 200', () => pm.response.to.have.status(200));",
+                  "if (j.token) {",
+                  "  pm.collectionVariables.set('adminToken', j.token);",
+                  "  console.log('adminToken đã lưu');",
+                  "} else {",
+                  "  console.log('KHÔNG có token trong response:', JSON.stringify(j));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"password\": \"{{adminPassword}}\"\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/admin/api/login", "host": ["{{baseUrl}}"], "path": ["admin", "api", "login"] }
+          }
+        },
+        {
+          "name": "02 · Thêm account CHAT",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "pm.test('import 200', () => pm.response.to.have.status(200));",
+                  "const acc = j.account || {};",
+                  "if (acc.id) pm.collectionVariables.set('chatAccountId', acc.id);",
+                  "console.log('CHAT dialect lưu được =', JSON.stringify(acc.externalApiDialect), '(rỗng là đúng)');",
+                  "if (j.test && j.test.error) console.log('CẢNH BÁO test lỗi:', j.test.error);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Admin-Token", "value": "{{adminToken}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"baseUrl\": \"{{upstreamBaseUrl}}\",\n  \"apiKey\": \"{{upstreamApiKey}}\",\n  \"name\": \"vietshare-chat\",\n  \"externalApiDialect\": \"\",\n  \"test\": true\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/admin/api/auth/external-provider", "host": ["{{baseUrl}}"], "path": ["admin", "api", "auth", "external-provider"] }
+          }
+        },
+        {
+          "name": "03 · Thêm account RESPONSES",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "pm.test('import 200', () => pm.response.to.have.status(200));",
+                  "const acc = j.account || {};",
+                  "if (acc.id) pm.collectionVariables.set('responsesAccountId', acc.id);",
+                  "pm.test('dialect = responses', () => pm.expect(acc.externalApiDialect).to.eql('responses'));",
+                  "if (j.test && j.test.error) console.log('CẢNH BÁO test lỗi:', j.test.error);",
+                  "else if (j.test) console.log('test OK, latency =', j.test.latencyMs, 'ms');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Admin-Token", "value": "{{adminToken}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"baseUrl\": \"{{upstreamBaseUrl}}\",\n  \"apiKey\": \"{{upstreamApiKey}}\",\n  \"name\": \"vietshare-responses\",\n  \"externalApiDialect\": \"responses\",\n  \"responsesPath\": \"{{responsesPath}}\",\n  \"test\": true\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/admin/api/auth/external-provider", "host": ["{{baseUrl}}"], "path": ["admin", "api", "auth", "external-provider"] }
+          }
+        },
+        {
+          "name": "04 · Lấy model thật",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const j = pm.response.json();",
+                  "pm.test('models 200', () => pm.response.to.have.status(200));",
+                  "const list = j.data || j.models || [];",
+                  "const ids = list.map(m => (typeof m === 'string' ? m : m.id)).filter(Boolean);",
+                  "console.log('Có', ids.length, 'model. Chọn 1 cái và dán vào biến `model`:');",
+                  "console.log(ids.slice(0, 40).join('\\n'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{clientKey}}" }],
+            "url": { "raw": "{{baseUrl}}/v1/models", "host": ["{{baseUrl}}"], "path": ["v1", "models"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "B. Đo CHAT",
+      "item": [
+        {
+          "name": "05 · Chỉ bật account CHAT",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('tắt responses OK', () => pm.response.to.have.status(200));",
+                  "console.log('Đã tắt vietshare-responses — request sau sẽ đi vào vietshare-chat');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Admin-Token", "value": "{{adminToken}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"enabled\": false\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/admin/api/accounts/{{responsesAccountId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "api", "accounts", "{{responsesAccountId}}"]
+            }
+          }
+        },
+        {
+          "name": "06 · Gửi qua CHAT — đọc usage",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "let j;",
+                  "try { j = pm.response.json(); } catch (e) { console.log('Body không phải JSON:', pm.response.text().slice(0, 500)); return; }",
+                  "if (j.error) { console.log('LỖI upstream:', JSON.stringify(j.error)); return; }",
+                  "const u = j.usage || {};",
+                  "const cached = (u.prompt_tokens_details || {}).cached_tokens || 0;",
+                  "pm.collectionVariables.set('chatInput', String(u.prompt_tokens || ''));",
+                  "pm.collectionVariables.set('chatOutput', String(u.completion_tokens || ''));",
+                  "pm.collectionVariables.set('chatCached', String(cached));",
+                  "console.log('=== CHAT ===  input=' + u.prompt_tokens + '  output=' + u.completion_tokens + '  cached=' + cached);",
+                  "pm.test('có usage', () => pm.expect(u.prompt_tokens, 'usage.prompt_tokens').to.be.a('number'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{clientKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"stream\": false,\n  \"temperature\": 0,\n  \"max_tokens\": 64,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a terse assistant. Answer in one short sentence.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Name the three primary colours.\"\n    }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/chat/completions", "host": ["{{baseUrl}}"], "path": ["v1", "chat", "completions"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "C. Đo RESPONSES",
+      "item": [
+        {
+          "name": "07 · Chỉ bật account RESPONSES",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('tắt chat OK', () => pm.response.to.have.status(200));",
+                  "console.log('Đã tắt vietshare-chat — request sau sẽ đi vào vietshare-responses');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Admin-Token", "value": "{{adminToken}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"enabled\": false\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/admin/api/accounts/{{chatAccountId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "api", "accounts", "{{chatAccountId}}"]
+            }
+          }
+        },
+        {
+          "name": "08 · Gửi qua RESPONSES — đọc usage",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('HTTP 200', () => pm.response.to.have.status(200));",
+                  "let j;",
+                  "try { j = pm.response.json(); } catch (e) { console.log('Body không phải JSON:', pm.response.text().slice(0, 500)); return; }",
+                  "if (j.error) { console.log('LỖI upstream:', JSON.stringify(j.error)); return; }",
+                  "const u = j.usage || {};",
+                  "const cached = (u.prompt_tokens_details || {}).cached_tokens || 0;",
+                  "pm.collectionVariables.set('respInput', String(u.prompt_tokens || ''));",
+                  "pm.collectionVariables.set('respOutput', String(u.completion_tokens || ''));",
+                  "pm.collectionVariables.set('respCached', String(cached));",
+                  "console.log('=== RESPONSES ===  input=' + u.prompt_tokens + '  output=' + u.completion_tokens + '  cached=' + cached);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{clientKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{model}}\",\n  \"stream\": false,\n  \"temperature\": 0,\n  \"max_tokens\": 64,\n  \"messages\": [\n    {\n      \"role\": \"system\",\n      \"content\": \"You are a terse assistant. Answer in one short sentence.\"\n    },\n    {\n      \"role\": \"user\",\n      \"content\": \"Name the three primary colours.\"\n    }\n  ]\n}"
+            },
+            "url": { "raw": "{{baseUrl}}/v1/chat/completions", "host": ["{{baseUrl}}"], "path": ["v1", "chat", "completions"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "D. Đối chiếu",
+      "item": [
+        {
+          "name": "09 · Bảng so sánh",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const g = k => Number(pm.collectionVariables.get(k) || 0);",
+                  "const ci = g('chatInput'), ri = g('respInput');",
+                  "const cc = g('chatCached'), rc = g('respCached');",
+                  "console.log('┌───────────┬──────────┬──────────┐');",
+                  "console.log('│           │   CHAT   │ RESPONSES│');",
+                  "console.log('├───────────┼──────────┼──────────┤');",
+                  "console.log('│ input     │ ' + String(ci).padEnd(8) + ' │ ' + String(ri).padEnd(8) + ' │');",
+                  "console.log('│ cached    │ ' + String(cc).padEnd(8) + ' │ ' + String(rc).padEnd(8) + ' │');",
+                  "console.log('│ output    │ ' + String(g('chatOutput')).padEnd(8) + ' │ ' + String(g('respOutput')).padEnd(8) + ' │');",
+                  "console.log('└───────────┴──────────┴──────────┘');",
+                  "console.log('CHÊNH LỆCH input = ' + (ci - ri) + ' token (' + ((ci && ri) ? (((ci - ri) / ci) * 100).toFixed(1) : 'n/a') + '% )');",
+                  "if (!ci || !ri) console.log('Thiếu số — chạy lại 04, 06 và 08 trước.');"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Admin-Token", "value": "{{adminToken}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/admin/api/usage/request-details?pageSize=5",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "api", "usage", "request-details"],
+              "query": [{ "key": "pageSize", "value": "5" }]
+            }
+          }
+        },
+        {
+          "name": "10 · Bật lại cả hai account",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["console.log('Xong phép đo. Nhớ bật lại account nào anh muốn giữ chạy.');"]
+              }
+            }
+          ],
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Admin-Token", "value": "{{adminToken}}" }
+            ],
+            "body": { "mode": "raw", "raw": "{\n  \"enabled\": true\n}" },
+            "url": {
+              "raw": "{{baseUrl}}/admin/api/accounts/{{chatAccountId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "api", "accounts", "{{chatAccountId}}"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
