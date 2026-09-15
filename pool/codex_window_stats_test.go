@@ -17,6 +17,7 @@ func newStatsPool(accounts ...config.Account) *AccountPool {
 		errorCounts: make(map[string]int),
 		modelLists:  make(map[string]map[string]bool),
 		modelLocks:  make(map[string]map[string]time.Time),
+		lockReasons: make(map[string]string),
 		stats:       make(map[string]*accountStats),
 	}
 }

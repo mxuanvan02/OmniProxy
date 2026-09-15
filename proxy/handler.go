@@ -6308,6 +6308,10 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiImportCredentials(w, r)
 	case path == "/status" && r.Method == "GET":
 		h.apiGetStatus(w, r)
+	case path == "/pool/health" && r.Method == "GET":
+		// Buffered through withETag: pool health changes only when a failure is
+		// recorded, so an unchanged snapshot costs a header exchange.
+		withETag(w, r, h.apiGetPoolHealth)
 	case path == "/settings" && r.Method == "GET":
 		h.apiGetSettings(w, r)
 	case path == "/settings" && r.Method == "POST":
@@ -11300,6 +11304,21 @@ func (h *Handler) apiImportCredentials(w http.ResponseWriter, r *http.Request) {
 			"id":    account.ID,
 			"email": account.Email,
 		},
+	})
+}
+
+// apiGetPoolHealth reports the pool's in-memory failure state. It is a shim:
+// every decision worth testing — filtering expired entries, attaching reasons —
+// lives in AccountPool.HealthSnapshot, where the pool package's fixtures can
+// reach it.
+//
+// "since" is the process start time, not the age of the oldest entry, because
+// the snapshot is empty after a restart and the client has to say so.
+func (h *Handler) apiGetPoolHealth(w http.ResponseWriter, r *http.Request) {
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"accounts":      h.pool.HealthSnapshot(),
+		"since":         h.startTime,
+		"uptimeSeconds": time.Now().Unix() - h.startTime,
 	})
 }
 

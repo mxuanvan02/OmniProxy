@@ -526,6 +526,7 @@ func TestGetNextForModelSkipsModelLockedAccount(t *testing.T) {
 		errorCounts: make(map[string]int),
 		modelLists:  make(map[string]map[string]bool),
 		modelLocks:  make(map[string]map[string]time.Time),
+		lockReasons: make(map[string]string),
 	}
 	// Arm a model lock 3 errors deep so RecordError actually sets it.
 	for i := 0; i < 3; i++ {

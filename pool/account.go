@@ -80,6 +80,27 @@ type accountStats struct {
 	LastUsed                     int64
 }
 
+// AccountHealth is a read-only view of the pool's transient failure state for a
+// single account. Everything here lives in memory and is empty after a restart:
+// it describes what the pool has learned since it last started, not the
+// account's lifetime history.
+//
+// Deadlines are unix seconds, not time.Time. time.Time is a struct, so
+// omitempty does not apply to it and its zero value serialises as year 1 — an
+// account with pending strikes would report a cooldown that never happened.
+type AccountHealth struct {
+	CooldownUntil     int64                `json:"cooldownUntil,omitempty"`
+	CooldownReason    string               `json:"cooldownReason,omitempty"`
+	ConsecutiveErrors int                  `json:"consecutiveErrors,omitempty"`
+	ModelLocks        map[string]ModelLock `json:"modelLocks,omitempty"`
+}
+
+// ModelLock is one model's cooldown on one account.
+type ModelLock struct {
+	Until  int64  `json:"until"`
+	Reason string `json:"reason,omitempty"`
+}
+
 // AccountPool manages the account pool
 type AccountPool struct {
 	mu                sync.RWMutex
@@ -93,7 +114,13 @@ type AccountPool struct {
 	modelLists        map[string]map[string]bool // accountID → set of modelIDs (from ListAvailableModels)
 	catalogIdentities map[string]catalogIdentity
 	modelLocks        map[string]map[string]time.Time // accountID → modelName → cooldown until
-	stats             map[string]*accountStats        // accountID → cumulative runtime stats (survives Reload)
+	// lockReasons explains why each cooldown or model lock was applied, keyed by
+	// accountID (account-level) or accountID+"\x00"+model (model-level). The
+	// CooldownClass is otherwise computed, used for its duration, and discarded —
+	// which leaves an operator able to see that an account is parked but not
+	// whether the credential is dead or the window is merely full.
+	lockReasons map[string]string
+	stats       map[string]*accountStats // accountID → cumulative runtime stats (survives Reload)
 	// cacheSticky maps a model-scoped prompt-cache key
 	// to the account ID that last handled it. Used to pin consecutive turns
 	// from the same conversation to the same upstream account so the
@@ -124,6 +151,15 @@ var (
 	poolOnce sync.Once
 )
 
+// lockReasonKey namespaces a reason by scope so an account-level cooldown and a
+// model lock on the same account cannot overwrite each other's explanation.
+func lockReasonKey(accountID, model string) string {
+	if model == "" {
+		return accountID
+	}
+	return accountID + "\x00" + model
+}
+
 // GetPool returns the global account pool singleton
 func GetPool() *AccountPool {
 	poolOnce.Do(func() {
@@ -132,6 +168,7 @@ func GetPool() *AccountPool {
 			errorCounts:           make(map[string]int),
 			modelLists:            make(map[string]map[string]bool),
 			modelLocks:            make(map[string]map[string]time.Time),
+			lockReasons:           make(map[string]string),
 			stats:                 make(map[string]*accountStats),
 			cacheSticky:           make(map[string]string),
 			cacheStickyTS:         make(map[string]time.Time),
@@ -1079,10 +1116,12 @@ func (p *AccountPool) RecordSuccess(id string, model string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	delete(p.cooldowns, id)
+	delete(p.lockReasons, lockReasonKey(id, ""))
 	p.errorCounts[id] = 0
 	// Clear model lock for the specific model that succeeded
 	if model != "" && p.modelLocks[id] != nil {
 		delete(p.modelLocks[id], model)
+		delete(p.lockReasons, lockReasonKey(id, model))
 		if len(p.modelLocks[id]) == 0 {
 			delete(p.modelLocks, id)
 		}
@@ -1136,9 +1175,11 @@ func (p *AccountPool) recordErrorWithClass(id string, class CooldownClass, model
 			p.modelLocks[id] = make(map[string]time.Time)
 		}
 		p.modelLocks[id][model] = time.Now().Add(cooldown)
+		p.lockReasons[lockReasonKey(id, model)] = class.String()
 	} else if cooldown > 0 {
 		// Legacy account-level cooldown
 		p.cooldowns[id] = time.Now().Add(cooldown)
+		p.lockReasons[lockReasonKey(id, "")] = class.String()
 	}
 }
 
@@ -1458,6 +1499,13 @@ func (p *AccountPool) ClearCooldown(id string) {
 	p.mu.Lock()
 	delete(p.cooldowns, id)
 	delete(p.modelLocks, id)
+	delete(p.lockReasons, lockReasonKey(id, ""))
+	prefix := id + "\x00"
+	for key := range p.lockReasons {
+		if strings.HasPrefix(key, prefix) {
+			delete(p.lockReasons, key)
+		}
+	}
 	p.mu.Unlock()
 }
 
@@ -1530,6 +1578,58 @@ func (p *AccountPool) AvailableCount() int {
 		count++
 	}
 	return count
+}
+
+// HealthSnapshot returns the live failure state for every account that has one.
+//
+// It is strictly read-only: entries whose deadline has already passed are
+// filtered out here rather than deleted, matching AvailableCount. Nothing in
+// this map is persisted, so after a restart it is empty even for an account
+// whose credential was revoked a minute earlier — callers must present it as
+// "since process start" rather than as history.
+//
+// config.* is deliberately not consulted: the lock order documented at
+// HasAvailableAccountForModel forbids reading config while holding p.mu.
+func (p *AccountPool) HealthSnapshot() map[string]AccountHealth {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	now := time.Now()
+	out := make(map[string]AccountHealth)
+	for id, until := range p.cooldowns {
+		if !now.Before(until) {
+			continue
+		}
+		h := out[id]
+		h.CooldownUntil = until.Unix()
+		h.CooldownReason = p.lockReasons[lockReasonKey(id, "")]
+		out[id] = h
+	}
+	for id, count := range p.errorCounts {
+		if count == 0 {
+			continue
+		}
+		h := out[id]
+		h.ConsecutiveErrors = count
+		out[id] = h
+	}
+	for id, locks := range p.modelLocks {
+		for model, until := range locks {
+			if !now.Before(until) {
+				continue
+			}
+			h := out[id]
+			if h.ModelLocks == nil {
+				h.ModelLocks = make(map[string]ModelLock)
+			}
+			h.ModelLocks[model] = ModelLock{
+				Until:  until.Unix(),
+				Reason: p.lockReasons[lockReasonKey(id, model)],
+			}
+			out[id] = h
+		}
+	}
+	return out
 }
 
 // UpdateStats updates account statistics. Counters live in p.stats keyed by
