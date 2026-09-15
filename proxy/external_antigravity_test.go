@@ -1,11 +1,15 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"omniproxy/config"
 )
@@ -264,11 +268,109 @@ func TestClassifyAntigravityFailure(t *testing.T) {
 			body:   `{"error":{"message":"internal"}}`,
 			want:   antigravityFailureOther,
 		},
+		{
+			// Google asks the account owner to finish a verification step. It
+			// arrives as the same 403 PERMISSION_DENIED a terminated account
+			// produces, so without an explicit case it was recorded as a
+			// permanent ban and the account was switched off.
+			name:   "owner verification required",
+			status: http.StatusForbidden,
+			body: `{"error":{"code":403,"message":"Verify your account to continue.","status":"PERMISSION_DENIED",` +
+				`"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"VALIDATION_REQUIRED",` +
+				`"domain":"cloudcode-pa.googleapis.com"}]}}`,
+			want: antigravityFailureValidation,
+		},
+		{
+			// The ban phrases stay authoritative: an explicit termination wins
+			// even when the body also mentions verification.
+			name:   "termination outranks verification",
+			status: http.StatusForbidden,
+			body:   `{"error":{"message":"This service has been disabled in this account. Verify your account to continue."}}`,
+			want:   antigravityFailureBanned,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := classifyAntigravityFailure(tc.status, tc.body); got != tc.want {
 				t.Errorf("classify(%d) = %v, want %v", tc.status, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAntigravityValidationDoesNotBan drives the real adapter against a fake
+// upstream and pins the consequence of the classification: an owner who still
+// has a verification step outstanding must leave the account enabled and
+// un-banned, because the remedy is a human action on the Google account.
+//
+// A terminated account returns the same 403, and that one must still be
+// recorded — otherwise the fix would have turned the guard into a no-op.
+func TestAntigravityValidationDoesNotBan(t *testing.T) {
+	cases := []struct {
+		name       string
+		status     int
+		body       string
+		wantBanned bool
+	}{
+		{
+			name:   "verification required",
+			status: http.StatusForbidden,
+			body: `{"error":{"code":403,"message":"Verify your account to continue.","status":"PERMISSION_DENIED",` +
+				`"details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"VALIDATION_REQUIRED"}]}}`,
+			wantBanned: false,
+		},
+		{
+			name:       "account disabled",
+			status:     http.StatusForbidden,
+			body:       `{"error":{"message":"This service has been disabled in this account for violation of Terms of Service"}}`,
+			wantBanned: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// markAntigravityBanned persists through config, so the store has to
+			// be initialised for the ban path to be exercised at all.
+			initConfigForTests(t)
+
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer upstream.Close()
+
+			account := &config.Account{
+				ID:              "ag",
+				Email:           "owner@example.com",
+				AuthMethod:      "antigravity",
+				Enabled:         true,
+				BaseURL:         upstream.URL,
+				AccessToken:     "token",
+				ExpiresAt:       time.Now().Add(time.Hour).Unix(),
+				GoogleProjectID: "aicode-consumers",
+				// Set to now so the cached project is trusted and no
+				// loadCodeAssist round-trip is attempted.
+				AntigravityProjectCheckedAt: time.Now().Unix(),
+			}
+
+			err := CallExternalAntigravity(context.Background(), account,
+				buildAntigravityPayload(), &KiroStreamCallback{})
+			if err == nil {
+				t.Fatal("expected the 403 to surface as an error")
+			}
+
+			if tc.wantBanned {
+				if account.BanStatus != "BANNED" {
+					t.Fatalf("BanStatus = %q, want BANNED for a disabled account", account.BanStatus)
+				}
+				return
+			}
+			if account.BanStatus != "" {
+				t.Errorf("BanStatus = %q, want empty: owner verification is not a ban", account.BanStatus)
+			}
+			if !account.Enabled {
+				t.Error("account was disabled, want it left enabled")
 			}
 		})
 	}

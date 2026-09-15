@@ -244,7 +244,7 @@ func (h *Handler) refreshAccountFull(account *config.Account) (accountRefreshRes
 
 		// Persistent 403 after a token refresh means the account itself is
 		// rejected by AWS, not that auth was merely stale.
-		if err != nil && isAuthErrorMessage(err.Error()) && !isExternalAccount(account) && !isCodexAccount(account) {
+		if err != nil && isAuthErrorMessage(err.Error()) && genericBanApplies(account) {
 			account.BanStatus = "BANNED"
 			account.BanReason = "Persistent 403 after token refresh: " + truncateErrBody([]byte(err.Error()))
 			account.BanTime = time.Now().Unix()

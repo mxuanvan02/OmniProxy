@@ -11736,10 +11736,26 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 				return
 			}
 		}
+		// Antigravity classifies its own failures and records a terminal state
+		// through markAntigravityBanned, which the account pointer carries back
+		// here. Report that decision directly: falling through would answer 500
+		// for a 403, and the generic branches below cannot tell a terminated
+		// account from an owner who simply has a verification step outstanding.
+		if isAntigravityAccount(account) {
+			body := map[string]interface{}{"error": errMsg, "banned": false}
+			if account.BanStatus == "BANNED" {
+				body["banStatus"] = "BANNED"
+				body["banned"] = true
+				body["banReason"] = account.BanReason
+			}
+			w.WriteHeader(403)
+			json.NewEncoder(w).Encode(body)
+			return
+		}
 		// 403 "temporarily is suspended" → account is banned by AWS.
 		// Mark BANNED so the UI reflects the real status instead of showing
 		// a raw 500 error on every subsequent test/refresh.
-		if isSuspensionErrorMessage(strings.ToLower(errMsg)) && !isExternalAccount(account) && !isCodexAccount(account) {
+		if isSuspensionErrorMessage(strings.ToLower(errMsg)) && genericBanApplies(account) {
 			account.BanStatus = "BANNED"
 			account.BanReason = truncateErrBody([]byte(errMsg))
 			account.BanTime = time.Now().Unix()
@@ -11758,7 +11774,7 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 			return
 		}
 		// Persistent 403/401 auth error (not suspension) → also ban.
-		if isAuthErrorMessage(errMsg) && !isExternalAccount(account) && !isCodexAccount(account) {
+		if isAuthErrorMessage(errMsg) && genericBanApplies(account) {
 			account.BanStatus = "BANNED"
 			account.BanReason = "Test failed: " + truncateErrBody([]byte(errMsg))
 			account.BanTime = time.Now().Unix()

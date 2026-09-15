@@ -161,6 +161,12 @@ const (
 	// antigravityFailureQuota means the model's capacity for this account is
 	// exhausted; another account may still serve the request.
 	antigravityFailureQuota
+	// antigravityFailureValidation means Google wants the account owner to
+	// finish a verification step before it will serve requests. The credential
+	// is valid and the account is intact, so this is recoverable by the human
+	// and must never be recorded as a ban: the API answers 403, which is the
+	// same status a terminated account produces.
+	antigravityFailureValidation
 )
 
 // antigravityBanPhrases are the upstream messages that mean the account itself
@@ -184,11 +190,34 @@ var antigravityAuthPhrases = []string{
 	"unauthenticated",
 }
 
+// antigravityValidationPhrases mean the account owner has a check to complete
+// before the API will serve this account. The error carries a
+// google.rpc.ErrorInfo detail with reason VALIDATION_REQUIRED and a link to the
+// verification page.
+//
+// This has to be separated from the ban phrases because it arrives as the same
+// 403 PERMISSION_DENIED a terminated account produces: without it, an account
+// whose only fault is an unverified owner was recorded as permanently banned
+// and switched off, and "Test & Recover" could not clear it — the test hit the
+// same 403 and re-applied the ban.
+var antigravityValidationPhrases = []string{
+	"validation_required",
+	"verify your account",
+}
+
 func classifyAntigravityFailure(status int, body string) antigravityFailureKind {
 	lower := strings.ToLower(body)
 	for _, phrase := range antigravityBanPhrases {
 		if strings.Contains(lower, phrase) {
 			return antigravityFailureBanned
+		}
+	}
+	// Checked after the ban phrases so an explicit "account has been disabled"
+	// still wins, and before the status switch so it does not depend on which
+	// status the API chose to pair it with.
+	for _, phrase := range antigravityValidationPhrases {
+		if strings.Contains(lower, phrase) {
+			return antigravityFailureValidation
 		}
 	}
 	switch status {
@@ -204,6 +233,8 @@ func classifyAntigravityFailure(status int, body string) antigravityFailureKind 
 		}
 		// A bare PERMISSION_DENIED on an account that authenticated a moment ago
 		// is how the disable shows up when no explanatory message is attached.
+		// The recoverable 403s (stale credential, owner verification) have
+		// already been returned above.
 		return antigravityFailureBanned
 	}
 	if status == http.StatusServiceUnavailable && strings.Contains(lower, "capacity") {
@@ -475,6 +506,11 @@ func antigravityPostJSON(account *config.Account, action string, body []byte) ([
 				account.ExpiresAt = 0
 				continue
 			}
+		case antigravityFailureValidation:
+			// Recoverable, but only by a human: say so once instead of leaving
+			// the operator to guess why the account stopped serving.
+			logger.Warnf("[Antigravity] account %s needs owner verification before it can serve requests: %s",
+				account.Email, truncateAntigravityReason(text))
 		}
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, truncateErrBody(raw))
 	}
@@ -1062,6 +1098,12 @@ func CallExternalAntigravity(ctx context.Context, account *config.Account, paylo
 			markAntigravityBanned(account, text)
 		case antigravityFailureAuth:
 			logger.Warnf("[Antigravity] auth failure for %s: HTTP %d", account.Email, resp.StatusCode)
+		case antigravityFailureValidation:
+			// Not a ban and not a retryable failure: the account stays selectable
+			// until an operator finishes the check, so name the one action that
+			// clears it rather than recording a terminal state.
+			logger.Warnf("[Antigravity] account %s needs owner verification before it can serve requests: %s",
+				account.Email, truncateAntigravityReason(text))
 		}
 		return fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, account.Email, truncateErrBody(errBody))
 	}

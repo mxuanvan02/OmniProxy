@@ -1,6 +1,10 @@
 package proxy
 
-import "testing"
+import (
+	"testing"
+
+	"omniproxy/config"
+)
 
 func TestNetworkErrorClassifier(t *testing.T) {
 	tests := []struct {
@@ -113,5 +117,44 @@ func TestContentBlockedClassifierMatchesPoolMarkers(t *testing.T) {
 		if isContentBlockedErrorMessage(msg) {
 			t.Errorf("isContentBlockedErrorMessage(%q) = true, want false", msg)
 		}
+	}
+}
+
+// TestGenericBanAppliesExcludesSelfClassifyingProviders pins which accounts the
+// shared Kiro-shaped ban branches are allowed to act on.
+//
+// The message tests they are paired with are deliberately broad:
+// isAuthErrorMessage matches any text carrying a standalone 403. That is right
+// for Kiro, where a 403 means the account was rejected — and wrong for a
+// provider that classifies its own failures, because the same status also
+// covers states an operator can clear. An Antigravity account whose owner still
+// had a verification step outstanding was banned and disabled by the generic
+// branch, and "Test & Recover" re-applied the ban on every attempt.
+func TestGenericBanAppliesExcludesSelfClassifyingProviders(t *testing.T) {
+	tosDisable403 := `HTTP 403 from owner@example.com: {"error":{"code":403,"message":"Verify your account to continue.",` +
+		`"status":"PERMISSION_DENIED","details":[{"reason":"VALIDATION_REQUIRED"}]}}`
+
+	// The message really does trip the broad auth test; the guard is the only
+	// thing standing between it and a ban.
+	if !isAuthErrorMessage(tosDisable403) {
+		t.Fatal("isAuthErrorMessage did not match a 403 body — this test no longer covers the bug")
+	}
+
+	cases := []struct {
+		name    string
+		account *config.Account
+		want    bool
+	}{
+		{"kiro account", &config.Account{ID: "k", AuthMethod: "builderid"}, true},
+		{"antigravity account", &config.Account{ID: "ag", AuthMethod: "antigravity"}, false},
+		{"external openai account", &config.Account{ID: "e", AuthMethod: "external_openai"}, false},
+		{"codex account", &config.Account{ID: "c", AuthMethod: codexAuthMethod}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := genericBanApplies(tc.account); got != tc.want {
+				t.Errorf("genericBanApplies(%s) = %v, want %v", tc.account.AuthMethod, got, tc.want)
+			}
+		})
 	}
 }

@@ -128,6 +128,21 @@ func isAuthErrorMessage(msg string) bool {
 		strings.Contains(msg, "refresh token expired")
 }
 
+// genericBanApplies reports whether the shared Kiro-shaped ban branches apply to
+// this account at all, independently of the message.
+//
+// Providers that classify their own failures are excluded. The message tests
+// above are broad on purpose — isAuthErrorMessage matches any text carrying a
+// standalone 403 — which is correct for Kiro, where a 403 means the account was
+// rejected, but wrong for a provider where the same status also covers states
+// the operator can clear. Antigravity is the live case: an unverified account
+// owner produces 403 PERMISSION_DENIED, and banning on it left the account
+// disabled with "Test & Recover" unable to clear it, because the test hit the
+// same 403 and re-applied the ban.
+func genericBanApplies(account *config.Account) bool {
+	return !isExternalAccount(account) && !isCodexAccount(account) && !isAntigravityAccount(account)
+}
+
 // isEndpointGlobalError reports whether an error affects ALL accounts sharing
 // the same upstream endpoint. These errors should skip retry on the same account
 // and rotate to a different provider/endpoint immediately.
