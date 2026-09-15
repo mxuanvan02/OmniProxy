@@ -1,0 +1,78 @@
+{
+  "input": [
+    {
+      "content": "inspect the repository",
+      "role": "user",
+      "type": "message"
+    },
+    {
+      "content": "Let me read the entry point.",
+      "role": "assistant",
+      "type": "message"
+    },
+    {
+      "arguments": "{\"path\":\"main.go\"}",
+      "call_id": "call_history_1",
+      "name": "Read",
+      "type": "function_call"
+    },
+    {
+      "call_id": "call_history_1",
+      "output": "package main",
+      "type": "function_call_output"
+    },
+    {
+      "call_id": "call_current_1",
+      "output": "file contents",
+      "type": "function_call_output"
+    },
+    {
+      "content": [
+        {
+          "text": "Summarize the entry point in the attached screenshot.",
+          "type": "input_text"
+        },
+        {
+          "image_url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==",
+          "type": "input_image"
+        }
+      ],
+      "role": "user",
+      "type": "message"
+    }
+  ],
+  "instructions": "You are a coding agent. Follow the repository instructions.",
+  "model": "gpt-5.6-sol",
+  "reasoning": {
+    "effort": "medium"
+  },
+  "store": false,
+  "stream": true,
+  "tool_choice": {
+    "name": "Read",
+    "type": "function"
+  },
+  "tools": [
+    {
+      "description": "Read a file from disk.",
+      "name": "Read",
+      "parameters": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "type": "function"
+    },
+    {
+      "description": "Stop a background task.\n\nLifecycle constraint: call TaskStop only for a task that is currently running. A completed, failed, or stopped notification is terminal and requires no cleanup. If that task is later resumed, it may be stopped again until its next terminal notification. Never retry an ID after a 'No task found' result.",
+      "name": "TaskStop",
+      "parameters": {
+        "type": "object"
+      },
+      "type": "function"
+    }
+  ]
+}
