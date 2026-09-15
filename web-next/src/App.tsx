@@ -4,6 +4,7 @@ import { ApiView } from './components/ApiView'
 import { Login } from './components/Login'
 import { LogsView } from './components/LogsView'
 import { Overview } from './components/Overview'
+import { ProvidersView } from './components/ProvidersView'
 import { QuotaView } from './components/QuotaView'
 import { SettingsView } from './components/SettingsView'
 import { Shell, type Section } from './components/Shell'
@@ -16,13 +17,14 @@ import {
   type CapabilityMatrix,
   type CapabilityProbeResponse,
   type ChartPoint,
+  type PoolHealth,
   type QuotaOverview,
   type Settings,
   type Status,
   type UsageStats,
 } from './lib/api'
 
-const VALID_SECTIONS: Section[] = ['overview', 'accounts', 'usage', 'quota', 'api', 'settings', 'logs']
+const VALID_SECTIONS: Section[] = ['overview', 'accounts', 'providers', 'usage', 'quota', 'api', 'settings', 'logs']
 const EMPTY_CAPABILITIES: CapabilityMatrix = { capabilities: [], accounts: [] }
 const UsageView = lazy(() => import('./components/UsageView').then((module) => ({ default: module.UsageView })))
 
@@ -48,6 +50,7 @@ export function App() {
   const [notice, setNotice] = useState('')
   const [updatedAt, setUpdatedAt] = useState<number | null>(null)
   const [usagePeriod, setUsagePeriod] = useState('24h')
+  const [pool, setPool] = useState<PoolHealth | null>(null)
 
   const onAuthError = useCallback((err: unknown) => {
     if (err instanceof ApiError && err.status === 401) {
@@ -80,6 +83,11 @@ export function App() {
     try {
       await loadCore()
       if (section === 'overview') setUsage(await api.usage('24h'))
+      if (section === 'providers') {
+        const [nextUsage, nextPool] = await Promise.all([api.usage(usagePeriod), api.poolHealth()])
+        setUsage(nextUsage)
+        setPool(nextPool)
+      }
       if (section === 'usage') {
         const [nextUsage, nextChart] = await Promise.all([api.usage(usagePeriod), api.usageChart(usagePeriod)])
         setUsage(nextUsage)
@@ -136,15 +144,17 @@ export function App() {
     ? <Overview status={status} usage={usage} accounts={accounts} onNavigate={setSection} />
     : section === 'accounts'
       ? <AccountsView accounts={accounts} capabilityMatrix={capabilities} onProbe={probeCapabilities} probingAccountId={probingAccountId} onReload={load} />
-      : section === 'usage'
-        ? <Suspense fallback={<div className="grid min-h-96 place-items-center text-sm text-slate-500">Đang tải biểu đồ…</div>}><UsageView usage={usage} chart={chart} period={usagePeriod} onPeriod={setUsagePeriod} /></Suspense>
-        : section === 'quota'
-          ? <QuotaView data={quota} onReload={load} />
-          : section === 'api'
-            ? <ApiView settings={settings} cliStatus={cliStatus} models={status?.modelIds || []} />
-            : section === 'settings'
-              ? <SettingsView key={settingsKey} settings={settings} onReload={load} />
-              : <LogsView />
+      : section === 'providers'
+        ? <ProvidersView accounts={accounts} usage={usage} pool={pool} period={usagePeriod} onPeriod={setUsagePeriod} onReload={load} />
+        : section === 'usage'
+          ? <Suspense fallback={<div className="grid min-h-96 place-items-center text-sm text-slate-500">Đang tải biểu đồ…</div>}><UsageView usage={usage} chart={chart} period={usagePeriod} onPeriod={setUsagePeriod} /></Suspense>
+          : section === 'quota'
+            ? <QuotaView data={quota} onReload={load} />
+            : section === 'api'
+              ? <ApiView settings={settings} cliStatus={cliStatus} models={status?.modelIds || []} />
+              : section === 'settings'
+                ? <SettingsView key={settingsKey} settings={settings} onReload={load} />
+                : <LogsView />
 
   return (
     <Shell
