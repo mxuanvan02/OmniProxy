@@ -1364,10 +1364,37 @@ func parseAntigravityModels(raw []byte) []ModelInfo {
 			Description     string `json:"description"`
 			MaxTokens       int    `json:"maxTokens"`
 			MaxOutputTokens int    `json:"maxOutputTokens"`
+			IsInternal      bool   `json:"isInternal"`
 		} `json:"models"`
+		TabModelIDs []string `json:"tabModelIds"`
 	}
-	if json.Unmarshal(raw, &payload) != nil || len(payload.Models) == 0 {
+	// A decode failure and an empty catalog both yield nil, and the caller
+	// answers either one with the static list. Only the first means the
+	// upstream changed shape under us, so it is the one worth a log line: the
+	// downgrade is otherwise silent, and every account would quietly offer the
+	// five static models with no error recorded against it.
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		logger.Warnf("[Antigravity] fetchAvailableModels payload is unreadable, catalog discarded: %v", err)
 		return nil
+	}
+	if len(payload.Models) == 0 {
+		return nil
+	}
+
+	// FetchAvailableModels answers with a superset of the chat catalog: it also
+	// lists the editor's inline tab-completion models, and a user who selects
+	// one from the picker gets a model that cannot answer a turn. Three
+	// upstream signals mark them — the tabModelIds list, the isInternal flag,
+	// and the tab_ family prefix that the two preview entries carry and that no
+	// upstream list names.
+	//
+	// The auxiliary lists are deliberately NOT a signal: mqueryModelIds,
+	// webSearchModelIds, commitMessageModelIds and commandModelIds also name
+	// real chat models (gemini-3.5-flash-lite, gemini-3-flash), so filtering on
+	// them would delete working models from the picker.
+	tabModels := make(map[string]bool, len(payload.TabModelIDs))
+	for _, id := range payload.TabModelIDs {
+		tabModels[strings.TrimPrefix(strings.TrimSpace(id), "models/")] = true
 	}
 
 	// Iterate in a stable order: the catalog is user-visible and a map walk
@@ -1382,7 +1409,7 @@ func parseAntigravityModels(raw []byte) []ModelInfo {
 	for _, key := range keys {
 		entry := payload.Models[key]
 		id := strings.TrimPrefix(strings.TrimSpace(key), "models/")
-		if id == "" {
+		if id == "" || entry.IsInternal || tabModels[id] || strings.HasPrefix(id, "tab_") {
 			continue
 		}
 		name := strings.TrimSpace(entry.DisplayName)

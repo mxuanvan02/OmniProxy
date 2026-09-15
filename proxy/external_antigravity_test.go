@@ -898,3 +898,58 @@ func TestParseAntigravityModelsHandlesEmptyAndInvalid(t *testing.T) {
 		}
 	}
 }
+
+// TestParseAntigravityModelsDropsNonChatModels pins the filter that keeps the
+// editor's non-chat entries out of the model picker. FetchAvailableModels
+// answers with a superset of the chat catalog — it carries the inline
+// tab-completion models beside the chat ones — and a user who picks one gets a
+// model that cannot answer a turn.
+//
+// Three upstream signals mark them, none guessed from the name:
+//
+//   - tabModelIds names the tab family outright. In the live catalog
+//     (2026-09-15) it held chat_20706 and chat_23310: ids shaped like chat
+//     models, carrying 16k/32k context, that are not chat models at all.
+//   - isInternal marks a model the editor drives itself and never offers.
+//   - the tab_<name>_preview entries appear in none of the upstream lists, so
+//     their family prefix is the only handle on them.
+//
+// The live catalog carries the first two signals on both chat_ ids at once, so
+// the fixture splits them — chat_20706 is named only by tabModelIds, chat_23310
+// only by isInternal. Pinning them together would let either signal rot
+// unnoticed: dropping one from the filter leaves the other still removing the
+// entry, and the test stays green.
+//
+// The auxiliary lists are deliberately NOT a signal. gemini-3.5-flash-lite is
+// in mqueryModelIds, webSearchModelIds and commitMessageModelIds, and
+// gemini-3-flash is in commandModelIds; both are real chat models, and
+// filtering on those lists would delete working models from the picker. They
+// are in the fixture below to fail loudly if that ever changes.
+func TestParseAntigravityModelsDropsNonChatModels(t *testing.T) {
+	raw := []byte(`{
+		"models": {
+			"chat_20706": {"maxTokens": 16384, "model": "MODEL_CHAT_20706"},
+			"chat_23310": {"maxTokens": 32768, "isInternal": true},
+			"tab_flash_lite_preview": {"maxTokens": 16384, "maxOutputTokens": 4096},
+			"tab_jump_flash_lite_preview": {"maxTokens": 16384, "maxOutputTokens": 4096},
+			"gemini-3-flash": {"displayName": "Gemini 3 Flash", "maxTokens": 1048576, "maxOutputTokens": 65536},
+			"gemini-3.5-flash-lite": {"displayName": "Gemini 3.5 Flash Lite", "maxTokens": 1048576, "maxOutputTokens": 65535},
+			"gemini-3.6-flash-medium": {"displayName": "Gemini 3.6 Flash (Medium)", "maxTokens": 1048576, "maxOutputTokens": 65536}
+		},
+		"tabModelIds": ["chat_20706"],
+		"mqueryModelIds": ["gemini-3.5-flash-lite"],
+		"webSearchModelIds": ["gemini-3.5-flash-lite"],
+		"commitMessageModelIds": ["gemini-3.5-flash-lite"],
+		"commandModelIds": ["gemini-3-flash"]
+	}`)
+
+	ids := make([]string, 0, 3)
+	for _, model := range parseAntigravityModels(raw) {
+		ids = append(ids, model.ModelId)
+	}
+
+	want := "gemini-3-flash,gemini-3.5-flash-lite,gemini-3.6-flash-medium"
+	if got := strings.Join(ids, ","); got != want {
+		t.Fatalf("model ids = %q, want %q", got, want)
+	}
+}
