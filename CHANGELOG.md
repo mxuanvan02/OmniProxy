@@ -35,6 +35,7 @@ All notable changes to OmniProxy are documented here. The format follows [Keep a
 - sqlite auto-import applies `busy_timeout` via `_pragma` (the `_busy_timeout` DSN form is silently ignored by `modernc.org/sqlite`), limits itself to one connection, and reports a partial table listing as an error instead of "key absent".
 
 ### Added
+- **Per-account Responses API dialect for external providers.** An `external_openai` account can now send the Responses wire shape instead of chat completions, selectable when the key is added (`externalApiDialect`, plus an optional `responsesPath` for gateways that serve Responses behind a prefix). This is required by gateways whose backend speaks only Responses — a reseller of ChatGPT Codex subscription capacity, for example — where a chat-completions request forces a lossy internal translation. The wire translation is shared with the Codex adapter and now lives in `responses_upstream.go`; Codex behaviour is pinned byte-identical by a golden test. Chat completions remains the default, because most resale gateways serve chat only.
 - GitHub Actions CI runs `go build`, `go vet` and `go test -race` on every push to `main` and every PR — previously nothing verified Go code.
 - Tests: `auth` 15.0% → 50.2%, `pool` 59.9% → 88.2% coverage, covering OAuth refresh/exchange/decode for every provider, the model-aware pool selector, error recording and cooldowns, and the CLI-config writers.
 
