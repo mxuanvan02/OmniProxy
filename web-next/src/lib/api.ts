@@ -56,8 +56,11 @@ export interface Status { accounts:number; available:number; totalAccounts:numbe
 export interface PeriodSummary { requests:number; promptTokens:number; completionTokens:number; realCost?:number; cost?:number; effectiveTokens?:number; cacheReadTokens?:number; errors?:number }
 /** One entry of the tracker's 500-record ring, newest first. `provider` here is
  *  the coarse routing family ("External OpenAI"), shared by every external
- *  vendor — attribute by accountId instead. */
-export interface RecentRequest { timestamp?:string; model?:string; provider?:string; accountId?:string; accountName?:string; status?:string; endpoint?:string; error?:string; inputTokens?:number; outputTokens?:number; realCost?:number }
+ *  vendor — attribute by accountId instead. `apiKeyId` is set by the tracker on
+ *  both append paths (proxy/handler.go:4759 success, :4828 error) from
+ *  config.ApiKeyEntry.ID — an identifier, never the key material. `omitempty`
+ *  upstream, so a deployment with no admin keys sends nothing. */
+export interface RecentRequest { timestamp?:string; model?:string; provider?:string; accountId?:string; accountName?:string; status?:string; endpoint?:string; error?:string; inputTokens?:number; outputTokens?:number; realCost?:number; apiKeyId?:string }
 export interface UsageStats extends PeriodSummary { totalRequests:number; totalPromptTokens:number; totalCompletionTokens:number; totalRealCost?:number; totalCost:number; totalEffectiveTokens?:number; totalCacheReadTokens?:number; activeRequests?:Array<{provider:string; model:string; accountId:string}>; recentRequests?:RecentRequest[]; byModel:Record<string,PeriodSummary>; byAccount:Record<string,PeriodSummary>; byAPIKey:Record<string,PeriodSummary>; byEndpoint:Record<string,PeriodSummary>; accountNames?:Record<string,string> }
 export interface ChartPoint { label:string; tokens:number; cost:number }
 export interface QuotaRow { name:string; used:number; total:number; remaining:number; resetAt?:number; recurring:boolean; unit?:string }
