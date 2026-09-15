@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"omniproxy/auth"
 	"omniproxy/config"
+	"omniproxy/logger"
 	"strings"
 	"time"
 )
@@ -152,6 +153,17 @@ func (h *Handler) apiImportAntigravityCreds(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	h.pool.Reload()
+	// The credential alone does not make the account usable: nothing else warms
+	// its catalog on this path, so the dashboard showed "Model list unavailable"
+	// and the test modal had no model to run — the operator could not even test
+	// the account they had just added. The generic add route does the same for
+	// its own accounts.
+	acc := saved
+	safeGo("fetchAndCacheAccountModels/antigravity", func() {
+		if err := h.fetchAndCacheAccountModels(&acc); err != nil {
+			logger.Warnf("[ModelsCache] Auto-refresh failed for new Antigravity account %s: %v", acc.Email, err)
+		}
+	})
 	resolvedProject, projectErr := ensureAntigravityProject(&saved)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{

@@ -2583,14 +2583,9 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 	// on every environment), so a verified static list backs it rather than
 	// leaving the account with no routable models.
 	if isAntigravityAccount(account) {
-		models, err := fetchAntigravityModels(account)
-		fellBack := false
-		if err != nil || len(models) == 0 {
-			models = antigravityFallbackModels()
-			fellBack = true
-			if err != nil {
-				logger.Warnf("[ModelsCache] Antigravity catalog fetch failed for %s (%v); using verified fallback list", account.Email, err)
-			}
+		models, fellBack, err := fetchAntigravityModels(account)
+		if err != nil {
+			logger.Warnf("[ModelsCache] Antigravity catalog fetch failed for %s (%v); using verified fallback list", account.Email, err)
 		}
 		modelIDs := make([]string, 0, len(models))
 		for _, m := range models {
@@ -12026,6 +12021,40 @@ func (h *Handler) apiGetAccountModels(w http.ResponseWriter, r *http.Request, id
 		// Return full model info from the dynamic registry cache, not just
 		// id+name. The dashboard displays description and token limits.
 		models := h.getCodexRegistryModels()
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": true,
+			"models":  models,
+		})
+		return
+	}
+
+	// Antigravity publishes its catalog through fetchAvailableModels, not through
+	// Kiro's ListAvailableModels. Without this branch the fall-through below sends
+	// the account's Google token to q.external.amazonaws.com and answers the
+	// dashboard with a DNS error, so "Refresh models" never worked on an
+	// Antigravity account.
+	if isAntigravityAccount(account) {
+		models, fellBack, err := fetchAntigravityModels(account)
+		modelIDs := make([]string, 0, len(models))
+		for _, m := range models {
+			modelIDs = append(modelIDs, m.ModelId)
+		}
+		if !h.pool.SetModelListForAccount(*account, modelIDs) {
+			http.Error(w, "account changed during model discovery", http.StatusConflict)
+			return
+		}
+		h.modelsCacheMu.Lock()
+		h.cachedModels = mergeUniqueModels(h.cachedModels, models)
+		h.modelsCacheTime = time.Now().Unix()
+		h.modelsCacheMu.Unlock()
+		status := CatalogStatus{State: CatalogStateVerified, Count: len(models), Source: "antigravity catalog"}
+		if fellBack {
+			status = CatalogStatus{State: CatalogStateStatic, Count: len(models), Source: "antigravity fallback list"}
+			if err != nil {
+				status.Error = truncateCatalogErr(err.Error())
+			}
+		}
+		h.catalogStatus.record(account.ID, status, nil)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success": true,
 			"models":  models,

@@ -1318,15 +1318,21 @@ func antigravityFallbackModels() []ModelInfo {
 // fetchAntigravityModels asks the gateway for the account's own catalog and
 // falls back to the static list when the endpoint is unavailable. It never
 // returns an empty catalog, so routing always has candidates.
-func fetchAntigravityModels(account *config.Account) ([]ModelInfo, error) {
+//
+// The second result reports whether the static list is standing in for the
+// provider's own. That flag is the whole point of the return: callers used to
+// infer it from a non-nil error, but every fallback path here succeeds
+// deliberately, so the inference never fired and a fallback catalog was
+// reported as provider-verified.
+func fetchAntigravityModels(account *config.Account) ([]ModelInfo, bool, error) {
 	if err := ensureAntigravityToken(account); err != nil {
-		return nil, err
+		return antigravityFallbackModels(), true, err
 	}
 	projectID, err := ensureAntigravityProject(account)
 	if err != nil {
 		// A tier/project problem must not leave the account with no catalog.
 		logger.Warnf("[Antigravity] catalog for %s falling back to static list: %v", account.Email, err)
-		return antigravityFallbackModels(), nil
+		return antigravityFallbackModels(), true, nil
 	}
 
 	// FetchAvailableModelsRequest carries project, request_id, entitlement and
@@ -1336,14 +1342,14 @@ func fetchAntigravityModels(account *config.Account) ([]ModelInfo, error) {
 	raw, err := antigravityPostJSON(account, antigravityModelsAction, body)
 	if err != nil {
 		logger.Warnf("[Antigravity] fetchAvailableModels for %s failed, using static list: %v", account.Email, err)
-		return antigravityFallbackModels(), nil
+		return antigravityFallbackModels(), true, nil
 	}
 
 	models := parseAntigravityModels(raw)
 	if len(models) == 0 {
-		return antigravityFallbackModels(), nil
+		return antigravityFallbackModels(), true, nil
 	}
-	return models, nil
+	return models, false, nil
 }
 
 // parseAntigravityModels reads the fetchAvailableModels payload.
