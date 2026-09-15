@@ -306,6 +306,7 @@ func CallExternalOpenAI(ctx context.Context, account *config.Account, payload *K
 
 	if resp.StatusCode != 200 {
 		errBody, _ := io.ReadAll(resp.Body)
+		logExternalPayloadSizeRejection(account, payload, "chat", len(reqBody), resp, errBody)
 		err := fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, account.Email, truncateErrBody(errBody))
 		// Auth/payment errors are not retried across endpoints — surface them
 		// so the pool's auth-failure handling can disable the account.

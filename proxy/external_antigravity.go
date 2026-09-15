@@ -1168,6 +1168,7 @@ func CallExternalAntigravity(ctx context.Context, account *config.Account, paylo
 	if resp.StatusCode != 200 {
 		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 		text := string(errBody)
+		logExternalPayloadSizeRejection(account, payload, "antigravity", len(reqBody), resp, errBody)
 		switch classifyAntigravityFailure(resp.StatusCode, text) {
 		case antigravityFailureBanned:
 			// Google disables the service on an account for third-party client

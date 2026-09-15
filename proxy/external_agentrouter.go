@@ -73,7 +73,7 @@ func callAgentRouterOpenAI(ctx context.Context, account *config.Account, baseURL
 	// provider error embedded in HTTP-200 SSE before parser-observed output.
 	// Transport, parse, truncation, idle-timeout, HTTP and post-output failures
 	// are never replayed.
-	streamErr, _ := callAgentRouterOpenAIRequest(ctx, account, endpoint, apiKey, body, true, callback)
+	streamErr, _ := callAgentRouterOpenAIRequest(ctx, account, endpoint, apiKey, payload, body, true, callback)
 	if streamErr == nil {
 		return nil
 	}
@@ -84,7 +84,7 @@ func callAgentRouterOpenAI(ctx context.Context, account *config.Account, baseURL
 	if callback != nil && callback.OnReset != nil {
 		callback.OnReset()
 	}
-	fallbackErr, _ := callAgentRouterOpenAIRequest(ctx, account, endpoint, apiKey, body, false, callback)
+	fallbackErr, _ := callAgentRouterOpenAIRequest(ctx, account, endpoint, apiKey, payload, body, false, callback)
 	if fallbackErr != nil {
 		return fmt.Errorf("agentrouter stream failed before output (%v); non-stream fallback failed: %w", streamErr, fallbackErr)
 	}
@@ -94,7 +94,10 @@ func callAgentRouterOpenAI(ctx context.Context, account *config.Account, baseURL
 // callAgentRouterOpenAIRequest executes one wire attempt. wasSSE is true only
 // when an HTTP 200 response entered the SSE parser; HTTP/auth/transport errors
 // therefore never trigger the stream-to-JSON fallback.
-func callAgentRouterOpenAIRequest(ctx context.Context, account *config.Account, endpoint, apiKey string, baseBody map[string]interface{}, stream bool, callback *KiroStreamCallback) (err error, wasSSE bool) {
+//
+// payload is carried through only so a size rejection can name the model in the
+// log; the wire body comes from baseBody.
+func callAgentRouterOpenAIRequest(ctx context.Context, account *config.Account, endpoint, apiKey string, payload *KiroPayload, baseBody map[string]interface{}, stream bool, callback *KiroStreamCallback) (err error, wasSSE bool) {
 	body := make(map[string]interface{}, len(baseBody)+2)
 	for key, value := range baseBody {
 		body[key] = value
@@ -130,6 +133,7 @@ func callAgentRouterOpenAIRequest(ctx context.Context, account *config.Account, 
 
 	if resp.StatusCode != 200 {
 		errBody, _ := io.ReadAll(resp.Body)
+		logExternalPayloadSizeRejection(account, payload, "agentrouter", len(reqBody), resp, errBody)
 		return fmt.Errorf("HTTP %d from AgentRouter (%s): %s", resp.StatusCode, account.Email, truncateErrBody(errBody)), false
 	}
 

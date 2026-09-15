@@ -121,6 +121,7 @@ func CallExternalOpenAIResponses(ctx context.Context, account *config.Account, p
 
 	if resp.StatusCode != 200 {
 		errBody, _ := io.ReadAll(resp.Body)
+		logExternalPayloadSizeRejection(account, payload, "responses", len(reqBody), resp, errBody)
 		// The status stays in the message so the pool's auth-failure handling can
 		// disable the account on 401/403/402, exactly as on the chat dialect.
 		//

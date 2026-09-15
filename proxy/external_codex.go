@@ -381,6 +381,7 @@ func CallExternalCodex(ctx context.Context, account *config.Account, payload *Ki
 
 	if resp.StatusCode != 200 {
 		errBody, _ := io.ReadAll(resp.Body)
+		logExternalPayloadSizeRejection(account, payload, "codex", len(reqBody), resp, errBody)
 		err := fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, account.Email, truncateErrBody(errBody))
 		// 401/403 → caller refreshes token and retries; 402/429 → caller
 		// rotates account. Other 5xx are transient.
