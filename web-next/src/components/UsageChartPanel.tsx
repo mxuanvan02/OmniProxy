@@ -5,7 +5,7 @@ import { periodErrors, shareByDimension, type UsageDimension, type UsageMetric }
 import type { ChartPoint, UsageStats } from '../lib/api'
 import { Bar, BarChart, CartesianGrid, Cell, Legend, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts'
 
-const DIMENSIONS: [UsageDimension, string][] = [['model', 'Model'], ['account', 'Tài khoản'], ['apiKey', 'API key'], ['endpoint', 'Endpoint']]]
+const DIMENSIONS: [UsageDimension, string][] = [['model', 'Model'], ['account', 'Tài khoản'], ['apiKey', 'API key'], ['endpoint', 'Endpoint']]
 const METRICS: [UsageMetric, string][] = [['tokens', 'Token'], ['cost', 'Chi phí']]
 const COLORS = ['#2563eb', '#7c3aed', '#0891b2', '#059669', '#d97706', '#dc2626', '#db2777', '#4f46e5']
 const MAX_SLICES = 8
