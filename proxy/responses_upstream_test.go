@@ -102,6 +102,64 @@ func TestCodexResponsesBodyGolden(t *testing.T) {
 	}
 }
 
+// TestCodexResponsesModelPrecedence pins the builder's three-level model
+// resolution and, crucially, the ORDER of the first two levels:
+//
+//  1. payload.OriginalModel (the client's requested model)
+//  2. payload.ConversationState.CurrentMessage.UserInputMessage.ModelID
+//  3. the hardcoded default "gpt-5.6-sol"
+//
+// Both golden payloads leave levels 1 and 2 empty on purpose, so they pin level
+// 3 and nothing else — without this test a dropped or reordered level above the
+// default would be silent, and every request would quietly resolve to a
+// lower-precedence model. Phase 01 relocates exactly this chain into
+// proxy/responses_upstream.go, which is what makes the pin load-bearing.
+//
+// Phase 01 also replaces level 3 with a configurable
+// responsesDialectOptions.DefaultModel and adds an error branch for the
+// no-model case; whoever makes that change must extend this test.
+func TestCodexResponsesModelPrecedence(t *testing.T) {
+	// Three distinct literals so a mix-up between any two levels cannot pass.
+	const (
+		defaultModel  = "gpt-5.6-sol"
+		originalModel = "gpt-5.6-terra"
+		messageModel  = "gpt-5.6-luna"
+	)
+
+	cases := []struct {
+		name          string
+		originalModel string
+		messageModel  string
+		want          string
+	}{
+		// Level 1 fires on its own.
+		{"original-only", originalModel, "", originalModel},
+		// Level 1 beats a *different* level 2 — this is what pins the order of
+		// the two levels; swapping them still passes the other level-1 case.
+		{"original-beats-message", originalModel, messageModel, originalModel},
+		// Level 2 is reachable only once level 1 is empty.
+		{"message-only", "", messageModel, messageModel},
+		// Level 3 is the last resort, with both sources empty.
+		{"default", "", "", defaultModel},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := &KiroPayload{OriginalModel: tc.originalModel}
+			payload.ConversationState.CurrentMessage.UserInputMessage.ModelID = tc.messageModel
+
+			body, err := kiroPayloadToCodexResponsesRequest(payload, nil)
+			if err != nil {
+				t.Fatalf("build codex responses body: %v", err)
+			}
+			if got := body["model"]; got != tc.want {
+				t.Fatalf("model = %v, want %q (OriginalModel=%q ModelID=%q)",
+					got, tc.want, tc.originalModel, tc.messageModel)
+			}
+		})
+	}
+}
+
 // goldenResponsesPayload hand-builds the payload the "full" golden was captured
 // from.
 //
