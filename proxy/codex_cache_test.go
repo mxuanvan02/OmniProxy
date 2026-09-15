@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// TestCodexSSEForwardsCachedTokens verifies that processCodexSSELine fires
+// TestCodexSSEForwardsCachedTokens verifies that processResponsesSSELine fires
 // OnCacheRead when the Codex /v1/responses stream emits a response.completed
 // event whose usage object carries input_tokens_details.cached_tokens. This
 // is the path that makes real Codex prompt-cache hits visible to the client.
@@ -53,9 +53,9 @@ func TestCodexSSEForwardsCachedTokens(t *testing.T) {
 				},
 				OnText: func(string, bool) {},
 			}
-			toolAccums := map[string]*codexToolAccum{}
+			toolAccums := map[string]*responsesToolAccum{}
 			inTok, outTok := 0, 0
-			processCodexSSELine("data: "+tc.data, cb, toolAccums, &inTok, &outTok)
+			processResponsesSSELine("data: "+tc.data, cb, toolAccums, &inTok, &outTok)
 
 			if fired != tc.wantFired {
 				t.Fatalf("OnCacheRead fired: got %v, want %v", fired, tc.wantFired)
@@ -68,7 +68,7 @@ func TestCodexSSEForwardsCachedTokens(t *testing.T) {
 }
 
 // TestCodexJSONForwardsCachedTokens verifies the non-stream Codex path
-// (parseCodexResponsesJSON) also forwards cached_tokens via OnCacheRead.
+// (parseResponsesJSON) also forwards cached_tokens via OnCacheRead.
 func TestCodexJSONForwardsCachedTokens(t *testing.T) {
 	body := strings.NewReader(`{
 		"output": [{"type":"message","content":[{"type":"output_text","text":"hi"}]}],
@@ -80,8 +80,8 @@ func TestCodexJSONForwardsCachedTokens(t *testing.T) {
 	cb := &KiroStreamCallback{
 		OnCacheRead: func(c int) { fired = true; gotCacheRead = c },
 	}
-	if err := parseCodexResponsesJSON(body, cb); err != nil {
-		t.Fatalf("parseCodexResponsesJSON: %v", err)
+	if err := parseResponsesJSON(body, cb); err != nil {
+		t.Fatalf("parseResponsesJSON: %v", err)
 	}
 	if !fired {
 		t.Fatal("OnCacheRead should have fired for cached_tokens=999")
