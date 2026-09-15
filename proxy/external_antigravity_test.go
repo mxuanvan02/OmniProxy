@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -470,6 +471,78 @@ func TestAntigravityHeadersCarryRequiredClientMetadata(t *testing.T) {
 	}
 	if parsed["platform"] == "" {
 		t.Error("Client-Metadata is missing platform")
+	}
+}
+
+// TestAntigravityPlatformIsAValidClientMetadataEnum pins the platform
+// vocabulary to the proto enum
+// google.internal.cloud.code.v1internal.ClientMetadata.Platform. The API
+// validates metadata.platform against that enum and answers
+// INVALID_ARGUMENT for anything else, so a host-OS name like "MACOS" — or the
+// bare "DARWIN" — makes loadCodeAssist fail and leaves the account without a
+// project. The enum is architecture-qualified, so the value has to carry the
+// suffix too.
+func TestAntigravityPlatformIsAValidClientMetadataEnum(t *testing.T) {
+	valid := map[string]bool{
+		"PLATFORM_UNSPECIFIED": true,
+		"DARWIN_AMD64":         true,
+		"DARWIN_ARM64":         true,
+		"LINUX_AMD64":          true,
+		"LINUX_ARM64":          true,
+		"WINDOWS_AMD64":        true,
+	}
+	got := antigravityPlatform()
+	if !valid[got] {
+		t.Errorf("antigravityPlatform() = %q, not a ClientMetadata.Platform enum value", got)
+	}
+	if meta := antigravityMetadata("")["platform"]; !valid[meta] {
+		t.Errorf("metadata.platform = %q, not a ClientMetadata.Platform enum value", meta)
+	}
+}
+
+// TestAntigravityPlatformTracksHostOSAndArch checks the mapping itself, not
+// just membership: the enum is per-OS per-arch, so a hardcoded "DARWIN_ARM64"
+// would be wrong on Linux and on Intel Macs. Windows has no ARM64 member, so
+// every Windows host reports AMD64.
+func TestAntigravityPlatformTracksHostOSAndArch(t *testing.T) {
+	got := antigravityPlatform()
+	var wantPrefix, wantSuffix string
+	switch runtime.GOOS {
+	case "darwin":
+		wantPrefix = "DARWIN_"
+	case "windows":
+		wantPrefix, wantSuffix = "WINDOWS_", "AMD64"
+	default:
+		wantPrefix = "LINUX_"
+	}
+	if wantSuffix == "" {
+		if runtime.GOARCH == "arm64" {
+			wantSuffix = "ARM64"
+		} else {
+			wantSuffix = "AMD64"
+		}
+	}
+	if want := wantPrefix + wantSuffix; got != want {
+		t.Errorf("antigravityPlatform() = %q, want %q for %s/%s", got, want, runtime.GOOS, runtime.GOARCH)
+	}
+}
+
+// TestAntigravityPlatformIsSharedByHeaderAndBody keeps the Client-Metadata
+// header and the request metadata on one vocabulary. They are the same proto
+// on the server side, so a value that is valid in one and not the other is a
+// bug in this client, not a protocol difference.
+func TestAntigravityPlatformIsSharedByHeaderAndBody(t *testing.T) {
+	req, err := http.NewRequest("POST", "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	setAntigravityHeaders(req, "tok")
+	var header map[string]string
+	if err := json.Unmarshal([]byte(req.Header.Get("Client-Metadata")), &header); err != nil {
+		t.Fatalf("Client-Metadata is not JSON: %v", err)
+	}
+	if want, got := antigravityMetadata("")["platform"], header["platform"]; got != want {
+		t.Errorf("header platform = %q, metadata platform = %q; they must match", got, want)
 	}
 }
 

@@ -71,17 +71,29 @@ func antigravityEndpoint(account *config.Account) string {
 	return antigravityDefaultEndpoint
 }
 
-// antigravityPlatform maps the host OS onto the platform vocabulary the
-// Client-Metadata header uses. It reports the machine OmniProxy actually runs
-// on; misreporting it would be a claim about the client, not a protocol need.
+// antigravityPlatform maps the host OS and architecture onto the
+// ClientMetadata.Platform enum
+// (google.internal.cloud.code.v1internal.ClientMetadata.Platform). The API
+// validates metadata.platform against that enum and rejects any other string
+// with INVALID_ARGUMENT, so neither the host OS name ("darwin") nor the bare
+// family ("DARWIN") is a usable value — the enum is per-OS per-arch and reads
+// DARWIN_AMD64 / DARWIN_ARM64 / LINUX_AMD64 / LINUX_ARM64 / WINDOWS_AMD64.
+// Windows has no ARM64 member, so ARM64 Windows hosts report AMD64.
+//
+// It reports the machine OmniProxy actually runs on; misreporting it would be a
+// claim about the client, not a protocol need.
 func antigravityPlatform() string {
+	suffix := "AMD64"
+	if runtime.GOARCH == "arm64" {
+		suffix = "ARM64"
+	}
 	switch runtime.GOOS {
 	case "windows":
-		return "WINDOWS"
+		return "WINDOWS_AMD64"
 	case "darwin":
-		return "MACOS"
+		return "DARWIN_" + suffix
 	default:
-		return "LINUX"
+		return "LINUX_" + suffix
 	}
 }
 
