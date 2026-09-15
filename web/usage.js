@@ -1027,6 +1027,13 @@ function renderUsageTable() {
         { field: 'requests', label: (typeof t === 'function' ? t('usage.requests') : 'Requests'), align: 'right' },
       ];
       break;
+    case 'dialect':
+      groupMap = stats.byDialect || {};
+      columns = [
+        { field: 'key', label: (typeof t === 'function' ? t('usage.tabDialect') : 'Dialect') },
+        { field: 'requests', label: (typeof t === 'function' ? t('usage.requests') : 'Requests'), align: 'right' },
+      ];
+      break;
   }
 
   const sortField = usageState.sortBy[tableView] || 'requests';
@@ -1110,6 +1117,7 @@ function renderUsageTable() {
     '<option value="account"' + (tableView === 'account' ? ' selected' : '') + '>' + (typeof t === 'function' ? t('usage.usageByAccount') : 'Usage by Account') + '</option>' +
     '<option value="apiKey"' + (tableView === 'apiKey' ? ' selected' : '') + '>' + (typeof t === 'function' ? t('usage.usageByApiKey') : 'Usage by API Key') + '</option>' +
     '<option value="endpoint"' + (tableView === 'endpoint' ? ' selected' : '') + '>' + (typeof t === 'function' ? t('usage.usageByEndpoint') : 'Usage by Endpoint') + '</option>' +
+    '<option value="dialect"' + (tableView === 'dialect' ? ' selected' : '') + '>' + (typeof t === 'function' ? t('usage.usageByDialect') : 'Usage by Dialect') + '</option>' +
     '</select>' +
     '<div class="usage-view-toggle">' +
     '<button class="usage-toggle-btn' + (viewMode === 'tokens' ? ' active' : '') + '" data-table-view-mode="tokens">' + (typeof t === 'function' ? t('usage.viewTokens') : 'Tokens') + '</button>' +
@@ -1975,6 +1983,13 @@ function renderDetailDrawer() {
     '<div><span class="text-text-muted">' + (typeof t === 'function' ? t('usage.drawer.account') : 'Account:') + '</span> <span class="font-medium usage-drawer-account-value" title="' + escAttr(getUsageAccountName(d)) + '">' + escHtml(getUsageAccountName(d)) + '</span></div>' +
     '<div><span class="text-text-muted">' + (typeof t === 'function' ? t('usage.drawer.model') : 'Model:') + '</span> <span class="font-mono">' + escHtml(d.model || '-') + '</span></div>' +
     '<div><span class="text-text-muted">' + (typeof t === 'function' ? t('usage.drawer.status') : 'Status:') + '</span> <span class="' + (d.status === 'success' ? 'text-success' : 'text-error') + '">' + escHtml(translateStatus(d.status)) + '</span></div>' +
+    // Dialect is the wire contract the upstream was called with (chat /
+    // responses / anthropic). Shown only when the record carries one, i.e.
+    // for external accounts; native traffic has no dialect and would render
+    // an empty row.
+    (d.dialect
+      ? '<div><span class="text-text-muted">' + (typeof t === 'function' ? t('usage.drawer.dialect') : 'Dialect:') + '</span> <span class="font-mono">' + escHtml(d.dialect) + '</span></div>'
+      : '') +
     '<div><span class="text-text-muted">' + (typeof t === 'function' ? t('usage.drawer.latency') : 'Latency:') + '</span> <span class="font-mono">' + (typeof t === 'function' ? t('usage.drawer.ttft') : 'TTFT') + ' ' + (d.latency?.ttft || 0) + 'ms / Total ' + (d.latency?.total || 0) + 'ms</span></div>' +
     '<div><span class="text-text-muted">' + (typeof t === 'function' ? t('usage.drawer.inputTokens') : 'Input Tokens:') + '</span> <span class="font-mono">' + fmtNum(inputTokens) + '</span></div>' +
     '<div><span class="text-text-muted">' + (typeof t === 'function' ? t('usage.drawer.outputTokens') : 'Output Tokens:') + '</span> <span class="font-mono">' + fmtNum(outputTokens) + '</span></div>' +
@@ -2044,8 +2059,8 @@ function renderUsagePage() {
 
 // ─── Init / Destroy ──────────────────────────────────────
 function initUsagePage() {
-  usageState.sortBy = { model: 'requests', account: 'requests', apiKey: 'requests', endpoint: 'requests' };
-  usageState.sortOrder = { model: 'desc', account: 'desc', apiKey: 'desc', endpoint: 'desc' };
+  usageState.sortBy = { model: 'requests', account: 'requests', apiKey: 'requests', endpoint: 'requests', dialect: 'requests' };
+  usageState.sortOrder = { model: 'desc', account: 'desc', apiKey: 'desc', endpoint: 'desc', dialect: 'desc' };
 
   // Reset to overview sub-tab
   usageState.activeTab = 'overview';

@@ -62,6 +62,7 @@ type RequestRecord struct {
 	EffectiveTokens            int     `json:"effectiveTokens,omitempty"` // (input - cached) + output
 	Status                     string  `json:"status"`
 	Endpoint                   string  `json:"endpoint"`
+	Dialect                    string  `json:"dialect,omitempty"`
 	APIKeyID                   string  `json:"apiKeyId,omitempty"`
 	Error                      string  `json:"error,omitempty"`
 	CacheReadTokens            int     `json:"cacheReadTokens,omitempty"`
@@ -110,6 +111,7 @@ type PeriodSummary struct {
 	ByAccount  map[string]*PeriodSummary `json:"byAccount,omitempty"`
 	ByAPIKey   map[string]*PeriodSummary `json:"byApiKey,omitempty"`
 	ByEndpoint map[string]*PeriodSummary `json:"byEndpoint,omitempty"`
+	ByDialect  map[string]*PeriodSummary `json:"byDialect,omitempty"`
 }
 
 // UsageStats holds the full response for the usage stats endpoint.
@@ -137,6 +139,7 @@ type UsageStats struct {
 	ByAccount                       map[string]*PeriodSummary `json:"byAccount"`
 	ByAPIKey                        map[string]*PeriodSummary `json:"byApiKey"`
 	ByEndpoint                      map[string]*PeriodSummary `json:"byEndpoint"`
+	ByDialect                       map[string]*PeriodSummary `json:"byDialect"`
 	ErrorProvider                   string                    `json:"errorProvider"`
 	AccountNames                    map[string]string         `json:"accountNames"`
 }
@@ -475,6 +478,9 @@ func (t *UsageTracker) Append(r RequestRecord) {
 	if day.ByEndpoint == nil {
 		day.ByEndpoint = make(map[string]*PeriodSummary)
 	}
+	if day.ByDialect == nil {
+		day.ByDialect = make(map[string]*PeriodSummary)
+	}
 	addToSummaryMap(day.ByModel, r.Model, r)
 	addToSummaryMap(day.ByAccount, r.AccountID, r)
 	if r.APIKeyID != "" {
@@ -482,6 +488,9 @@ func (t *UsageTracker) Append(r RequestRecord) {
 	}
 	if r.Endpoint != "" {
 		addToSummaryMap(day.ByEndpoint, r.Endpoint, r)
+	}
+	if r.Dialect != "" {
+		addToSummaryMap(day.ByDialect, r.Dialect, r)
 	}
 	delete(t.activeReqs, r.AccountID)
 
@@ -550,6 +559,7 @@ func (t *UsageTracker) GetStats(period string) *UsageStats {
 		ByAccount:  make(map[string]*PeriodSummary),
 		ByAPIKey:   make(map[string]*PeriodSummary),
 		ByEndpoint: make(map[string]*PeriodSummary),
+		ByDialect:  make(map[string]*PeriodSummary),
 	}
 
 	// Recent requests stay sourced from the ring buffer — it is the live
@@ -847,6 +857,7 @@ func (t *UsageTracker) sumDailyTotalsLocked(stats *UsageStats, period string) {
 		mergeSummaryMapInto(stats.ByAccount, day.ByAccount)
 		mergeSummaryMapInto(stats.ByAPIKey, day.ByAPIKey)
 		mergeSummaryMapInto(stats.ByEndpoint, day.ByEndpoint)
+		mergeSummaryMapInto(stats.ByDialect, day.ByDialect)
 	}
 }
 

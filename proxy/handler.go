@@ -2007,7 +2007,7 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 	if hasEnabledCodexAccount() {
 		models = append(models, h.codexModelsList()...)
 	}
-	if r.URL.Query().Get("catalog") == "all" {
+	if r.URL.Query().Get("catalog") == "all" || config.PublishDiscoveredModels() {
 		h.modelsCacheMu.RLock()
 		cached := append([]ModelInfo(nil), h.cachedModels...)
 		h.modelsCacheMu.RUnlock()
@@ -3586,7 +3586,15 @@ func hermesModelID(model string) string {
 
 func hermesProviderBlock(baseURL, apiKey string, catalog []ModelInfo) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "  omniproxy:\n    base_url: %s\n    api_key: %s\n    api_mode: openai\n    discover_models: false\n    models:\n", yamlQuoteIfNeeded(baseURL), yamlQuoteIfNeeded(apiKey))
+	// Hermes validates every model switch against the provider's live
+	// /v1/models, ignoring its static models list. When OmniProxy publishes
+	// the discovered pool there, let Hermes discover it too so new pool
+	// models become selectable without re-running this configure step.
+	discover := "false"
+	if config.PublishDiscoveredModels() {
+		discover = "true"
+	}
+	fmt.Fprintf(&b, "  omniproxy:\n    base_url: %s\n    api_key: %s\n    api_mode: openai\n    discover_models: %s\n    models:\n", yamlQuoteIfNeeded(baseURL), yamlQuoteIfNeeded(apiKey), discover)
 	for _, info := range catalog {
 		id := hermesModelID(info.ModelId)
 		if id == "" {
@@ -4756,6 +4764,7 @@ func (h *Handler) recordUsageWithCache(apiKeyID, accountID, model, endpoint stri
 		Cost:                       credits,
 		Status:                     statusSuccess,
 		Endpoint:                   endpoint,
+		Dialect:                    resolveAccountDialect(accountID),
 		APIKeyID:                   apiKeyID,
 		CacheReadTokens:            maxInt(cache.ReadTokens, 0),
 		CacheCreateTokens:          maxInt(cache.CreateTokens, 0),
@@ -4801,6 +4810,23 @@ func resolveAccountMeta(accountID string) (provider, accountName string) {
 	return provider, accountName
 }
 
+// resolveAccountDialect returns the wire dialect an external account is
+// configured to speak. Empty for non-external accounts and for external
+// accounts whose dialect field was never set (they default to chat at dispatch
+// time but carry no label in config). The usage record uses this so the By
+// Dialect table reflects what the operator chose, not what the fallback learned.
+func resolveAccountDialect(accountID string) string {
+	if accountID == "" {
+		return ""
+	}
+	for _, a := range config.GetAccounts() {
+		if a.ID == accountID {
+			return a.ExternalAPIDialect
+		}
+	}
+	return ""
+}
+
 // recordError records a FAILED request: it bumps the global failure counters
 // (like the old recordFailure) AND appends a RequestRecord with Status=statusError
 // and the error message, so failed requests are visible in Usage → Recent Requests
@@ -4825,6 +4851,7 @@ func (h *Handler) recordError(apiKeyID, accountID, model, endpoint, errMsg strin
 		AccountName: accountName,
 		Status:      statusError,
 		Endpoint:    endpoint,
+		Dialect:     resolveAccountDialect(accountID),
 		APIKeyID:    apiKeyID,
 		Error:       errMsg,
 	})
@@ -12912,6 +12939,8 @@ func (h *Handler) apiGetUsageRequestDetails(w http.ResponseWriter, r *http.Reque
 		AccountID   string         `json:"accountId"`
 		AccountName string         `json:"accountName,omitempty"`
 		Status      string         `json:"status"`
+		Endpoint    string         `json:"endpoint,omitempty"`
+		Dialect     string         `json:"dialect,omitempty"`
 		Error       string         `json:"error,omitempty"`
 		Tokens      map[string]int `json:"tokens"`
 		Latency     map[string]int `json:"latency"`
@@ -12931,6 +12960,8 @@ func (h *Handler) apiGetUsageRequestDetails(w http.ResponseWriter, r *http.Reque
 			AccountID:   rec.AccountID,
 			AccountName: accountName,
 			Status:      rec.Status,
+			Endpoint:    rec.Endpoint,
+			Dialect:     rec.Dialect,
 			Error:       rec.Error,
 			Tokens: map[string]int{
 				"prompt_tokens":     rec.InputTokens,
