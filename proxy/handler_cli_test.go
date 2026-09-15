@@ -418,6 +418,17 @@ func TestCanonicalCodexLimitsOverrideStaleCache(t *testing.T) {
 	}
 }
 
+func TestCanonicalCodexAstraLimits(t *testing.T) {
+	h := &Handler{cachedModels: []ModelInfo{cliTestModel("gpt-6-astra", 200, 100)}}
+	input, output, ok := h.modelTokenLimits("gpt-6-astra")
+	if !ok || input != 272_000 || output != 128_000 {
+		t.Fatalf("Astra limits = (%d, %d, %v), want (272000, 128000, true)", input, output, ok)
+	}
+	if got := h.contextWindowForModel("gpt-6-astra"); got != 272_000 {
+		t.Fatalf("Astra context window = %d, want 272000", got)
+	}
+}
+
 func TestApplyHermesSettingsUsesCanonicalLunaLimits(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)

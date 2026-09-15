@@ -72,6 +72,8 @@ func policyModelLimits(model string) (int, int, bool) {
 		return 272000, 128000, true
 	case deepResearchModel:
 		return 272000, 128000, true
+	case "gpt-6-astra":
+		return 272000, 128000, true
 	case "claude-opus-5", "claude-sonnet-5", "claude-haiku-5":
 		return 1_000_000, 128_000, true
 	default:
