@@ -2841,7 +2841,7 @@ let detailAllowedError = '';
       '<option value="chat">' + escapeHtml(t('external.dialectChat')) + '</option>' +
       '<option value="anthropic">' + escapeHtml(t('external.dialectAnthropic')) + '</option>' +
       '</select>' +
-      '<span class="help-block text-xs">' + escapeHtml(t('external.dialectHelp')) + '</span></div>' +
+      '<span class="form-hint">' + escapeHtml(t('external.dialectHelp')) + '</span></div>' +
       '<div class="form-group" id="externalResponsesPathGroup"><label>' +
       escapeHtml(t('external.responsesPathLabel')) + ' <span class="muted-text">(' + escapeHtml(t('common.optional')) + ')</span></label>' +
       '<input type="text" id="externalResponsesPath" class="font-mono" placeholder="' + escapeAttr(t('external.responsesPathPlaceholder')) + '" /></div>' +
@@ -2849,7 +2849,7 @@ let detailAllowedError = '';
       escapeHtml(t('external.anthropicPathLabel')) + ' <span class="muted-text">(' + escapeHtml(t('common.optional')) + ')</span></label>' +
       '<input type="text" id="externalAnthropicPath" class="font-mono" placeholder="' + escapeAttr(t('external.anthropicPathPlaceholder')) + '" /></div>' +
       '<div class="form-group"><label class="flex items-center gap-2"><input type="checkbox" id="externalTest" checked /> ' + escapeHtml(t('external.testNow')) + '</label>' +
-      '<span class="help-block text-xs">' + escapeHtml(t('external.testHelp')) + '</span></div>' +
+      '<span class="form-hint">' + escapeHtml(t('external.testHelp')) + '</span></div>' +
       '<div class="modal-footer">' +
       '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
       '<button class="btn btn-primary" id="importExternalBtn" type="button">' + escapeHtml(t('common.add')) + '</button>' +
