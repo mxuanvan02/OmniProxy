@@ -47,10 +47,7 @@ function buildSvgTestCard(e) {
   del.setAttribute('aria-label', t('svgtest.delete'));
   del.innerHTML = '<i class="fa-solid fa-trash" aria-hidden="true"></i>';
   del.addEventListener('click', () => deleteSvgTestEntry(e, del));
-  head.append(model, name, prov);
-  const dialect = svgtestDialectBadge(e.dialect);
-  if (dialect) head.appendChild(dialect);
-  head.append(state, del);
+  head.append(model, name, prov, svgtestDialectBadge(e.dialect), state, del);
   const meta = document.createElement('div');
   meta.className = 'svgtest-card-meta';
   meta.textContent = (e.elapsedMs || 0) + 'ms' + (e.tokensUsed ? ' · ' + e.tokensUsed + ' tokens' : '');
