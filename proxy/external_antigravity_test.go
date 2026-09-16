@@ -288,6 +288,39 @@ func TestClassifyAntigravityFailure(t *testing.T) {
 			body:   `{"error":{"message":"This service has been disabled in this account. Verify your account to continue."}}`,
 			want:   antigravityFailureBanned,
 		},
+		{
+			// A 403 whose only message is a string we cannot verify as terminal
+			// (observed live as {"message":"capture"}) recovered on its own, so it
+			// must rotate the account, not ban it. Banning on an unknown message
+			// switched the account off permanently for a transient state.
+			name:   "unrecognized 403 message is recoverable",
+			status: http.StatusForbidden,
+			body:   `{"error":{"code":403,"message":"capture","status":"PERMISSION_DENIED"}}`,
+			want:   antigravityFailureOther,
+		},
+		{
+			// A messageless PERMISSION_DENIED is the documented terminal disable,
+			// so it still bans.
+			name:   "bare permission denied bans",
+			status: http.StatusForbidden,
+			body:   `{"error":{"code":403,"status":"PERMISSION_DENIED"}}`,
+			want:   antigravityFailureBanned,
+		},
+		{
+			// The message echoing the status carries no extra information, so it is
+			// treated as the messageless disable and bans.
+			name:   "permission denied message echoes status",
+			status: http.StatusForbidden,
+			body:   `{"error":{"code":403,"message":"PERMISSION_DENIED","status":"PERMISSION_DENIED"}}`,
+			want:   antigravityFailureBanned,
+		},
+		{
+			// An unparseable 403 body must not silently downgrade a real ban.
+			name:   "unparseable forbidden body bans",
+			status: http.StatusForbidden,
+			body:   `not json`,
+			want:   antigravityFailureBanned,
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -343,6 +376,15 @@ func TestAntigravityValidationDoesNotBan(t *testing.T) {
 			status:     http.StatusForbidden,
 			body:       `{"error":{"message":"This service has been disabled in this account for violation of Terms of Service"}}`,
 			wantBanned: true,
+		},
+		{
+			// An unrecognized 403 message must rotate the account, not ban it. The
+			// "capture" body was seen live and recovered on its own; banning on it
+			// switched the account off permanently for a transient state. No verify
+			// link is attached, so wantVerify stays empty.
+			name:   "unrecognized 403 message is not a ban",
+			status: http.StatusForbidden,
+			body:   `{"error":{"code":403,"message":"capture","status":"PERMISSION_DENIED"}}`,
 		},
 	}
 
@@ -658,6 +700,52 @@ func TestAntigravityHeadersCarryRequiredClientMetadata(t *testing.T) {
 	if parsed["platform"] == "" {
 		t.Error("Client-Metadata is missing platform")
 	}
+	// The header carries exactly the three contract fields 9router sends in
+	// loadCodeAssistClientMetadata. ideVersion belongs in the body metadata of the
+	// control-plane calls, not the header, so it must not appear here.
+	if _, ok := parsed["ideVersion"]; ok {
+		t.Errorf("Client-Metadata header = %v, want no ideVersion key", parsed)
+	}
+}
+
+// TestAntigravityUserAgentCarriesCurrentIDEVersion pins the User-Agent to the
+// published client version. The upstream fingerprints the client; a stale version
+// reads as an old build. Asserting against the constant (not a literal) keeps the
+// test honest across future bumps.
+func TestAntigravityUserAgentCarriesCurrentIDEVersion(t *testing.T) {
+	req, err := http.NewRequest("POST", "https://cloudcode-pa.googleapis.com/v1internal:generateContent", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	setAntigravityHeaders(req, "tok")
+
+	ua := req.Header.Get("User-Agent")
+	if !strings.Contains(ua, "antigravity/"+antigravityIDEVersion) {
+		t.Errorf("User-Agent = %q, want it to contain antigravity/%s", ua, antigravityIDEVersion)
+	}
+}
+
+// TestAntigravityMetadataCarriesIDEVersion checks the control-plane body
+// descriptor reports the same version as the User-Agent, matching 9router's
+// ideVersion injection on loadCodeAssist/onboardUser. duetProject is still set
+// once a project is known.
+func TestAntigravityMetadataCarriesIDEVersion(t *testing.T) {
+	meta := antigravityMetadata("")
+	if meta["ideVersion"] != antigravityIDEVersion {
+		t.Errorf("metadata.ideVersion = %q, want %q", meta["ideVersion"], antigravityIDEVersion)
+	}
+	if meta["ideType"] != "ANTIGRAVITY" || meta["pluginType"] != "GEMINI" {
+		t.Errorf("metadata = %v, want ideType ANTIGRAVITY and pluginType GEMINI", meta)
+	}
+	if meta["platform"] == "" {
+		t.Error("metadata is missing platform")
+	}
+	if _, ok := meta["duetProject"]; ok {
+		t.Errorf("metadata.duetProject = %q, want it omitted without a project", meta["duetProject"])
+	}
+	if got := antigravityMetadata("proj-1")["duetProject"]; got != "proj-1" {
+		t.Errorf("metadata.duetProject = %q, want proj-1", got)
+	}
 }
 
 // TestAntigravityPlatformIsAValidClientMetadataEnum pins the platform
@@ -744,6 +832,34 @@ func TestAntigravityEndpointDefaultsToProduction(t *testing.T) {
 	override := &config.Account{BaseURL: "https://example.test/"}
 	if got := antigravityEndpoint(override); got != "https://example.test" {
 		t.Errorf("override endpoint = %q, want https://example.test", got)
+	}
+}
+
+// TestAntigravityChatEndpointDefaultsToProduction pins the chat host resolution.
+// Chat defaults to production (the daily host is capacity-starved), can be split
+// to another host via the antigravityChatEndpoint setting, and a per-account
+// BaseURL still wins over the setting. Only the chat path reads this, so a split
+// never moves the control plane.
+func TestAntigravityChatEndpointDefaultsToProduction(t *testing.T) {
+	initConfigForTests(t)
+
+	if got := antigravityChatEndpointFor(&config.Account{}); got != antigravityDefaultEndpoint {
+		t.Errorf("default chat endpoint = %q, want %q", got, antigravityDefaultEndpoint)
+	}
+
+	config.SetStringSetting(antigravityChatEndpointSetting, "https://daily-cloudcode-pa.googleapis.com/")
+	if got := antigravityChatEndpointFor(&config.Account{}); got != "https://daily-cloudcode-pa.googleapis.com" {
+		t.Errorf("chat endpoint with setting = %q, want the daily host (trailing slash trimmed)", got)
+	}
+	// The control plane is unaffected by the chat split.
+	if got := antigravityEndpoint(&config.Account{}); got != antigravityDefaultEndpoint {
+		t.Errorf("control-plane endpoint = %q, want %q (chat setting must not move it)", got, antigravityDefaultEndpoint)
+	}
+
+	// A per-account BaseURL overrides the setting.
+	pinned := &config.Account{BaseURL: "https://pinned.example.test"}
+	if got := antigravityChatEndpointFor(pinned); got != "https://pinned.example.test" {
+		t.Errorf("chat endpoint with account BaseURL = %q, want the pinned host", got)
 	}
 }
 

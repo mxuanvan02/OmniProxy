@@ -45,10 +45,18 @@ const antigravityAuthMethod = "antigravity"
 // not a fallback worth having.
 const antigravityDefaultEndpoint = "https://cloudcode-pa.googleapis.com"
 
-// antigravityIDEVersion is reported in the User-Agent. It is a real published
-// Antigravity version, kept fixed so the proxy does not present a moving
-// target to the upstream.
-const antigravityIDEVersion = "1.18.3"
+// antigravityIDEVersion is reported in the User-Agent and, on the control-plane
+// calls, in the body metadata. It is a real published Antigravity version, kept
+// fixed so the proxy does not present a moving target to the upstream.
+const antigravityIDEVersion = "1.23.2"
+
+// antigravityChatEndpointSetting names the optional setting that routes the
+// streaming chat action to a different host than the control plane. The default
+// is the production host for both; the setting exists because some deployments
+// split chat to the daily host (9router does), and that is a deployment choice
+// rather than a code change. It is deliberately opt-in: the daily host runs with
+// minimal capacity and answers 503 MODEL_CAPACITY_EXHAUSTED on every model.
+const antigravityChatEndpointSetting = "antigravityChatEndpoint"
 
 const (
 	antigravityStreamAction  = "/v1internal:streamGenerateContent?alt=sse"
@@ -68,6 +76,25 @@ func antigravityEndpoint(account *config.Account) string {
 		if base := strings.TrimRight(strings.TrimSpace(account.BaseURL), "/"); base != "" {
 			return base
 		}
+	}
+	return antigravityDefaultEndpoint
+}
+
+// antigravityChatEndpointFor resolves the base URL for the streaming chat action.
+// It defaults to the same production host as the control plane. The precedence is
+// per-account BaseURL (operators pinning an environment), then the
+// antigravityChatEndpoint setting (deployments splitting chat to the daily host),
+// then production. Only the chat path reads this; loadCodeAssist, onboardUser and
+// fetchAvailableModels keep antigravityEndpoint so a chat split never moves the
+// control plane.
+func antigravityChatEndpointFor(account *config.Account) string {
+	if account != nil {
+		if base := strings.TrimRight(strings.TrimSpace(account.BaseURL), "/"); base != "" {
+			return base
+		}
+	}
+	if v := strings.TrimRight(strings.TrimSpace(config.GetStringSetting(antigravityChatEndpointSetting, "")), "/"); v != "" {
+		return v
 	}
 	return antigravityDefaultEndpoint
 }
@@ -231,16 +258,43 @@ func classifyAntigravityFailure(status int, body string) antigravityFailureKind 
 				return antigravityFailureAuth
 			}
 		}
-		// A bare PERMISSION_DENIED on an account that authenticated a moment ago
-		// is how the disable shows up when no explanatory message is attached.
-		// The recoverable 403s (stale credential, owner verification) have
-		// already been returned above.
-		return antigravityFailureBanned
+		// Only a verified terminal disable bans the account: a bare PERMISSION_DENIED
+		// with no explanatory message (handled below), or one naming a ban phrase
+		// (caught above). A 403 that carries a message we do not recognize — e.g.
+		// {"message":"capture"} — has been observed to clear on its own, so recover
+		// (rotate the account, no ban) instead of switching it off on an unverified
+		// string. The recoverable 403s with a known meaning (stale credential, owner
+		// verification) have already been returned above.
+		if antigravityForbiddenIsTerminal(body) {
+			return antigravityFailureBanned
+		}
+		return antigravityFailureOther
 	}
 	if status == http.StatusServiceUnavailable && strings.Contains(lower, "capacity") {
 		return antigravityFailureQuota
 	}
 	return antigravityFailureOther
+}
+
+// antigravityForbiddenIsTerminal reports whether a 403 PERMISSION_DENIED body is
+// a verified terminal disable rather than an unrecognized-but-recoverable one.
+// It is terminal when the body carries no usable error.message, or the message is
+// just the status echoed back ("PERMISSION_DENIED") — the shape Google returns for
+// a messageless disable. A 403 that names any other message ("capture", say) is
+// not verifiably terminal, so it is left to the caller to recover. An unparseable
+// body is treated as terminal: a malformed response must never silently downgrade
+// a real ban.
+func antigravityForbiddenIsTerminal(body string) bool {
+	var parsed struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal([]byte(body), &parsed); err != nil {
+		return true
+	}
+	message := strings.TrimSpace(parsed.Error.Message)
+	return message == "" || strings.EqualFold(message, "PERMISSION_DENIED")
 }
 
 // antigravityValidationLink pulls the verification page out of a
@@ -371,12 +425,15 @@ func antigravityRetryDelay(body string) time.Duration {
 const antigravityProjectTTL = 24 * time.Hour
 
 // antigravityMetadata is the client descriptor loadCodeAssist and onboardUser
-// both take. duetProject is only set once a project is known.
+// both take. ideVersion reports the same real client version the User-Agent
+// carries (9router injects it on these calls too). duetProject is only set once a
+// project is known.
 func antigravityMetadata(projectID string) map[string]string {
 	metadata := map[string]string{
 		"ideType":    "ANTIGRAVITY",
 		"platform":   antigravityPlatform(),
 		"pluginType": "GEMINI",
+		"ideVersion": antigravityIDEVersion,
 	}
 	if projectID = strings.TrimSpace(projectID); projectID != "" {
 		metadata["duetProject"] = projectID
@@ -1151,7 +1208,7 @@ func CallExternalAntigravity(ctx context.Context, account *config.Account, paylo
 		return fmt.Errorf("antigravity call marshal: %w", err)
 	}
 
-	endpoint := antigravityEndpoint(account) + antigravityStreamAction
+	endpoint := antigravityChatEndpointFor(account) + antigravityStreamAction
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewReader(reqBody))
 	if err != nil {
 		return fmt.Errorf("antigravity call new request: %w", err)
