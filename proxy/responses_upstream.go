@@ -197,6 +197,13 @@ func kiroPayloadToResponsesRequest(payload *KiroPayload, account *config.Account
 		if payload.InferenceConfig.ReasoningEffort != "" {
 			body["reasoning"] = map[string]string{"effort": payload.InferenceConfig.ReasoningEffort}
 		}
+		// max_output_tokens is a safety ceiling, not a sampling preference —
+		// always forward it when the client sets one, regardless of whether
+		// the upstream accepts temperature/top_p. Without this the upstream
+		// falls back to its own default which may be lower than expected.
+		if payload.InferenceConfig.MaxTokens > 0 {
+			body["max_output_tokens"] = payload.InferenceConfig.MaxTokens
+		}
 		// Sampling parameters are opt-in per dialect: the ChatGPT Codex backend
 		// rejects temperature/top_p with HTTP 400 for GPT-5.x reasoning models,
 		// while a generic OpenAI-compatible gateway accepts them.

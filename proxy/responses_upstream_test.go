@@ -388,3 +388,37 @@ func TestResponsesBuilderRejectsAnEmptyModel(t *testing.T) {
 		t.Fatalf("model = %v, want the supplied default", got)
 	}
 }
+
+func TestResponsesBuilderForwardsMaxOutputTokens(t *testing.T) {
+	payload := &KiroPayload{}
+	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "hello"
+	payload.InferenceConfig = &InferenceConfig{MaxTokens: 4096}
+
+	body, err := kiroPayloadToResponsesRequest(payload, nil,
+		responsesDialectOptions{DefaultModel: "gpt-5"})
+	if err != nil {
+		t.Fatalf("builder rejected payload with MaxTokens: %v", err)
+	}
+	got, ok := body["max_output_tokens"]
+	if !ok {
+		t.Fatal("max_output_tokens not set when InferenceConfig.MaxTokens > 0")
+	}
+	if got != 4096 {
+		t.Fatalf("max_output_tokens = %v, want 4096", got)
+	}
+}
+
+func TestResponsesBuilderOmitsMaxOutputTokensWhenZero(t *testing.T) {
+	payload := &KiroPayload{}
+	payload.ConversationState.CurrentMessage.UserInputMessage.Content = "hello"
+	// No InferenceConfig → MaxTokens defaults to 0.
+
+	body, err := kiroPayloadToResponsesRequest(payload, nil,
+		responsesDialectOptions{DefaultModel: "gpt-5"})
+	if err != nil {
+		t.Fatalf("builder rejected payload: %v", err)
+	}
+	if _, ok := body["max_output_tokens"]; ok {
+		t.Fatal("max_output_tokens should be omitted when MaxTokens is 0")
+	}
+}
