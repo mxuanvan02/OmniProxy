@@ -1,12 +1,13 @@
 import type { ReactNode } from 'react'
 
-export type Section = 'overview'|'accounts'|'providers'|'usage'|'quota'|'api'|'settings'|'logs'
+export type Section = 'overview'|'accounts'|'providers'|'usage'|'quota'|'api'|'settings'|'logs'|'modeltest'
 const items: Array<{id:Section; label:string; hint:string; icon:string}> = [
   {id:'overview',label:'Tổng quan',hint:'Sức khoẻ hệ thống',icon:'⌂'},
   {id:'accounts',label:'Tài khoản',hint:'Pool & model',icon:'◎'},
   {id:'providers',label:'Nhà cung cấp',hint:'Vendor, model & lỗi',icon:'⇄'},
   {id:'usage',label:'Sử dụng',hint:'Token & chi phí',icon:'↗'},
   {id:'quota',label:'Hạn mức',hint:'Quota & reset',icon:'◔'},
+  {id:'modeltest',label:'Kiểm tra Model',hint:'SVG & capability',icon:'◆'},
   {id:'api',label:'API & CLI',hint:'Endpoint & công cụ',icon:'⌘'},
   {id:'settings',label:'Thiết lập',hint:'Proxy & routing',icon:'⚙'},
   {id:'logs',label:'Nhật ký',hint:'Sự kiện thời gian thực',icon:'≡'},

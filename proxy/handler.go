@@ -6477,6 +6477,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetLogs(w, r)
 	case path == "/logs/stream" && r.Method == "GET":
 		h.apiLogsStream(w, r)
+	case path == "/test-model-svg" && r.Method == "POST":
+		h.apiTestModelSVG(w, r)
 	default:
 		w.WriteHeader(404)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Not Found"})

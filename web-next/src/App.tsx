@@ -24,9 +24,10 @@ import {
   type UsageStats,
 } from './lib/api'
 
-const VALID_SECTIONS: Section[] = ['overview', 'accounts', 'providers', 'usage', 'quota', 'api', 'settings', 'logs']
+const VALID_SECTIONS: Section[] = ['overview', 'accounts', 'providers', 'usage', 'quota', 'modeltest', 'api', 'settings', 'logs']
 const EMPTY_CAPABILITIES: CapabilityMatrix = { capabilities: [], accounts: [] }
 const UsageView = lazy(() => import('./components/UsageView').then((module) => ({ default: module.UsageView })))
+const ModelTestView = lazy(() => import('./components/ModelTestView').then((module) => ({ default: module.ModelTestView })))
 
 function initialSection(): Section {
   const value = location.hash.replace('#', '') as Section
@@ -150,7 +151,9 @@ export function App() {
           ? <Suspense fallback={<div className="grid min-h-96 place-items-center text-sm text-slate-500">Đang tải biểu đồ…</div>}><UsageView usage={usage} chart={chart} period={usagePeriod} onPeriod={setUsagePeriod} status={status} updatedAt={updatedAt} /></Suspense>
           : section === 'quota'
             ? <QuotaView data={quota} onReload={load} />
-            : section === 'api'
+            : section === 'modeltest'
+              ? <Suspense fallback={<div className="grid min-h-96 place-items-center text-sm text-slate-500">Đang tải…</div>}><ModelTestView models={status?.modelIds || []} /></Suspense>
+              : section === 'api'
               ? <ApiView settings={settings} cliStatus={cliStatus} models={status?.modelIds || []} />
               : section === 'settings'
                 ? <SettingsView key={settingsKey} settings={settings} onReload={load} />
