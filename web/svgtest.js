@@ -15,10 +15,12 @@ let svgtestState = {
   accountFilter: '',
   defaultPrompt: '',
   promptDirty: false,      // operator typed; stop overwriting the box on refresh
+  currentGroup: '',        // prompt key the results grid is showing
   loaded: false,
   loading: false,
   bound: false,
   running: false,
+  deleting: false,
 };
 
 async function loadSvgTestMatrix() {
@@ -178,21 +180,4 @@ function updateSvgTestCounts() {
   if (m) m.textContent = t('svgtest.selectedCount', String(svgtestState.selModels.size));
   const a = document.getElementById('svgtestAccountCount');
   if (a) a.textContent = t('svgtest.selectedCount', String(svgtestState.selAccounts.size));
-}
-
-function svgtestEmpty(key) {
-  const el = document.createElement('div');
-  el.className = 'empty-state';
-  el.textContent = t(key);
-  return el;
-}
-
-function svgtestSkeleton(n) {
-  const wrap = document.createElement('div');
-  for (let i = 0; i < n; i++) {
-    const row = document.createElement('div');
-    row.className = 'svgtest-skeleton';
-    wrap.appendChild(row);
-  }
-  return wrap;
 }

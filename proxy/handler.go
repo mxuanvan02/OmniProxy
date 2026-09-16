@@ -6498,6 +6498,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiSVGTestMatrix(w, r)
 	case path == "/test-model-svg/groups" && r.Method == "GET":
 		h.apiListSVGTestGroups(w, r)
+	case strings.HasPrefix(path, "/test-model-svg/groups/") && strings.HasSuffix(path, "/entries") && r.Method == "DELETE":
+		h.apiDeleteSVGTestResult(w, r, strings.TrimSuffix(strings.TrimPrefix(path, "/test-model-svg/groups/"), "/entries"))
 	case strings.HasPrefix(path, "/test-model-svg/groups/") && r.Method == "GET":
 		h.apiGetSVGTestGroup(w, r, strings.TrimPrefix(path, "/test-model-svg/groups/"))
 	default:

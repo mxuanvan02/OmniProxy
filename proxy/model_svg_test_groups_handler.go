@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -151,4 +152,41 @@ func (h *Handler) apiGetSVGTestGroup(w http.ResponseWriter, _ *http.Request, key
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{"group": meta, "entries": entries})
+}
+
+// apiDeleteSVGTestResult DELETE /admin/api/test-model-svg/groups/{key}/entries
+// ?model=&accountId= removes one stored (model, account) result — typically a
+// failed attempt the operator no longer wants cluttering the comparison. When
+// it was the group's last entry the group directory goes with it, so the
+// history never lists a prompt with nothing left to show.
+func (h *Handler) apiDeleteSVGTestResult(w http.ResponseWriter, r *http.Request, key string) {
+	if !validSVGPromptKey(key) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Invalid prompt key"})
+		return
+	}
+	model := r.URL.Query().Get("model")
+	accountID := r.URL.Query().Get("accountId")
+	if model == "" || accountID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Model and account are required"})
+		return
+	}
+	dir := svgTestStoreDir()
+	removed, groupEmpty, err := deleteSVGTestEntry(dir, key, model, accountID)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+	if !removed {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(map[string]string{"error": "No such stored result"})
+		return
+	}
+	if groupEmpty {
+		_ = os.RemoveAll(filepath.Join(dir, key))
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	json.NewEncoder(w).Encode(map[string]interface{}{"deleted": true})
 }

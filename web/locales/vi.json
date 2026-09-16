@@ -1085,5 +1085,8 @@
   "svgtest.noResults": "Chưa có kết quả nào",
   "svgtest.ok": "OK",
   "svgtest.failed": "Thất bại",
-  "svgtest.noSvg": "Không có SVG trả về"
+  "svgtest.noSvg": "Không có SVG trả về",
+  "svgtest.delete": "Xoá",
+  "svgtest.confirmDelete": "Xoá kết quả đã lưu của {0} trên {1}?",
+  "svgtest.deleteError": "Không xoá được kết quả"
 }

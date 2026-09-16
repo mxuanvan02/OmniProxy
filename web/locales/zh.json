@@ -1085,5 +1085,8 @@
   "svgtest.noResults": "暂无存储的结果",
   "svgtest.ok": "成功",
   "svgtest.failed": "失败",
-  "svgtest.noSvg": "未返回 SVG"
+  "svgtest.noSvg": "未返回 SVG",
+  "svgtest.delete": "删除",
+  "svgtest.confirmDelete": "删除 {0} 在 {1} 上的已存储结果？",
+  "svgtest.deleteError": "删除结果失败"
 }

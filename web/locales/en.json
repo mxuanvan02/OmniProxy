@@ -1085,5 +1085,8 @@
   "svgtest.noResults": "No stored results",
   "svgtest.ok": "OK",
   "svgtest.failed": "Failed",
-  "svgtest.noSvg": "No SVG returned"
+  "svgtest.noSvg": "No SVG returned",
+  "svgtest.delete": "Delete",
+  "svgtest.confirmDelete": "Delete the stored result for {0} on {1}?",
+  "svgtest.deleteError": "Failed to delete the result"
 }

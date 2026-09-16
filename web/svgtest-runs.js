@@ -97,65 +97,6 @@ function selectSvgTestGroup(key) {
   renderSvgTestGroup(key);
 }
 
-async function renderSvgTestGroup(key) {
-  const box = document.getElementById('svgtestResults');
-  if (!box) return;
-  if (!key) { box.replaceChildren(); return; }
-  box.replaceChildren(svgtestEmpty('svgtest.loading'));
-  let data;
-  try {
-    const res = await api('/test-model-svg/groups/' + encodeURIComponent(key));
-    data = await res.json();
-  } catch (e) { box.replaceChildren(svgtestEmpty('svgtest.loadError')); return; }
-  const entries = Array.isArray(data.entries) ? data.entries : [];
-  box.replaceChildren();
-  if (entries.length === 0) { box.replaceChildren(svgtestEmpty('svgtest.noResults')); return; }
-  for (const e of entries) box.appendChild(buildSvgTestCard(e));
-}
-
-function buildSvgTestCard(e) {
-  const card = document.createElement('div');
-  card.className = 'svgtest-card';
-  const head = document.createElement('div');
-  head.className = 'svgtest-card-head';
-  const model = document.createElement('span');
-  model.className = 'svgtest-card-model';
-  model.textContent = e.model || '?';
-  const name = document.createElement('span');
-  name.className = 'svgtest-card-name';
-  name.textContent = e.accountName || e.accountId;
-  const prov = document.createElement('span');
-  prov.className = 'badge badge-info';
-  prov.textContent = e.provider || '?';
-  const ok = e.success && e.svg;
-  const state = document.createElement('span');
-  state.className = 'badge ' + (ok ? 'badge-success' : 'badge-error');
-  state.textContent = ok ? t('svgtest.ok') : t('svgtest.failed');
-  head.append(model, name, prov, state);
-  const meta = document.createElement('div');
-  meta.className = 'svgtest-card-meta';
-  meta.textContent = (e.elapsedMs || 0) + 'ms' + (e.tokensUsed ? ' · ' + e.tokensUsed + ' tokens' : '');
-  card.append(head, meta);
-
-  const body = document.createElement('div');
-  body.className = 'svgtest-card-body';
-  if (e.svg) {
-    // SVG is model-generated markup shown to the operator only; it is inserted
-    // as-is so the illustration renders, matching the admin-next viewer.
-    const art = document.createElement('div');
-    art.className = 'svgtest-art';
-    art.innerHTML = e.svg;
-    body.appendChild(art);
-  } else {
-    const msg = document.createElement('div');
-    msg.className = 'svgtest-error';
-    msg.textContent = e.error || t('svgtest.noSvg');
-    body.appendChild(msg);
-  }
-  card.appendChild(body);
-  return card;
-}
-
 function bindSvgTestEvents() {
   if (svgtestState.bound) return;
   const byId = id => document.getElementById(id);
