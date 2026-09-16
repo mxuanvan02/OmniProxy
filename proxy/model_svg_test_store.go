@@ -24,6 +24,7 @@ type svgTestEntry struct {
 	AccountName string `json:"accountName"`
 	Provider    string `json:"provider"`
 	Dialect     string `json:"dialect,omitempty"`
+	Mode        string `json:"mode,omitempty"`
 	Success     bool   `json:"success"`
 	SVG         string `json:"svg"`
 	Error       string `json:"error,omitempty"`
@@ -51,6 +52,7 @@ type svgTestSummary struct {
 	AccountName string `json:"accountName"`
 	Provider    string `json:"provider"`
 	Dialect     string `json:"dialect,omitempty"`
+	Mode        string `json:"mode,omitempty"`
 	Success     bool   `json:"success"`
 	HasSVG      bool   `json:"hasSvg"`
 }
@@ -83,12 +85,34 @@ func svgTestStoreDir() string {
 	return filepath.Join(data, "svg-tests")
 }
 
-// svgEntryFileName keys a stored result by model AND account. Keying by account
-// alone collapsed two different models run against one account into a single
-// file, losing the comparison the grid exists to show. Account ids are UUIDs, so
-// the double-dash separator is unambiguous.
-func svgEntryFileName(model, accountID string) string {
-	return sanitizeIDForFile(model) + "--" + sanitizeIDForFile(accountID) + ".json"
+// normalizeSVGTestMode maps a caller-supplied mode onto one of the two stored
+// modes, or "" for anything else. "" means "legacy/unspecified": a result saved
+// before modes existed, or a run that did not ask for a specific one. Keeping
+// "" distinct from "raw" means the legacy files on disk stay readable and the
+// UI can badge them separately instead of mislabeling them as a raw run.
+func normalizeSVGTestMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "raw":
+		return "raw"
+	case "think":
+		return "think"
+	default:
+		return ""
+	}
+}
+
+// svgEntryFileName keys a stored result by model, account AND mode. The mode
+// suffix is what lets a raw and a think run of the same pair coexist instead of
+// overwriting each other. An empty mode keeps the legacy two-part name so
+// results written before modes existed are still found by the reader and delete.
+// Account ids are UUIDs and mode is a fixed word, so the separator is
+// unambiguous.
+func svgEntryFileName(model, accountID, mode string) string {
+	stem := sanitizeIDForFile(model) + "--" + sanitizeIDForFile(accountID)
+	if m := normalizeSVGTestMode(mode); m != "" {
+		stem += "--" + m
+	}
+	return stem + ".json"
 }
 
 // saveSVGTestEntry writes one (model, account) result into the prompt group.
@@ -106,7 +130,7 @@ func saveSVGTestEntry(dir string, entry svgTestEntry) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(groupDir, svgEntryFileName(entry.Model, entry.AccountID)), data, 0o644)
+	return os.WriteFile(filepath.Join(groupDir, svgEntryFileName(entry.Model, entry.AccountID, entry.Mode)), data, 0o644)
 }
 
 // saveSVGTestMeta records the group's prompt text once. Every result rewrites it

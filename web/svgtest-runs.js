@@ -28,26 +28,37 @@ async function runSvgTest() {
   const promptBox = document.getElementById('svgtestPrompt');
   const prompt = (promptBox ? promptBox.value : '').trim() || svgtestState.defaultPrompt;
 
+  // The UI expands a "both" selection into one POST per mode; a single-mode
+  // selection posts once. The server runs exactly one mode per request and
+  // stores each under its own mode-suffixed filename, so raw and think never
+  // overwrite each other.
+  const modes = svgtestState.mode === 'both' ? ['raw', 'think'] : [svgtestState.mode];
+
   svgtestState.running = true;
   const runBtn = document.getElementById('svgtestRunBtn');
   const status = document.getElementById('svgtestStatus');
   if (runBtn) runBtn.disabled = true;
-  const total = pairs.length;
+  const total = pairs.length * modes.length;
   let done = 0;
   if (status) status.textContent = t('svgtest.running', '0', String(total));
 
   // Every POST response echoes the promptKey the server derived from this
   // prompt; capture one so the run can select its own group afterwards.
   let reportedKey = '';
-  const tasks = pairs.map(p => api('/test-model-svg', {
-    method: 'POST',
-    body: JSON.stringify({ model: p.model, prompt: prompt, accountId: p.accountId }),
-  }).then(res => res.json().catch(() => ({}))).then(d => {
-    if (d && d.promptKey) reportedKey = d.promptKey;
-  }).catch(() => {}).finally(() => {
-    done++;
-    if (status) status.textContent = t('svgtest.running', String(done), String(total));
-  }));
+  const tasks = [];
+  for (const p of pairs) {
+    for (const mode of modes) {
+      tasks.push(api('/test-model-svg', {
+        method: 'POST',
+        body: JSON.stringify({ model: p.model, prompt: prompt, accountId: p.accountId, mode: mode }),
+      }).then(res => res.json().catch(() => ({}))).then(d => {
+        if (d && d.promptKey) reportedKey = d.promptKey;
+      }).catch(() => {}).finally(() => {
+        done++;
+        if (status) status.textContent = t('svgtest.running', String(done), String(total));
+      }));
+    }
+  }
   await Promise.all(tasks);
 
   svgtestState.running = false;
@@ -128,7 +139,25 @@ function bindSvgTestEvents() {
   });
   const history = byId('svgtestGroupHistory');
   if (history) history.addEventListener('change', function () { renderSvgTestGroup(this.value); });
+  bindSvgTestModeGroup(byId('svgtestModeGroup'));
+  const rmf = byId('svgtestResultModelFilter');
+  if (rmf) rmf.addEventListener('input', function () {
+    svgtestState.resultModelFilter = this.value.trim().toLowerCase();
+    renderSvgTestGroup(svgtestState.currentGroup);
+  });
   svgtestState.bound = true;
+}
+
+// bindSvgTestModeGroup wires the Raw / Think / Both segmented control. One
+// button is pressed at a time; aria-pressed drives the highlight in CSS so the
+// active mode is exposed to assistive tech as well as visually.
+function bindSvgTestModeGroup(group) {
+  if (!group) return;
+  const buttons = group.querySelectorAll('.svgtest-mode-btn');
+  buttons.forEach(btn => btn.addEventListener('click', () => {
+    svgtestState.mode = btn.dataset.mode;
+    buttons.forEach(b => b.setAttribute('aria-pressed', String(b === btn)));
+  }));
 }
 
 function initSvgTestPage() {

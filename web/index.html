@@ -390,6 +390,15 @@
           </div>
 
           <div class="svgtest-run-row">
+            <div class="svgtest-mode-group" id="svgtestModeGroup" role="group"
+              data-i18n-aria-label="svgtest.modeLabel">
+              <button class="btn btn-outline btn-sm svgtest-mode-btn" type="button" data-mode="raw"
+                aria-pressed="false" data-i18n="svgtest.modeRaw"></button>
+              <button class="btn btn-outline btn-sm svgtest-mode-btn" type="button" data-mode="think"
+                aria-pressed="false" data-i18n="svgtest.modeThink"></button>
+              <button class="btn btn-outline btn-sm svgtest-mode-btn" type="button" data-mode="both"
+                aria-pressed="true" data-i18n="svgtest.modeBoth"></button>
+            </div>
             <button class="btn btn-primary" id="svgtestRunBtn" type="button">
               <i class="fa-solid fa-play" aria-hidden="true"></i><span data-i18n="svgtest.run"></span></button>
             <span class="svgtest-status" id="svgtestStatus"></span>
@@ -400,6 +409,8 @@
           <div class="card-header">
             <span class="card-title" data-i18n="svgtest.results"></span>
             <div class="card-actions">
+              <input type="text" id="svgtestResultModelFilter" class="w-56!"
+                data-i18n-placeholder="svgtest.filterResultModels" />
               <select id="svgtestGroupHistory" class="w-56!" data-i18n-aria-label="svgtest.groupHistory"></select>
             </div>
           </div>

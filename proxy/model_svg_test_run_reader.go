@@ -64,7 +64,7 @@ func loadSVGTestGroup(groupDir, promptKey string) *svgTestGroupMeta {
 		meta.ResultCount++
 		meta.Results = append(meta.Results, svgTestSummary{
 			Model: entry.Model, AccountID: entry.AccountID, AccountName: entry.AccountName,
-			Provider: entry.Provider, Dialect: entry.Dialect, Success: entry.Success, HasSVG: entry.SVG != "",
+			Provider: entry.Provider, Dialect: entry.Dialect, Mode: entry.Mode, Success: entry.Success, HasSVG: entry.SVG != "",
 		})
 	}
 	if meta.ResultCount == 0 {
@@ -79,7 +79,10 @@ func loadSVGTestGroup(groupDir, promptKey string) *svgTestGroupMeta {
 		if meta.Results[i].Model != meta.Results[j].Model {
 			return meta.Results[i].Model < meta.Results[j].Model
 		}
-		return meta.Results[i].AccountName < meta.Results[j].AccountName
+		if meta.Results[i].AccountName != meta.Results[j].AccountName {
+			return meta.Results[i].AccountName < meta.Results[j].AccountName
+		}
+		return meta.Results[i].Mode < meta.Results[j].Mode
 	})
 	return meta
 }
@@ -104,7 +107,10 @@ func getSVGTestGroupEntries(dir, promptKey string) []svgTestEntry {
 		if out[i].Model != out[j].Model {
 			return out[i].Model < out[j].Model
 		}
-		return out[i].AccountName < out[j].AccountName
+		if out[i].AccountName != out[j].AccountName {
+			return out[i].AccountName < out[j].AccountName
+		}
+		return out[i].Mode < out[j].Mode
 	})
 	return out
 }

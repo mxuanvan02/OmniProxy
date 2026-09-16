@@ -7,22 +7,24 @@ import (
 )
 
 // seedSVGTestEntry writes one entry through the real save path so delete tests
-// operate on exactly what the writer produces.
-func seedSVGTestEntry(t *testing.T, dir, key, model, accountID string) {
+// operate on exactly what the writer produces. An empty mode writes the legacy
+// (pre-mode) filename, which is what lets the delete tests prove an empty-mode
+// delete targets legacy files and leaves raw/think results alone.
+func seedSVGTestEntry(t *testing.T, dir, key, model, accountID, mode string) {
 	t.Helper()
 	if err := saveSVGTestEntry(dir, svgTestEntry{
-		PromptKey: key, Model: model, AccountID: accountID, Success: false,
+		PromptKey: key, Model: model, AccountID: accountID, Mode: mode, Success: false,
 	}); err != nil {
-		t.Fatalf("seed entry %s/%s: %v", model, accountID, err)
+		t.Fatalf("seed entry %s/%s/%s: %v", model, accountID, mode, err)
 	}
 }
 
 func TestDeleteSVGTestEntryRemovesOneKeepsOthers(t *testing.T) {
 	dir := t.TempDir()
-	seedSVGTestEntry(t, dir, "p-key1", "gemini-3.8-flash", "acct-a")
-	seedSVGTestEntry(t, dir, "p-key1", "gemini-3.8-flash", "acct-b")
+	seedSVGTestEntry(t, dir, "p-key1", "gemini-3.8-flash", "acct-a", "")
+	seedSVGTestEntry(t, dir, "p-key1", "gemini-3.8-flash", "acct-b", "")
 
-	removed, groupEmpty, err := deleteSVGTestEntry(dir, "p-key1", "gemini-3.8-flash", "acct-a")
+	removed, groupEmpty, err := deleteSVGTestEntry(dir, "p-key1", "gemini-3.8-flash", "acct-a", "")
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -37,9 +39,9 @@ func TestDeleteSVGTestEntryRemovesOneKeepsOthers(t *testing.T) {
 
 func TestDeleteSVGTestEntryLastEntryReportsGroupEmpty(t *testing.T) {
 	dir := t.TempDir()
-	seedSVGTestEntry(t, dir, "p-key2", "glm-5.3", "acct-a")
+	seedSVGTestEntry(t, dir, "p-key2", "glm-5.3", "acct-a", "")
 
-	removed, groupEmpty, err := deleteSVGTestEntry(dir, "p-key2", "glm-5.3", "acct-a")
+	removed, groupEmpty, err := deleteSVGTestEntry(dir, "p-key2", "glm-5.3", "acct-a", "")
 	if err != nil || !removed || !groupEmpty {
 		t.Fatalf("removed=%v groupEmpty=%v err=%v, want true/true/nil", removed, groupEmpty, err)
 	}
@@ -50,9 +52,9 @@ func TestDeleteSVGTestEntryLastEntryReportsGroupEmpty(t *testing.T) {
 
 func TestDeleteSVGTestEntryMissingIsNotAnError(t *testing.T) {
 	dir := t.TempDir()
-	seedSVGTestEntry(t, dir, "p-key3", "glm-5.3", "acct-a")
+	seedSVGTestEntry(t, dir, "p-key3", "glm-5.3", "acct-a", "")
 
-	removed, _, err := deleteSVGTestEntry(dir, "p-key3", "glm-5.3", "never-stored")
+	removed, _, err := deleteSVGTestEntry(dir, "p-key3", "glm-5.3", "never-stored", "")
 	if err != nil {
 		t.Fatalf("missing delete must not error, got %v", err)
 	}
@@ -63,14 +65,14 @@ func TestDeleteSVGTestEntryMissingIsNotAnError(t *testing.T) {
 
 func TestDeleteSVGTestEntryRejectsInvalidArgs(t *testing.T) {
 	dir := t.TempDir()
-	seedSVGTestEntry(t, dir, "p-key4", "glm-5.3", "acct-a")
+	seedSVGTestEntry(t, dir, "p-key4", "glm-5.3", "acct-a", "")
 
 	for _, tc := range []struct{ key, model, account string }{
 		{"../evil", "glm-5.3", "acct-a"},
 		{"p-key4", "", "acct-a"},
 		{"p-key4", "glm-5.3", ""},
 	} {
-		removed, _, err := deleteSVGTestEntry(dir, tc.key, tc.model, tc.account)
+		removed, _, err := deleteSVGTestEntry(dir, tc.key, tc.model, tc.account, "")
 		if err != nil || removed {
 			t.Fatalf("invalid args %+v: removed=%v err=%v, want false/nil", tc, removed, err)
 		}
@@ -84,13 +86,13 @@ func TestDeleteSVGTestEntryRejectsInvalidArgs(t *testing.T) {
 // sanitised stem collapses ../ to underscores, so the real entry survives.
 func TestDeleteSVGTestEntryCannotEscapeGroup(t *testing.T) {
 	dir := t.TempDir()
-	seedSVGTestEntry(t, dir, "p-key5", "glm-5.3", "acct-a")
+	seedSVGTestEntry(t, dir, "p-key5", "glm-5.3", "acct-a", "")
 	outside := filepath.Join(dir, "outside.json")
 	if err := os.WriteFile(outside, []byte("{}"), 0o644); err != nil {
 		t.Fatalf("seed outside file: %v", err)
 	}
 
-	if _, _, err := deleteSVGTestEntry(dir, "p-key5", "../../outside", "acct-a"); err != nil {
+	if _, _, err := deleteSVGTestEntry(dir, "p-key5", "../../outside", "acct-a", ""); err != nil {
 		t.Fatalf("escape attempt errored: %v", err)
 	}
 	if _, err := os.Stat(outside); err != nil {
@@ -98,5 +100,40 @@ func TestDeleteSVGTestEntryCannotEscapeGroup(t *testing.T) {
 	}
 	if len(getSVGTestGroupEntries(dir, "p-key5")) != 1 {
 		t.Fatal("escape attempt removed the real entry")
+	}
+}
+
+// Deleting one mode of a pair must leave the other mode's file untouched: that
+// is the whole point of keying storage by mode. The surviving entry keeps the
+// group alive, so groupEmpty stays false.
+func TestDeleteSVGTestEntryRemovesOnlyMatchingMode(t *testing.T) {
+	dir := t.TempDir()
+	seedSVGTestEntry(t, dir, "p-key6", "glm-5.3", "acct-a", "raw")
+	seedSVGTestEntry(t, dir, "p-key6", "glm-5.3", "acct-a", "think")
+
+	removed, groupEmpty, err := deleteSVGTestEntry(dir, "p-key6", "glm-5.3", "acct-a", "raw")
+	if err != nil || !removed || groupEmpty {
+		t.Fatalf("removed=%v groupEmpty=%v err=%v, want true/false/nil", removed, groupEmpty, err)
+	}
+	left := getSVGTestGroupEntries(dir, "p-key6")
+	if len(left) != 1 || left[0].Mode != "think" {
+		t.Fatalf("left = %+v, want only the think entry", left)
+	}
+}
+
+// A legacy entry (empty mode) must not be reachable by a mode-scoped delete,
+// and vice versa: the two names are distinct files.
+func TestDeleteSVGTestEntryModeAndLegacyDoNotCollide(t *testing.T) {
+	dir := t.TempDir()
+	seedSVGTestEntry(t, dir, "p-key7", "glm-5.3", "acct-a", "")
+	seedSVGTestEntry(t, dir, "p-key7", "glm-5.3", "acct-a", "raw")
+
+	removed, groupEmpty, err := deleteSVGTestEntry(dir, "p-key7", "glm-5.3", "acct-a", "raw")
+	if err != nil || !removed || groupEmpty {
+		t.Fatalf("removed=%v groupEmpty=%v err=%v, want true/false/nil", removed, groupEmpty, err)
+	}
+	left := getSVGTestGroupEntries(dir, "p-key7")
+	if len(left) != 1 || left[0].Mode != "" {
+		t.Fatalf("left = %+v, want only the legacy (empty-mode) entry", left)
 	}
 }

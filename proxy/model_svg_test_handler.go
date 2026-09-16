@@ -25,6 +25,7 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 		Model     string `json:"model"`
 		Prompt    string `json:"prompt"`
 		AccountID string `json:"accountId"`
+		Mode      string `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -90,7 +91,12 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 	}
 
 	thinkingCfg := config.GetThinkingConfig()
-	actualModel, thinking := ParseModelAndThinking(model, thinkingCfg.Suffix)
+	actualModel, _ := ParseModelAndThinking(model, thinkingCfg.Suffix)
+
+	// The mode, not the model suffix, decides reasoning here: raw forces it off
+	// and think forces it on across every dialect, so the comparison isolates
+	// rendering ability from reasoning budget.
+	mode := resolveSVGTestMode(req.Mode)
 
 	start := time.Now()
 
@@ -100,19 +106,7 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 		MaxTokens: externalAnthropicDefaultMaxTokens,
 		Stream:    false,
 	}
-	kiroPayload := OpenAIToKiro(openaiReq, thinking)
-
-	// Pin sampling so repeated runs of the same prompt are comparable. The pin
-	// is applied on the payload, not the OpenAI request, because a zero
-	// temperature cannot survive the request's own zero-value ambiguity. Model
-	// families that reject a temperature override keep their own sampling.
-	if temp, ok := svgTestTemperature(actualModel); ok {
-		if kiroPayload.InferenceConfig == nil {
-			kiroPayload.InferenceConfig = &InferenceConfig{}
-		}
-		kiroPayload.InferenceConfig.Temperature = temp
-		kiroPayload.InferenceConfig.HasTemperature = true
-	}
+	kiroPayload := buildSVGTestPayload(openaiReq, actualModel, mode)
 
 	var content string
 	var inTok, outTok int
@@ -141,6 +135,7 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 			AccountName: accountLabel(account),
 			Provider:    providerLabelOf(account.Provider),
 			Dialect:     externalAPIDialect(account),
+			Mode:        mode,
 			Success:     false,
 			Error:       err.Error(),
 			ElapsedMs:   elapsed,
@@ -151,6 +146,7 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 			"success":     false,
 			"error":       err.Error(),
 			"model":       model,
+			"mode":        mode,
 			"promptKey":   promptKey,
 			"accountId":   account.ID,
 			"accountName": accountLabel(account),
@@ -166,6 +162,7 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 		AccountName: accountLabel(account),
 		Provider:    providerLabelOf(account.Provider),
 		Dialect:     externalAPIDialect(account),
+		Mode:        mode,
 		Success:     svg != "",
 		SVG:         svg,
 		Error:       failReason,
@@ -179,6 +176,7 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 		"error":       failReason,
 		"rawReply":    content,
 		"model":       model,
+		"mode":        mode,
 		"promptKey":   promptKey,
 		"accountId":   account.ID,
 		"accountName": accountLabel(account),

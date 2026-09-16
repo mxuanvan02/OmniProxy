@@ -4885,6 +4885,15 @@ img.brand-icon {
   font-size: 0.8125rem;
   color: var(--muted-foreground);
 }
+.svgtest-mode-group {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+.svgtest-mode-btn[aria-pressed="true"] {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: var(--primary);
+}
 .svgtest-results-wrap {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));

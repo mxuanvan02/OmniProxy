@@ -18,8 +18,10 @@ async function renderSvgTestGroup(key) {
   } catch (e) { box.replaceChildren(svgtestEmpty('svgtest.loadError')); return; }
   const entries = Array.isArray(data.entries) ? data.entries : [];
   box.replaceChildren();
-  if (entries.length === 0) { box.replaceChildren(svgtestEmpty('svgtest.noResults')); return; }
-  for (const e of entries) box.appendChild(buildSvgTestCard(e));
+  const kw = svgtestState.resultModelFilter;
+  const shown = kw ? entries.filter(e => (e.model || '').toLowerCase().includes(kw)) : entries;
+  if (shown.length === 0) { box.replaceChildren(svgtestEmpty('svgtest.noResults')); return; }
+  for (const e of shown) box.appendChild(buildSvgTestCard(e));
 }
 
 function buildSvgTestCard(e) {
@@ -47,7 +49,7 @@ function buildSvgTestCard(e) {
   del.setAttribute('aria-label', t('svgtest.delete'));
   del.innerHTML = '<i class="fa-solid fa-trash" aria-hidden="true"></i>';
   del.addEventListener('click', () => deleteSvgTestEntry(e, del));
-  head.append(model, name, prov, svgtestDialectBadge(e.dialect), state, del);
+  head.append(model, name, prov, svgtestDialectBadge(e.dialect), svgtestModeBadge(e.mode), state, del);
   const meta = document.createElement('div');
   meta.className = 'svgtest-card-meta';
   meta.textContent = (e.elapsedMs || 0) + 'ms' + (e.tokensUsed ? ' · ' + e.tokensUsed + ' tokens' : '');
@@ -87,7 +89,8 @@ async function deleteSvgTestEntry(e, btn) {
   if (btn) btn.disabled = true;
   const url = '/test-model-svg/groups/' + encodeURIComponent(key) + '/entries' +
     '?model=' + encodeURIComponent(e.model || '') +
-    '&accountId=' + encodeURIComponent(e.accountId || '');
+    '&accountId=' + encodeURIComponent(e.accountId || '') +
+    '&mode=' + encodeURIComponent(e.mode || '');
   let res = null;
   try { res = await api(url, { method: 'DELETE' }); } catch (err) { res = null; }
   svgtestState.deleting = false;

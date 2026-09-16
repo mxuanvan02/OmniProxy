@@ -1092,5 +1092,13 @@
   "svgtest.dialectChat": "Chat",
   "svgtest.dialectResponses": "Responses",
   "svgtest.dialectMessages": "Messages",
-  "svgtest.dialectUnrecorded": "Unrecorded"
+  "svgtest.dialectUnrecorded": "Unrecorded",
+  "svgtest.modeLabel": "Run mode",
+  "svgtest.modeRaw": "Raw",
+  "svgtest.modeThink": "Think",
+  "svgtest.modeBoth": "Both",
+  "svgtest.badgeRaw": "Raw",
+  "svgtest.badgeThink": "Think",
+  "svgtest.badgeLegacy": "Legacy",
+  "svgtest.filterResultModels": "Filter results by model"
 }

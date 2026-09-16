@@ -1092,5 +1092,13 @@
   "svgtest.dialectChat": "Chat",
   "svgtest.dialectResponses": "Responses",
   "svgtest.dialectMessages": "Messages",
-  "svgtest.dialectUnrecorded": "Chưa ghi"
+  "svgtest.dialectUnrecorded": "Chưa ghi",
+  "svgtest.modeLabel": "Chế độ chạy",
+  "svgtest.modeRaw": "Raw",
+  "svgtest.modeThink": "Think",
+  "svgtest.modeBoth": "Cả hai",
+  "svgtest.badgeRaw": "Raw",
+  "svgtest.badgeThink": "Think",
+  "svgtest.badgeLegacy": "Cũ",
+  "svgtest.filterResultModels": "Lọc kết quả theo model"
 }

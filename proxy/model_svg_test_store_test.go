@@ -186,12 +186,59 @@ func TestGetSVGTestGroupEntriesRejectsTraversal(t *testing.T) {
 }
 
 func TestSVGEntryFileNameSeparatesModelAndAccount(t *testing.T) {
-	a := svgEntryFileName("gpt-4o", "acc-1")
-	b := svgEntryFileName("claude-opus-5", "acc-1")
+	a := svgEntryFileName("gpt-4o", "acc-1", "")
+	b := svgEntryFileName("claude-opus-5", "acc-1", "")
 	if a == b {
 		t.Errorf("two models on one account collided: %q == %q", a, b)
 	}
 	if !strings.HasSuffix(a, ".json") || strings.ContainsAny(a, "/\\ ") {
 		t.Errorf("entry filename %q is not a safe single path element", a)
+	}
+}
+
+// An empty mode must keep the legacy two-part name so results written before
+// modes existed still resolve; a non-empty mode appends a third segment. Model
+// ids pass through sanitizeIDForFile, so dots become underscores.
+func TestSVGEntryFileNameModeSuffix(t *testing.T) {
+	legacy := svgEntryFileName("glm-5.3", "acc-1", "")
+	raw := svgEntryFileName("glm-5.3", "acc-1", "raw")
+	think := svgEntryFileName("glm-5.3", "acc-1", "think")
+	if legacy != "glm-5_3--acc-1.json" {
+		t.Errorf("legacy name = %q, want glm-5_3--acc-1.json", legacy)
+	}
+	if raw != "glm-5_3--acc-1--raw.json" {
+		t.Errorf("raw name = %q, want glm-5_3--acc-1--raw.json", raw)
+	}
+	// The two modes of one pair must never collide, or one run overwrites the
+	// other and the raw-vs-think comparison the feature exists for is lost.
+	if raw == think || raw == legacy || think == legacy {
+		t.Errorf("mode names collided: legacy=%q raw=%q think=%q", legacy, raw, think)
+	}
+}
+
+func TestNormalizeSVGTestMode(t *testing.T) {
+	cases := map[string]string{
+		"raw": "raw", "RAW": "raw", "  raw ": "raw",
+		"think": "think", "Think": "think",
+		"": "", "both": "", "bogus": "", "rawx": "",
+	}
+	for in, want := range cases {
+		if got := normalizeSVGTestMode(in); got != want {
+			t.Errorf("normalizeSVGTestMode(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestResolveSVGTestMode(t *testing.T) {
+	// A bare API call has no UI to expand "both" into two requests, so empty,
+	// "both" and anything unknown all collapse to the raw single-call baseline.
+	cases := map[string]string{
+		"think": "think", "Think": "think",
+		"raw": "raw", "": "raw", "both": "raw", "bogus": "raw",
+	}
+	for in, want := range cases {
+		if got := resolveSVGTestMode(in); got != want {
+			t.Errorf("resolveSVGTestMode(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

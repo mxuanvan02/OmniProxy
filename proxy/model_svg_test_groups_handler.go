@@ -169,13 +169,14 @@ func (h *Handler) apiDeleteSVGTestResult(w http.ResponseWriter, r *http.Request,
 	}
 	model := r.URL.Query().Get("model")
 	accountID := r.URL.Query().Get("accountId")
+	mode := r.URL.Query().Get("mode")
 	if model == "" || accountID == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Model and account are required"})
 		return
 	}
 	dir := svgTestStoreDir()
-	removed, groupEmpty, err := deleteSVGTestEntry(dir, key, model, accountID)
+	removed, groupEmpty, err := deleteSVGTestEntry(dir, key, model, accountID, mode)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
