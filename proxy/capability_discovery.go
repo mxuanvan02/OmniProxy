@@ -20,12 +20,20 @@ const (
 	capabilityModeration = "moderation"
 	capabilityVideo      = "video"
 	capabilityAudioMusic = "audio-music"
+	// capabilityVision is image *input* through the chat endpoint, as distinct
+	// from capabilityImage which is image *output* through /v1/images. It rides
+	// the chat wire (each dialect carries the image differently) and cannot be
+	// inferred from a model ID — qwen3.8-max has no "vision" token yet accepts
+	// images — so it is discovered from catalog input-type metadata where the
+	// provider publishes any, and otherwise only ever confirmed by a probe.
+	capabilityVision = "vision"
 )
 
 // discoverableCapabilities is the ordered list reported by the capabilities
 // endpoint. Order is stable so the admin UI renders badges deterministically.
 var discoverableCapabilities = []string{
 	capabilityChat,
+	capabilityVision,
 	capabilityEmbedding,
 	capabilityImage,
 	capabilityAudioSTT,
@@ -217,7 +225,11 @@ func discoverCapabilitiesFromModels(models []ModelInfo) []string {
 		}
 		// Catalog metadata is a second, independent signal. A provider that
 		// reports an image output modality is treated as image-capable even
-		// when its model ID carries no recognisable token.
+		// when its model ID carries no recognisable token. InputTypes is the
+		// only field that distinguishes vision (image input) from image
+		// generation (image output), and most resellers do not populate it —
+		// so this path rarely fires for External accounts and vision must be
+		// confirmed by probe.
 		for _, value := range append(append([]string{}, model.OutputTypes...), model.Modalities...) {
 			normalized := strings.ToLower(strings.TrimSpace(value))
 			switch {
@@ -227,6 +239,12 @@ func discoverCapabilitiesFromModels(models []ModelInfo) []string {
 				seen[capabilityAudioTTS] = true
 			case strings.Contains(normalized, "video"):
 				seen[capabilityVideo] = true
+			}
+		}
+		for _, value := range model.InputTypes {
+			normalized := strings.ToLower(strings.TrimSpace(value))
+			if strings.Contains(normalized, "image") || strings.Contains(normalized, "vision") {
+				seen[capabilityVision] = true
 			}
 		}
 	}

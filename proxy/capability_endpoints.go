@@ -99,6 +99,14 @@ func capabilityEndpointCatalog() map[string][]string {
 			"/v1/messages",
 			"/v1/responses",
 		},
+		// Vision is not a separate route: it is the chat route with an image in
+		// the body, and each dialect wraps that image differently. Listing the
+		// same three endpoints keeps the matrix honest about where to send it.
+		capabilityVision: {
+			"/v1/chat/completions",
+			"/v1/messages",
+			"/v1/responses",
+		},
 		capabilitySearch: {
 			"/v1/search",
 		},
@@ -545,6 +553,12 @@ func (h *Handler) apiGetCapabilities(w http.ResponseWriter, r *http.Request) {
 		// is derived from the provider catalog, which is aspirational: a model
 		// can be listed with no channel behind it, and the endpoint path may
 		// return 404. Do not read it as "callable".
+		//
+		// A verified capability counts as available too, and that is not
+		// redundant: vision is the case where the catalog is silent. No reseller
+		// in the pool publishes input-type metadata, so discovery never
+		// advertises it, yet a probe can still get a real 2xx from it. Reporting
+		// that as unavailable contradicts the probe that proves the opposite.
 		Available bool `json:"available"`
 		// VerifiedAccounts counts enabled accounts where a probe actually got a
 		// 2xx from the endpoint. This is the claim that means "callable".
@@ -564,13 +578,19 @@ func (h *Handler) apiGetCapabilities(w http.ResponseWriter, r *http.Request) {
 
 	summary := make([]capabilitySummary, 0, len(discoverableCapabilities))
 	for _, capability := range discoverableCapabilities {
+		// A capability an enabled account advertises is available; so is one a
+		// probe actually got a 2xx from. The second clause is what makes vision
+		// report honestly: the catalog never advertises it on these resellers
+		// (they publish no input-type metadata), so without it a verified
+		// capability would render as "no account supports this".
+		available := enabledCounts[capability] > 0 || verifiedCounts[capability] > 0
 		summary = append(summary, capabilitySummary{
 			Capability:       capability,
 			Accounts:         counts[capability],
 			EnabledAccount:   enabledCounts[capability],
 			Endpoint:         primaryCapabilityEndpoint(capability, endpointCatalog),
 			Endpoints:        endpointCatalog[capability],
-			Available:        enabledCounts[capability] > 0,
+			Available:        available,
 			VerifiedAccounts: verifiedCounts[capability],
 			ProbeFailures:    probeFailureCounts[capability],
 			ProbeSkipped:     probeSkippedCounts[capability],

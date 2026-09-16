@@ -35,10 +35,14 @@ const (
 )
 
 // cheapProbeCapabilities are safe to probe automatically: the request bodies are
-// a few tokens at most, so the cost is effectively zero.
+// a few tokens at most, so the cost is effectively zero. Vision belongs here
+// despite carrying an image — the probe image is a 16x16 PNG of 79 bytes, and
+// the request asks for a single output token, so it bills less than the chat
+// probe it shadows.
 var cheapProbeCapabilities = []string{
 	capabilityEmbedding,
 	capabilityModeration,
+	capabilityVision,
 }
 
 // probeCapabilityIsCheap reports whether a capability can be probed without
@@ -80,6 +84,11 @@ func probeRequestBody(capability, model string) ([]byte, bool) {
 		}
 		body, err := json.Marshal(payload)
 		return body, err == nil
+	case capabilityVision:
+		// Default (chat-completions) shape; probeAccountCapability rebuilds this
+		// for the account's actual dialect. Returning ok=true here is what makes
+		// vision pass the "can this be probed with a synthetic body" gate.
+		return probeVisionRequestBody("chat", model), true
 	default:
 		// audio-stt and image edit/variation are multipart uploads; video has no
 		// standard OpenAI-compatible endpoint. Probing these would require
@@ -89,9 +98,12 @@ func probeRequestBody(capability, model string) ([]byte, bool) {
 }
 
 // probeUpstreamPath maps a capability to the path to probe. Chat is included so
-// the matrix can distinguish a reachable chat provider from a dead one.
+// the matrix can distinguish a reachable chat provider from a dead one. Vision
+// rides the chat wire too — it is the chat endpoint with an image in the body —
+// so it reports the chat path; the dialect-specific endpoint is resolved later
+// in probeAccountCapability.
 func probeUpstreamPath(capability string) (string, bool) {
-	if capability == capabilityChat {
+	if capability == capabilityChat || capability == capabilityVision {
 		return "/v1/chat/completions", true
 	}
 	for path, route := range capabilityEndpoints {
@@ -118,15 +130,24 @@ func (h *Handler) pickProbeModel(account *config.Account, capability string) (st
 	if account == nil {
 		return "", "account not found"
 	}
+	// Vision is a property of a chat model, not a model family of its own: no
+	// catalog carries a "-vision" suffix that means "accepts image input", and
+	// the resellers in this pool publish no input-type metadata at all. So the
+	// probe takes a chat model and asks it for an image, which is the only
+	// question that has a real answer.
+	family := capability
+	if capability == capabilityVision {
+		family = capabilityChat
+	}
 	if models := h.pool.GetModelList(account.ID); len(models) > 0 {
 		for _, id := range models {
-			if containsFold(classifyModelCapabilities(id), capability) {
+			if containsFold(classifyModelCapabilities(id), family) {
 				return id, ""
 			}
 		}
 		// Cache is populated and holds nothing for this capability: that is a
 		// definitive answer, no live fetch needed.
-		return "", fmt.Sprintf("provider catalog lists no %s model", capability)
+		return "", fmt.Sprintf("provider catalog lists no %s model", family)
 	}
 
 	discovered, err := fetchExternalProviderModels(account)
@@ -137,11 +158,11 @@ func (h *Handler) pickProbeModel(account *config.Account, capability string) (st
 		return "", "provider catalog is empty"
 	}
 	for _, m := range discovered {
-		if containsFold(classifyModelCapabilities(m.ModelId), capability) {
+		if containsFold(classifyModelCapabilities(m.ModelId), family) {
 			return m.ModelId, ""
 		}
 	}
-	return "", fmt.Sprintf("provider catalog lists no %s model", capability)
+	return "", fmt.Sprintf("provider catalog lists no %s model", family)
 }
 
 // probeAccountCapability performs one probe and returns the recorded result. It
@@ -198,12 +219,20 @@ func (h *Handler) probeAccountCapability(account *config.Account, capability str
 
 	endpoint := openAICompatibleEndpoint(account.BaseURL, path)
 	dialect := externalAPIDialect(account)
-	if capability == capabilityChat {
+	if capability == capabilityChat || capability == capabilityVision {
 		// A Responses or Messages gateway must be probed in its own dialect:
 		// posting a chat-completions body to one reads as "no chat" on a
 		// healthy account, which the matrix reports as missing vision too.
+		// Vision rides the same wire, so it shares the endpoint and auth; only
+		// the body differs (it carries the image).
 		endpoint = probeChatEndpoint(account, dialect)
-		if dialectBody := probeChatRequestBody(dialect, model); dialectBody != nil {
+		var dialectBody []byte
+		if capability == capabilityVision {
+			dialectBody = probeVisionRequestBody(dialect, model)
+		} else {
+			dialectBody = probeChatRequestBody(dialect, model)
+		}
+		if dialectBody != nil {
 			body = dialectBody
 		}
 	}
@@ -214,7 +243,7 @@ func (h *Handler) probeAccountCapability(account *config.Account, capability str
 		result.Detail = err.Error()
 		return result
 	}
-	if capability == capabilityChat {
+	if capability == capabilityChat || capability == capabilityVision {
 		applyChatProbeAuth(req, account, credential, dialect)
 	} else {
 		req.Header.Set("Authorization", "Bearer "+credential)
@@ -279,7 +308,16 @@ func (h *Handler) probeAccountCapabilities(account *config.Account, includeCostl
 	if account == nil {
 		return out
 	}
-	for _, capability := range effectiveAccountCapabilities(account) {
+	eligible := effectiveAccountCapabilities(account)
+	// Vision is a question about a chat model, not a separate model family, and
+	// no reseller catalog in this pool publishes the input-type metadata that
+	// discovery needs to answer it. So an account advertising chat is exactly an
+	// account whose vision support is unknown — probing it is the only way the
+	// matrix ever learns the answer instead of silently reporting nothing.
+	if containsFold(eligible, capabilityChat) && !containsFold(eligible, capabilityVision) {
+		eligible = append(eligible, capabilityVision)
+	}
+	for _, capability := range eligible {
 		if capability == capabilitySearch {
 			// Search providers speak bespoke protocols handled by search.go.
 			continue

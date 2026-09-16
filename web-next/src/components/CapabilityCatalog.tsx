@@ -2,6 +2,7 @@ import type { CapabilitySummary } from '../lib/api'
 
 const CAPABILITY_LABEL: Record<string, string> = {
   chat: 'Chat / Responses',
+  vision: 'Nhận ảnh (vision)',
   search: 'Tìm kiếm',
   image: 'Tạo và sửa ảnh',
   video: 'Tạo video',

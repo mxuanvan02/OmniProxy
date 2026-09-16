@@ -13,6 +13,11 @@ func TestCapabilityEndpointCatalogPublishesEverySupportedRoute(t *testing.T) {
 			"/v1/messages",
 			"/v1/responses",
 		},
+		capabilityVision: {
+			"/v1/chat/completions",
+			"/v1/messages",
+			"/v1/responses",
+		},
 		capabilitySearch: {
 			"/v1/search",
 		},
