@@ -29,6 +29,7 @@ Plan này mở rộng, không viết lại.
 | [04](phase-04-dialect-dropdown-i18n.md) | Dropdown 3 lựa chọn + i18n + default | Thấp | Xong |
 | [05](phase-05-dialect-spec-audit.md) | Đối chiếu 3 dialect với spec chính thức | Vừa | Xong (fix + escalate) |
 | [06](phase-06-eaddrnotavail-http2-timeout-investigation.md) | Điều tra `EADDRNOTAVAIL` / `http2` header timeout | Thấp | Xong (fix đã có, cần restart) |
+| 07 | Xử lý tồn đọng: SSE truncation + E1 max_output_tokens | Vừa | Xong |
 
 ## Thứ tự bắt buộc
 
