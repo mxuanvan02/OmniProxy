@@ -9,10 +9,12 @@ import (
 	"omniproxy/config"
 )
 
-// defaultSVGPrompt asks the model to produce a self-contained SVG illustration.
-// The instruction is explicit about output format so extractSVG can find the
-// markup without parsing markdown fences.
-const defaultSVGPrompt = `Create a simple, colorful SVG illustration of a cute animal riding a bicycle in a sunny landscape with clouds and grass. The SVG must be valid XML with a viewBox attribute and no external resources. Output ONLY the raw SVG code — no markdown fences, no explanation, no wrapping tags.`
+// defaultSVGPrompt asks the model to produce a self-contained animated SVG.
+// The first sentence is the operator-facing request; the rest pins the output
+// format so extractSVG can find the markup without parsing markdown fences or
+// an HTML wrapper. The admin UI prefills its prompt box from /matrix, so both
+// surfaces send byte-identical text and therefore land in the same prompt group.
+const defaultSVGPrompt = `Tạo một tệp HTML với nội dung là hình động 2D vẽ một con bồ nông đang đạp xe đạp bằng SVG. Yêu cầu bắt buộc: SVG hợp lệ có thuộc tính viewBox, dùng thẻ <animate> (SMIL) cho chuyển động (bánh xe đạp quay, thân chim nhấp nhô), không tham chiếu tài nguyên bên ngoài. Chỉ trả về mã SVG thô — không markdown fence, không giải thích, không thẻ bao ngoài.`
 
 // apiTestModelSVG sends a prompt that asks the model to generate an SVG image,
 // then extracts and returns the raw SVG markup. This tests whether the model
@@ -95,7 +97,7 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 	openaiReq := &OpenAIRequest{
 		Model:     actualModel,
 		Messages:  []OpenAIMessage{{Role: "user", Content: prompt}},
-		MaxTokens: 4096,
+		MaxTokens: externalAnthropicDefaultMaxTokens,
 		Stream:    false,
 	}
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
@@ -103,23 +105,38 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 	var content string
 	var inTok, outTok int
 	callback := &KiroStreamCallback{
-		OnText:     func(text string, _ bool) { content += text },
-		OnToolUse:  func(_ KiroToolUse) {},
-		OnComplete: func(in, out int) { inTok, outTok = in, out },
-		OnError:    func(_ error) {},
-		OnCredits:  func(_ float64) {},
+		OnText:         func(text string, _ bool) { content += text },
+		OnToolUse:      func(_ KiroToolUse) {},
+		OnComplete:     func(in, out int) { inTok, outTok = in, out },
+		OnError:        func(_ error) {},
+		OnCredits:      func(_ float64) {},
 		OnContextUsage: func(_ float64) {},
 	}
 
 	err := dispatchChat(r.Context(), account, kiroPayload, callback)
 	elapsed := time.Since(start).Milliseconds()
 
+	// The prompt, not a client-chosen id, identifies the comparison group: two
+	// runs of the same prompt land together even if they were started from
+	// different browser tabs or at different times.
+	promptKey := svgPromptKey(prompt)
+
 	if err != nil {
+		persistSVGTestResult(prompt, model, svgTestEntry{
+			AccountID:   account.ID,
+			AccountName: accountLabel(account),
+			Provider:    providerLabelOf(account.Provider),
+			Success:     false,
+			Error:       err.Error(),
+			ElapsedMs:   elapsed,
+			TokensUsed:  inTok + outTok,
+		})
 		w.WriteHeader(502)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"success":     false,
 			"error":       err.Error(),
 			"model":       model,
+			"promptKey":   promptKey,
 			"accountId":   account.ID,
 			"accountName": accountLabel(account),
 			"elapsedMs":   elapsed,
@@ -127,45 +144,29 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	svg := extractSVG(content)
+	svg, failReason := classifySVGReply(content)
+
+	persistSVGTestResult(prompt, model, svgTestEntry{
+		AccountID:   account.ID,
+		AccountName: accountLabel(account),
+		Provider:    providerLabelOf(account.Provider),
+		Success:     svg != "",
+		SVG:         svg,
+		Error:       failReason,
+		ElapsedMs:   elapsed,
+		TokensUsed:  inTok + outTok,
+	})
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":     svg != "",
 		"svg":         svg,
+		"error":       failReason,
 		"rawReply":    content,
 		"model":       model,
+		"promptKey":   promptKey,
 		"accountId":   account.ID,
 		"accountName": accountLabel(account),
 		"elapsedMs":   elapsed,
 		"tokensUsed":  inTok + outTok,
 	})
-}
-
-// extractSVG finds the first <svg ...>...</svg> block in s, stripping any
-// surrounding markdown fences the model may have added despite the prompt.
-func extractSVG(s string) string {
-	// Strip common markdown fence wrappers.
-	s = strings.TrimSpace(s)
-	for _, prefix := range []string{"```svg", "```xml", "```html", "```"} {
-		if strings.HasPrefix(s, prefix) {
-			s = strings.TrimPrefix(s, prefix)
-			s = strings.TrimSpace(s)
-			break
-		}
-	}
-	if strings.HasSuffix(s, "```") {
-		s = strings.TrimSuffix(s, "```")
-		s = strings.TrimSpace(s)
-	}
-
-	lower := strings.ToLower(s)
-	start := strings.Index(lower, "<svg")
-	if start < 0 {
-		return ""
-	}
-	end := strings.LastIndex(lower, "</svg>")
-	if end < 0 || end <= start {
-		return ""
-	}
-	return strings.TrimSpace(s[start : end+len("</svg>")])
 }

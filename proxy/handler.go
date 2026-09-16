@@ -6494,6 +6494,12 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiLogsStream(w, r)
 	case path == "/test-model-svg" && r.Method == "POST":
 		h.apiTestModelSVG(w, r)
+	case path == "/test-model-svg/matrix" && r.Method == "GET":
+		h.apiSVGTestMatrix(w, r)
+	case path == "/test-model-svg/groups" && r.Method == "GET":
+		h.apiListSVGTestGroups(w, r)
+	case strings.HasPrefix(path, "/test-model-svg/groups/") && r.Method == "GET":
+		h.apiGetSVGTestGroup(w, r, strings.TrimPrefix(path, "/test-model-svg/groups/"))
 	default:
 		w.WriteHeader(404)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Not Found"})

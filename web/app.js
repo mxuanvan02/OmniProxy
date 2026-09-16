@@ -873,6 +873,7 @@ let customSelectRefreshQueued = false;
     else { if (typeof destroyQuotaPage === 'function') destroyQuotaPage(); }
     if (tab === 'logs') { if (typeof initLogsPage === 'function') initLogsPage(); }
     else { if (typeof destroyLogsPage === 'function') destroyLogsPage(); }
+    if (tab === 'svgtest') { if (typeof initSvgTestPage === 'function') initSvgTestPage(); }
     if (tab === 'accounts') { if (typeof loadCombos === 'function') loadCombos(); }
     if (tab === 'api') { renderCliTools(); if (apiKeysCache.length === 0) loadApiKeys(); loadCliToolStatus(); }
   }

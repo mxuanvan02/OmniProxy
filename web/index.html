@@ -117,6 +117,8 @@
                 data-i18n="tabs.quota"></span></button>
             <button type="button" class="tab" data-tab="logs"><i class="fa-solid fa-terminal tab-icon"></i><span
                 data-i18n="tabs.logs"></span></button>
+            <button type="button" class="tab" data-tab="svgtest"><i class="fa-solid fa-palette tab-icon"></i><span
+                data-i18n="tabs.svgtest"></span></button>
           </div>
         </nav>
         <div class="topbar-actions flex-wrap justify-end">
@@ -328,6 +330,80 @@
             </div>
           </div>
           <div id="logsViewer" class="logs-viewer"></div>
+        </div>
+      </div>
+
+      <!-- SVG model test tab -->
+      <div id="tabSvgtest" class="tab-content hidden">
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title" data-i18n="svgtest.title"></span>
+            <div class="card-actions">
+              <button class="btn btn-outline btn-sm" id="svgtestRefreshBtn" type="button">
+                <i class="fa-solid fa-rotate" aria-hidden="true"></i><span data-i18n="svgtest.refresh"></span></button>
+            </div>
+          </div>
+          <p class="svgtest-hint" data-i18n="svgtest.hint"></p>
+
+          <div class="svgtest-field">
+            <div class="svgtest-field-head">
+              <label for="svgtestPrompt" data-i18n="svgtest.prompt"></label>
+              <button class="btn btn-ghost btn-sm" id="svgtestResetPrompt" type="button"
+                data-i18n="svgtest.resetPrompt"></button>
+            </div>
+            <textarea id="svgtestPrompt" rows="4" data-i18n-placeholder="svgtest.promptPlaceholder"></textarea>
+            <small class="svgtest-note" data-i18n="svgtest.groupNote"></small>
+          </div>
+
+          <div class="svgtest-pickers">
+            <div class="svgtest-field">
+              <div class="svgtest-field-head">
+                <label data-i18n="svgtest.models"></label>
+                <span class="svgtest-sel-count" id="svgtestModelCount"></span>
+              </div>
+              <input type="text" id="svgtestModelFilter" class="w-56!"
+                data-i18n-placeholder="svgtest.filterModels" />
+              <div class="svgtest-picker-tools">
+                <button class="btn btn-outline btn-sm" id="svgtestModelsAll" type="button"
+                  data-i18n="svgtest.selectAll"></button>
+                <button class="btn btn-outline btn-sm" id="svgtestModelsNone" type="button"
+                  data-i18n="svgtest.clearSel"></button>
+              </div>
+              <div id="svgtestModelList" class="svgtest-pick-list"></div>
+            </div>
+
+            <div class="svgtest-field">
+              <div class="svgtest-field-head">
+                <label data-i18n="svgtest.accounts"></label>
+                <span class="svgtest-sel-count" id="svgtestAccountCount"></span>
+              </div>
+              <input type="text" id="svgtestAccountFilter" class="w-56!"
+                data-i18n-placeholder="svgtest.filterAccounts" />
+              <div class="svgtest-picker-tools">
+                <button class="btn btn-outline btn-sm" id="svgtestAccountsAll" type="button"
+                  data-i18n="svgtest.selectAll"></button>
+                <button class="btn btn-outline btn-sm" id="svgtestAccountsNone" type="button"
+                  data-i18n="svgtest.clearSel"></button>
+              </div>
+              <div id="svgtestAccountList" class="svgtest-pick-list"></div>
+            </div>
+          </div>
+
+          <div class="svgtest-run-row">
+            <button class="btn btn-primary" id="svgtestRunBtn" type="button">
+              <i class="fa-solid fa-play" aria-hidden="true"></i><span data-i18n="svgtest.run"></span></button>
+            <span class="svgtest-status" id="svgtestStatus"></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title" data-i18n="svgtest.results"></span>
+            <div class="card-actions">
+              <select id="svgtestGroupHistory" class="w-56!" data-i18n-aria-label="svgtest.groupHistory"></select>
+            </div>
+          </div>
+          <div id="svgtestResults" class="svgtest-results-wrap"></div>
         </div>
       </div>
 
@@ -900,7 +976,7 @@
   <script>
     (function () {
       var v = window.__v || Date.now();
-      var scripts = ['/admin/toast.js', '/admin/app.js', '/admin/settings.js', '/admin/accounts.js', '/admin/combos.js', '/admin/apiCli.js', '/admin/usage.js', '/admin/quota.js', '/admin/logs.js'];
+      var scripts = ['/admin/toast.js', '/admin/app.js', '/admin/settings.js', '/admin/accounts.js', '/admin/combos.js', '/admin/apiCli.js', '/admin/usage.js', '/admin/quota.js', '/admin/logs.js', '/admin/svgtest.js', '/admin/svgtest-runs.js'];
       scripts.forEach(function (src) {
         var el = document.createElement('script');
         el.src = src + '?v=' + v;
