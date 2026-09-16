@@ -190,3 +190,61 @@ func TestAnthropicImageBlockNeedsData(t *testing.T) {
 		t.Fatalf("source = %v", source)
 	}
 }
+
+// Manual extended thinking rejects temperature and top_p — the API returns 400
+// rather than ignoring them. The builder must drop both when thinking is on so
+// a client that sends sampling alongside reasoning does not get an
+// unrecoverable failure.
+func TestAnthropicThinkingDropsSamplingParams(t *testing.T) {
+	body := map[string]interface{}{}
+	payload := &KiroPayload{InferenceConfig: &InferenceConfig{
+		MaxTokens:       8192,
+		Temperature:     0.7,
+		TopP:            0.9,
+		ReasoningEffort: "high",
+	}}
+	applyAnthropicSamplingParams(body, payload)
+
+	if _, has := body["thinking"]; !has {
+		t.Fatalf("thinking absent; body=%v", body)
+	}
+	if _, has := body["temperature"]; has {
+		t.Fatalf("temperature present with thinking; body=%v", body)
+	}
+	if _, has := body["top_p"]; has {
+		t.Fatalf("top_p present with thinking; body=%v", body)
+	}
+}
+
+// Manual extended thinking also rejects a tool_choice that forces a call. The
+// forced call wins: dropping it would silently break the client's tool loop,
+// while dropping thinking only forgoes reasoning depth.
+func TestAnthropicForcedToolChoiceDropsThinking(t *testing.T) {
+	body := map[string]interface{}{"tool_choice": map[string]interface{}{"type": "any"}}
+	payload := &KiroPayload{InferenceConfig: &InferenceConfig{
+		MaxTokens:       8192,
+		ReasoningEffort: "high",
+	}}
+	applyAnthropicSamplingParams(body, payload)
+
+	if _, has := body["thinking"]; has {
+		t.Fatalf("thinking present with forced tool_choice; body=%v", body)
+	}
+	choice, _ := body["tool_choice"].(map[string]interface{})
+	if choice == nil || choice["type"] != "any" {
+		t.Fatalf("tool_choice dropped or changed; body=%v", body)
+	}
+}
+
+// top_p outside [0,1] is rejected by the Messages API. A client asking for 1.5
+// gets the API's default here instead of a 400, matching the existing
+// temperature clamping.
+func TestAnthropicTopPClampToOne(t *testing.T) {
+	body := map[string]interface{}{}
+	payload := &KiroPayload{InferenceConfig: &InferenceConfig{MaxTokens: 4096, TopP: 1.5}}
+	applyAnthropicSamplingParams(body, payload)
+
+	if _, has := body["top_p"]; has {
+		t.Fatalf("top_p above 1 should be dropped; body=%v", body)
+	}
+}

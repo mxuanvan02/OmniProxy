@@ -78,32 +78,70 @@ func anthropicToolChoice(choice interface{}, payload *KiroPayload) interface{} {
 
 // applyAnthropicSamplingParams writes the ceiling and the sampling fields onto
 // a request body.
+//
+// The caller sets body["tool_choice"] first, so the thinking/forced-tool
+// conflict below is resolved here rather than in the builder: the two fields
+// that cannot coexist are written by two functions, and one of them has to look
+// at what the other decided.
 func applyAnthropicSamplingParams(body map[string]interface{}, payload *KiroPayload) {
 	cfg := payload.InferenceConfig
 
 	// max_tokens is required, so it is filled in even when the payload carries
 	// no inference config at all — the one field whose absence is a 400 rather
 	// than a default.
-	maxTokens := externalAnthropicDefaultMaxTokens
-	if cfg != nil && cfg.MaxTokens > 0 {
-		maxTokens = cfg.MaxTokens
-	}
+	maxTokens := externalAnthropicMaxTokens(cfg)
 	body["max_tokens"] = maxTokens
+
+	if thinking := anthropicThinking(cfg, maxTokens); thinking != nil {
+		if anthropicToolChoiceForced(body["tool_choice"]) {
+			// Manual extended thinking rejects a tool_choice that forces a call.
+			// The forced call wins: dropping it would let the model answer
+			// without the tool the client required, silently breaking its loop,
+			// while dropping thinking only forgoes reasoning depth.
+		} else {
+			body["thinking"] = thinking
+			// temperature and top_p are incompatible with manual thinking — the
+			// API rejects the request rather than ignoring them — so the ceiling
+			// is the only sampling field sent on this path.
+			return
+		}
+	}
 
 	if cfg == nil {
 		return
 	}
-	// Anthropic accepts temperature in [0,1] and rejects the request rather
-	// than clamping, while the OpenAI dialects accept up to 2. A client asking
-	// for more gets the API's default here instead of a 400.
+	// Anthropic accepts temperature and top_p in [0,1] and rejects the request
+	// rather than clamping, while the OpenAI dialects accept up to 2. A client
+	// asking for more gets the API's default here instead of a 400.
 	if cfg.Temperature > 0 && cfg.Temperature <= 1 {
 		body["temperature"] = cfg.Temperature
 	}
-	if cfg.TopP > 0 {
+	if cfg.TopP > 0 && cfg.TopP <= 1 {
 		body["top_p"] = cfg.TopP
 	}
-	if thinking := anthropicThinking(cfg, maxTokens); thinking != nil {
-		body["thinking"] = thinking
+}
+
+// externalAnthropicMaxTokens reports the output ceiling to send.
+func externalAnthropicMaxTokens(cfg *InferenceConfig) int {
+	if cfg != nil && cfg.MaxTokens > 0 {
+		return cfg.MaxTokens
+	}
+	return externalAnthropicDefaultMaxTokens
+}
+
+// anthropicToolChoiceForced reports whether a normalized tool_choice names or
+// demands a call, as opposed to leaving the decision to the model.
+func anthropicToolChoiceForced(choice interface{}) bool {
+	shaped, ok := choice.(map[string]interface{})
+	if !ok {
+		return false
+	}
+	name, _ := shaped["type"].(string)
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "any", "tool":
+		return true
+	default:
+		return false
 	}
 }
 

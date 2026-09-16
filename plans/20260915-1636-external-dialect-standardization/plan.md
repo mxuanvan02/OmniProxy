@@ -27,7 +27,7 @@ Plan này mở rộng, không viết lại.
 | [02](phase-02-dialect-default-and-fallback.md) | Default responses + fallback 404/405 + ghi nhớ | Vừa | Xong |
 | [03](phase-03-request-record-dialect.md) | `RequestRecord.Dialect` + UI usage | Thấp | Xong |
 | [04](phase-04-dialect-dropdown-i18n.md) | Dropdown 3 lựa chọn + i18n + default | Thấp | Xong |
-| 05 | Đối chiếu 3 dialect với spec chính thức | Vừa | Chưa làm |
+| [05](phase-05-dialect-spec-audit.md) | Đối chiếu 3 dialect với spec chính thức | Vừa | Xong (fix + escalate) |
 | 06 | Điều tra `EADDRNOTAVAIL` / `http2` header timeout | **Chưa rõ** | Chưa làm |
 
 ## Thứ tự bắt buộc
