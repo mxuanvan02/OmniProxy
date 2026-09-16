@@ -49,6 +49,7 @@ func parseResponsesSSE(body io.Reader, callback *KiroStreamCallback) error {
 	// response.output_item.done with type=function_call.
 	toolAccums := make(map[string]*responsesToolAccum)
 	completed := false
+	sawOutput := false
 
 	for {
 		line, err := br.ReadString('\n')
@@ -63,6 +64,7 @@ func parseResponsesSSE(body io.Reader, callback *KiroStreamCallback) error {
 						return result.err
 					}
 					completed = completed || result.completed
+					sawOutput = sawOutput || result.emittedOutput
 				}
 				break
 			}
@@ -90,13 +92,29 @@ func parseResponsesSSE(body io.Reader, callback *KiroStreamCallback) error {
 			return result.err
 		}
 		completed = completed || result.completed
+		sawOutput = sawOutput || result.emittedOutput
 	}
 
 	// The Responses API's completion event is the acknowledgement that the
 	// upstream accepted and completed the turn. A bare EOF or [DONE] before it
 	// is a truncated stream, not an empty successful response. Treating that as
 	// success made downstream clients receive a blank assistant turn.
+	//
+	// Some gateways (e.g. VIBE7-style OpenAI-compatible proxies) close the HTTP
+	// connection after the last delta without emitting response.completed. When
+	// real output was already streamed to the client, recover the partial turn
+	// instead of discarding it — otherwise SVG tests and long generations look
+	// like hard failures even though the assistant produced content.
 	if !completed {
+		if sawOutput {
+			if callback.OnStopReason != nil {
+				callback.OnStopReason("end_turn")
+			}
+			if callback.OnComplete != nil {
+				callback.OnComplete(inputTokens, outputTokens)
+			}
+			return nil
+		}
 		return fmt.Errorf("SSE stream ended before response.completed")
 	}
 
@@ -119,8 +137,9 @@ type responsesToolAccum struct {
 }
 
 type responsesSSELineResult struct {
-	completed bool
-	err       error
+	completed     bool
+	emittedOutput bool
+	err           error
 }
 
 // processResponsesSSELine parses one Responses API SSE data line and dispatches
@@ -174,6 +193,7 @@ func processResponsesSSELine(line string, callback *KiroStreamCallback, toolAccu
 	case "response.output_text.delta":
 		if evt.Delta != "" && callback.OnText != nil {
 			callback.OnText(evt.Delta, false)
+			return responsesSSELineResult{emittedOutput: true}
 		}
 	case "response.reasoning.delta":
 		// Codex emits reasoning as "delta" or "text" depending on build.
@@ -183,6 +203,7 @@ func processResponsesSSELine(line string, callback *KiroStreamCallback, toolAccu
 		}
 		if text != "" && callback.OnText != nil {
 			callback.OnText(text, true)
+			return responsesSSELineResult{emittedOutput: true}
 		}
 	case "response.output_text.done":
 		// Final text — already streamed via deltas. No-op.
@@ -233,6 +254,7 @@ func processResponsesSSELine(line string, callback *KiroStreamCallback, toolAccu
 				})
 			}
 			delete(toolAccums, evt.Item.CallID)
+			return responsesSSELineResult{emittedOutput: true}
 		}
 	case "response.completed":
 		if evt.Response.Usage != nil {

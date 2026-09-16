@@ -204,11 +204,6 @@ func TestAnthropicSSERejectsIncompleteStreams(t *testing.T) {
 		// at all, which is what keeps it retryable.
 		emitted string
 	}{
-		"no message_stop": {
-			stream:  `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`,
-			substr:  "before message_stop",
-			emitted: "partial",
-		},
 		// A well-formed stream that carries nothing renderable is reported so the
 		// caller can rotate accounts instead of closing the turn empty.
 		"no assistant output": {
@@ -240,6 +235,27 @@ func TestAnthropicSSERejectsIncompleteStreams(t *testing.T) {
 				t.Fatalf("emitted text = %q, want %q", got, tc.emitted)
 			}
 		})
+	}
+}
+
+// Some gateways close the HTTP connection after the last delta without
+// emitting message_stop. When real assistant output was already streamed the
+// parser recovers the partial turn instead of discarding it, so SVG tests and
+// long generations do not surface as hard failures.
+func TestAnthropicSSERecoversTruncatedStreamWithOutput(t *testing.T) {
+	stream := `data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`
+	cap, err := runAnthropicSSE(t, stream)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := strings.Join(cap.text, ""); got != "partial" {
+		t.Fatalf("text = %q, want %q", got, "partial")
+	}
+	if cap.stop != "end_turn" {
+		t.Fatalf("stop = %q, want end_turn", cap.stop)
+	}
+	if !cap.completed {
+		t.Fatal("expected OnComplete to fire on recovered stream")
 	}
 }
 

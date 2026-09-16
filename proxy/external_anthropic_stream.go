@@ -102,6 +102,9 @@ func parseExternalAnthropicSSE(body io.Reader, callback *KiroStreamCallback) err
 			}
 		}
 		if readErr != nil {
+			if watchdog != nil && watchdog.TimedOut() {
+				return ErrStreamIdleTimeout
+			}
 			if readErr != io.EOF {
 				return fmt.Errorf("external anthropic SSE read: %w", readErr)
 			}
@@ -112,7 +115,24 @@ func parseExternalAnthropicSSE(body io.Reader, callback *KiroStreamCallback) err
 		}
 	}
 
+	// Some gateways (e.g. VIBE7-style Anthropic-compatible proxies) close the
+	// HTTP connection after the last delta without emitting message_stop. When
+	// real assistant output was already streamed, recover the partial turn
+	// instead of discarding it — otherwise long generations surface as hard
+	// failures even though the model produced content.
 	if !terminal {
+		if state.sawOutput && gate.meaningful {
+			if stopReason == "" {
+				stopReason = "end_turn"
+			}
+			if callback.OnStopReason != nil {
+				callback.OnStopReason(stopReason)
+			}
+			if callback.OnComplete != nil {
+				callback.OnComplete(state.inputTokens, state.outputTokens)
+			}
+			return nil
+		}
 		return fmt.Errorf("external anthropic SSE stream ended before message_stop")
 	}
 	if !state.sawOutput {
