@@ -65,11 +65,22 @@ const (
 	CooldownUnknown
 )
 
-// CooldownKiroTruncated is a Kiro/Bedrock-specific 200-OK blank/truncated
-// stream. HTTP 200 but no assistant output is a Kiro contract quirk; it must
-// cool the Kiro account briefly and must never be confused with a generic
-// transient that would affect external/codex pools.
-const CooldownKiroTruncated CooldownClass = 5
+const (
+	// CooldownKiroTruncated is a Kiro/Bedrock-specific 200-OK blank/truncated
+	// stream. HTTP 200 but no assistant output is a Kiro contract quirk; it must
+	// cool the Kiro account briefly and must never be confused with a generic
+	// transient that would affect external/codex pools.
+	CooldownKiroTruncated CooldownClass = 5
+
+	// CooldownModelUnavailable covers a model the provider lists but cannot
+	// serve — a new-api distributor answers "No available channel for model X"
+	// with HTTP 503. The account is healthy and keeps serving its other models,
+	// so this locks the model on that account rather than the account itself.
+	// Waiting cannot conjure a backend channel, so it parks on the first
+	// failure instead of counting to three; the bound is finite because a
+	// catalog refresh or an upstream fix can make the model work again.
+	CooldownModelUnavailable CooldownClass = 6
+)
 
 // Durations are deliberately finite. A permanent-looking failure can still be
 // an upstream bug or a provider-side outage, and an account that never returns
@@ -87,6 +98,11 @@ const (
 	cooldownNoBalance = 30 * time.Minute
 	// Applied only once the three-strike counter trips.
 	cooldownShortRest = time.Minute
+	// A missing backend channel is a catalog fact, not a blip: it survives the
+	// retry storm and only a refresh or an upstream fix clears it. Longer than a
+	// short rest, shorter than auth, so a model that starts working again comes
+	// back without an operator.
+	cooldownModelUnavailable = 10 * time.Minute
 )
 
 // immediate reports whether the class should cool down on the first failure
@@ -95,7 +111,8 @@ const (
 // more wasted requests.
 func (c CooldownClass) immediate() bool {
 	switch c {
-	case CooldownRateLimited, CooldownAuthFailed, CooldownNoBalance, CooldownKiroTruncated:
+	case CooldownRateLimited, CooldownAuthFailed, CooldownNoBalance, CooldownKiroTruncated,
+		CooldownModelUnavailable:
 		return true
 	default:
 		return false
@@ -113,6 +130,8 @@ func (c CooldownClass) duration() time.Duration {
 		return cooldownNoBalance
 	case CooldownKiroTruncated:
 		return cooldownKiroTruncated
+	case CooldownModelUnavailable:
+		return cooldownModelUnavailable
 	default:
 		return cooldownShortRest
 	}
@@ -132,6 +151,8 @@ func (c CooldownClass) String() string {
 		return "no_balance"
 	case CooldownKiroTruncated:
 		return "kiro_truncated"
+	case CooldownModelUnavailable:
+		return "model_unavailable"
 	default:
 		return "unknown"
 	}
@@ -143,6 +164,11 @@ func (c CooldownClass) String() string {
 // failures as HTTP 402 or 403, so the specific markers have to be tested before
 // the generic status-code checks — otherwise a rate limit is misread as a dead
 // credential and a paying account is parked for 15 minutes instead of retried.
+//
+// The model-unavailable check also runs before the transient one: a distributor
+// with no channel for a model answers HTTP 503, which IsTransientError reads as
+// a blip. IsTransientError already defers to it, and this ordering keeps the
+// verdict in one obvious place.
 func ClassifyCooldown(err error) CooldownClass {
 	if err == nil {
 		return CooldownUnknown
@@ -154,6 +180,8 @@ func ClassifyCooldown(err error) CooldownClass {
 		return CooldownRateLimited
 	case isNoBalanceError(err):
 		return CooldownNoBalance
+	case IsProviderModelUnavailableError(err):
+		return CooldownModelUnavailable
 	case IsAuthFailure(err):
 		return CooldownAuthFailed
 	case IsTransientError(err):

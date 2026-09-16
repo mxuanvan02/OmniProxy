@@ -1326,7 +1326,15 @@ func IsProviderModelUnavailableError(err error) bool {
 		(strings.Contains(lower, "provider") || strings.Contains(lower, "configured"))) ||
 		strings.Contains(lower, "model unavailable") ||
 		strings.Contains(lower, "unavailable on this provider") ||
-		(strings.Contains(lower, "no available provider") && strings.Contains(lower, "model"))
+		(strings.Contains(lower, "no available provider") && strings.Contains(lower, "model")) ||
+		// A new-api distributor lists every model its catalog knows, including
+		// ones with no backend channel behind them, and answers a request for
+		// those with HTTP 503 "No available channel for model X under group ...
+		// (distributor)" / code model_not_found. The 503 alone reads as
+		// transient, so this used to burn three retries per account and then
+		// cool every account in the pool for a model that could never be served.
+		strings.Contains(lower, "model_not_found") ||
+		strings.Contains(lower, "no available channel")
 }
 
 // IsTransientError reports whether the error is a transient upstream condition

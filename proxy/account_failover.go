@@ -325,6 +325,20 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error, model
 		class := h.pool.RecordErrorClass(account.ID, err, model)
 		logger.Warnf("[AccountFailover] %s: %s cooldown for model %s (auth-shaped error: %s)",
 			account.Email, class, model, truncateForLog(errMsg))
+	case pool.IsProviderModelUnavailableError(err):
+		// The model is listed but has no backend behind it. A new-api distributor
+		// answers that with HTTP 503 "No available channel for model X" /
+		// model_not_found, and 503 is the one status code IsTransientError reads
+		// as a blip — so this used to fall through to the default branch and
+		// charge a plain RecordError to a perfectly healthy account. Three
+		// retries per account, then a cooldown per account, then "[PoolRecovery]
+		// pool exhausted": one dead model took eleven accounts out of rotation.
+		//
+		// Classifying it parks the model on that account instead and leaves the
+		// account serving everything else it has.
+		class := h.pool.RecordErrorClass(account.ID, err, model)
+		logger.Warnf("[AccountFailover] %s: %s cooldown for model %s (upstream cannot serve this model: %s)",
+			account.Email, class, model, truncateForLog(errMsg))
 	case isContentBlockedErrorMessage(errMsg):
 		// "content-blocked" is a payload/model-level refusal from upstream
 		// (typically AgentRouter). The account itself is healthy; rotating

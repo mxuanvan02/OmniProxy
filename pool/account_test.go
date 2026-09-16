@@ -238,6 +238,11 @@ func TestIsProviderModelUnavailableError(t *testing.T) {
 		`HTTP 503 from kiro.pix4k.com: {"error":{"code":"upstream_error","message":"model gpt-5.6-sol is not available on any configured provider right now"}}`,
 		"model claude-opus-5 unavailable on this provider",
 		"no available provider for model gpt-5.6-luna",
+		// Captured from a real new-api distributor: the model appears in /v1/models
+		// with no channel behind it. Both shapes are what the gateway actually
+		// sent, not a paraphrase.
+		`HTTP 503 from https://api.apiforcode.com/v1/chat/completions: {"error":{"message":"No available channel for model deepseek-v4-flash-vision-exp under group VIBE8 (distributor)","type":"new_api_error","code":"model_not_found"}}`,
+		`responses API failed: HTTP 503: {"error":{"message":"No available channel for model deepseek-v4-flash-vision-exp under group VIBE8 (distributor)","type":"new_api_error","code":"model_not_found"}}`,
 	}
 	for _, msg := range positives {
 		if !IsProviderModelUnavailableError(errors.New(msg)) {
@@ -253,6 +258,29 @@ func TestIsProviderModelUnavailableError(t *testing.T) {
 	for _, msg := range negatives {
 		if IsProviderModelUnavailableError(errors.New(msg)) {
 			t.Errorf("IsProviderModelUnavailableError(%q) = true, want false", msg)
+		}
+	}
+}
+
+// A distributor's "no channel for this model" arrives with HTTP 503, the one
+// status code the transient classifier trusts. If it is read as transient the
+// request retries three times per account and then cools every healthy account
+// in the pool for a model that can never be served.
+func TestProviderModelUnavailableIsNotTransient(t *testing.T) {
+	msgs := []string{
+		`HTTP 503: {"error":{"message":"No available channel for model deepseek-v4-flash-vision-exp under group VIBE8 (distributor)","type":"new_api_error","code":"model_not_found"}}`,
+		"model gpt-5.6-sol is not available on any configured provider right now",
+	}
+	for _, msg := range msgs {
+		err := errors.New(msg)
+		if IsTransientError(err) {
+			t.Errorf("IsTransientError(%q) = true, want false", msg)
+		}
+		if got := ClassifyCooldown(err); got != CooldownModelUnavailable {
+			t.Errorf("ClassifyCooldown(%q) = %s, want %s", msg, got, CooldownModelUnavailable)
+		}
+		if !CooldownModelUnavailable.immediate() {
+			t.Errorf("CooldownModelUnavailable.immediate() = false, want true")
 		}
 	}
 }
