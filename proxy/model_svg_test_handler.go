@@ -39,18 +39,18 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 		prompt = defaultSVGPrompt
 	}
 
-	// Pick the first enabled account that can serve chat requests.
-	accounts := config.GetAccounts()
-	var account *config.Account
-	for i := range accounts {
-		if accounts[i].Enabled && !isServiceAccount(&accounts[i]) {
-			account = &accounts[i]
-			break
-		}
-	}
+	// Route through the same model-aware pool the live proxy uses, so the test
+	// hits an account that actually serves this model (and honours cooldown and
+	// quota). Picking "first enabled account" would land on an upstream that
+	// silently rejects the model, making the capability result meaningless.
+	account := h.pool.GetNextForModel(model)
 	if account == nil {
 		w.WriteHeader(503)
-		json.NewEncoder(w).Encode(map[string]string{"error": "No enabled chat account available"})
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"success": false,
+			"model":   model,
+			"error":   "No available account serves this model",
+		})
 		return
 	}
 
