@@ -405,9 +405,10 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 
 	if req.MaxTokens > 0 || req.Temperature > 0 || req.TopP > 0 || req.Thinking != nil {
 		payload.InferenceConfig = &InferenceConfig{
-			MaxTokens:   req.MaxTokens,
-			Temperature: req.Temperature,
-			TopP:        req.TopP,
+			MaxTokens:      req.MaxTokens,
+			Temperature:    req.Temperature,
+			HasTemperature: req.Temperature != 0,
+			TopP:           req.TopP,
 		}
 		if effort, ok := claudeReasoningEffort(req.Thinking); ok {
 			payload.InferenceConfig.Thinking = req.Thinking
@@ -1417,9 +1418,10 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 
 	if req.MaxTokens > 0 || req.Temperature > 0 || req.TopP > 0 {
 		payload.InferenceConfig = &InferenceConfig{
-			MaxTokens:   req.MaxTokens,
-			Temperature: req.Temperature,
-			TopP:        req.TopP,
+			MaxTokens:      req.MaxTokens,
+			Temperature:    req.Temperature,
+			HasTemperature: req.Temperature != 0,
+			TopP:           req.TopP,
 		}
 	}
 

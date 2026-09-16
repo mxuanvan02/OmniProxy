@@ -102,6 +102,18 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 	}
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
 
+	// Pin sampling so repeated runs of the same prompt are comparable. The pin
+	// is applied on the payload, not the OpenAI request, because a zero
+	// temperature cannot survive the request's own zero-value ambiguity. Model
+	// families that reject a temperature override keep their own sampling.
+	if temp, ok := svgTestTemperature(actualModel); ok {
+		if kiroPayload.InferenceConfig == nil {
+			kiroPayload.InferenceConfig = &InferenceConfig{}
+		}
+		kiroPayload.InferenceConfig.Temperature = temp
+		kiroPayload.InferenceConfig.HasTemperature = true
+	}
+
 	var content string
 	var inTok, outTok int
 	var stopReason string

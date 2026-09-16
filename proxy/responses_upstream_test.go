@@ -213,6 +213,7 @@ func goldenResponsesPayload() *KiroPayload {
 	payload.InferenceConfig = &InferenceConfig{
 		MaxTokens:       4096,
 		Temperature:     0.4,
+		HasTemperature:  true,
 		TopP:            0.9,
 		ReasoningEffort: "medium",
 	}

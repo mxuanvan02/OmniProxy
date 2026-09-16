@@ -272,11 +272,16 @@ type KiroToolUse struct {
 }
 
 type InferenceConfig struct {
-	MaxTokens       int                   `json:"maxTokens,omitempty"`
-	Temperature     float64               `json:"temperature,omitempty"`
-	TopP            float64               `json:"topP,omitempty"`
-	Thinking        *ClaudeThinkingConfig `json:"-"`
-	ReasoningEffort string                `json:"-"`
+	MaxTokens   int                   `json:"maxTokens,omitempty"`
+	Temperature float64               `json:"temperature,omitempty"`
+	TopP        float64               `json:"topP,omitempty"`
+	Thinking    *ClaudeThinkingConfig `json:"-"`
+	// HasTemperature records that Temperature was set explicitly. Zero is a
+	// valid greedy pin, so the float alone cannot tell "pinned to 0" from
+	// "never specified"; without the flag a builder would either drop the pin
+	// or force greedy sampling on every request that carries a config.
+	HasTemperature  bool   `json:"-"`
+	ReasoningEffort string `json:"-"`
 }
 
 // ==================== Stream Callbacks ====================

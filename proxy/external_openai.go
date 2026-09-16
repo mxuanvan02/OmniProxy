@@ -527,7 +527,7 @@ func kiroPayloadToOpenAIRequest(payload *KiroPayload, account *config.Account) (
 		if payload.InferenceConfig.MaxTokens > 0 {
 			body["max_tokens"] = payload.InferenceConfig.MaxTokens
 		}
-		if payload.InferenceConfig.Temperature > 0 {
+		if payload.InferenceConfig.HasTemperature {
 			body["temperature"] = payload.InferenceConfig.Temperature
 		}
 		if payload.InferenceConfig.TopP > 0 {

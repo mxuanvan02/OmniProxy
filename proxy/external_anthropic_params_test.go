@@ -30,17 +30,25 @@ func TestAnthropicSamplingParamsFollowTheAPIRules(t *testing.T) {
 		},
 		{
 			name:      "temperature at the ceiling is kept",
-			cfg:       &InferenceConfig{MaxTokens: 4096, Temperature: 1},
+			cfg:       &InferenceConfig{MaxTokens: 4096, Temperature: 1, HasTemperature: true},
 			maxTokens: 4096,
 			hasTemp:   true,
 			temp:      1,
 		},
 		{
-			// Zero means "unset" here: sending it would pin the model to greedy
-			// decoding for a client that never asked for it.
+			// Zero means "unset" unless the client pinned it explicitly: sending
+			// an unpinned zero would force greedy decoding on a client that
+			// never asked for it.
 			name:      "zero temperature is omitted",
 			cfg:       &InferenceConfig{MaxTokens: 4096, Temperature: 0},
 			maxTokens: 4096,
+		},
+		{
+			name:      "explicit greedy pin is kept",
+			cfg:       &InferenceConfig{MaxTokens: 4096, Temperature: 0, HasTemperature: true},
+			maxTokens: 4096,
+			hasTemp:   true,
+			temp:      0,
 		},
 		{
 			name:      "reasoning effort above the budget enables thinking",

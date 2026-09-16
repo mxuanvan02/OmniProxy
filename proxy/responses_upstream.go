@@ -208,7 +208,7 @@ func kiroPayloadToResponsesRequest(payload *KiroPayload, account *config.Account
 		// rejects temperature/top_p with HTTP 400 for GPT-5.x reasoning models,
 		// while a generic OpenAI-compatible gateway accepts them.
 		if opts.ForwardSamplingParams {
-			if payload.InferenceConfig.Temperature > 0 {
+			if payload.InferenceConfig.HasTemperature {
 				body["temperature"] = payload.InferenceConfig.Temperature
 			}
 			if payload.InferenceConfig.TopP > 0 {

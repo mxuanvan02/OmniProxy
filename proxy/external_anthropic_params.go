@@ -113,7 +113,7 @@ func applyAnthropicSamplingParams(body map[string]interface{}, payload *KiroPayl
 	// Anthropic accepts temperature and top_p in [0,1] and rejects the request
 	// rather than clamping, while the OpenAI dialects accept up to 2. A client
 	// asking for more gets the API's default here instead of a 400.
-	if cfg.Temperature > 0 && cfg.Temperature <= 1 {
+	if cfg.HasTemperature && cfg.Temperature >= 0 && cfg.Temperature <= 1 {
 		body["temperature"] = cfg.Temperature
 	}
 	if cfg.TopP > 0 && cfg.TopP <= 1 {
