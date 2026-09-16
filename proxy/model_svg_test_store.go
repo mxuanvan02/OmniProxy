@@ -23,6 +23,7 @@ type svgTestEntry struct {
 	AccountID   string `json:"accountId"`
 	AccountName string `json:"accountName"`
 	Provider    string `json:"provider"`
+	Dialect     string `json:"dialect,omitempty"`
 	Success     bool   `json:"success"`
 	SVG         string `json:"svg"`
 	Error       string `json:"error,omitempty"`
@@ -49,6 +50,7 @@ type svgTestSummary struct {
 	AccountID   string `json:"accountId"`
 	AccountName string `json:"accountName"`
 	Provider    string `json:"provider"`
+	Dialect     string `json:"dialect,omitempty"`
 	Success     bool   `json:"success"`
 	HasSVG      bool   `json:"hasSvg"`
 }

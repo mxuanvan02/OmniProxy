@@ -161,11 +161,26 @@ function buildSvgTestAccountRow(a) {
   const prov = document.createElement('span');
   prov.className = 'badge badge-info svgtest-pick-prov';
   prov.textContent = a.provider || '?';
+  const dialect = svgtestDialectBadge(a.dialect);
   const count = document.createElement('span');
   count.className = 'badge badge-muted svgtest-pick-badge';
   count.textContent = String(serves);
-  label.append(cb, name, prov, count);
+  label.append(cb, name, prov);
+  if (dialect) label.appendChild(dialect);
+  label.appendChild(count);
   return label;
+}
+
+// svgtestDialectBadge returns a small badge distinguishing the call type an
+// account uses (chat / responses / anthropic). Chat is the default and most
+// common, so it gets no badge — only non-default dialects are tagged.
+function svgtestDialectBadge(dialect) {
+  const d = (dialect || '').toLowerCase();
+  if (!d || d === 'chat') return null;
+  const span = document.createElement('span');
+  span.className = 'badge badge-warning svgtest-pick-dialect';
+  span.textContent = d === 'responses' ? 'Responses' : d === 'anthropic' ? 'Messages' : d;
+  return span;
 }
 
 // Selection changes filter the opposite axis; re-prune first so a model ticked

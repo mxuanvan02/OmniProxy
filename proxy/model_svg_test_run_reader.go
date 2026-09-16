@@ -64,7 +64,7 @@ func loadSVGTestGroup(groupDir, promptKey string) *svgTestGroupMeta {
 		meta.ResultCount++
 		meta.Results = append(meta.Results, svgTestSummary{
 			Model: entry.Model, AccountID: entry.AccountID, AccountName: entry.AccountName,
-			Provider: entry.Provider, Success: entry.Success, HasSVG: entry.SVG != "",
+			Provider: entry.Provider, Dialect: entry.Dialect, Success: entry.Success, HasSVG: entry.SVG != "",
 		})
 	}
 	if meta.ResultCount == 0 {

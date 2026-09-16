@@ -19,6 +19,7 @@ type svgMatrixAccount struct {
 	ID           string   `json:"id"`
 	Name         string   `json:"name"`
 	Provider     string   `json:"provider"`
+	Dialect      string   `json:"dialect"`
 	CatalogState string   `json:"catalogState"`
 	Models       []string `json:"models"`
 }
@@ -45,6 +46,7 @@ func (h *Handler) apiSVGTestMatrix(w http.ResponseWriter, _ *http.Request) {
 			ID:           a.ID,
 			Name:         accountLabel(a),
 			Provider:     providerLabelOf(a.Provider),
+			Dialect:      externalAPIDialect(a),
 			CatalogState: state,
 			Models:       models,
 		})
