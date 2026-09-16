@@ -122,6 +122,27 @@ Không đổi risk profile. Investigation thuần read-only; không đụng cred
 
 ## Bước tiếp theo
 
-- **Immediate:** Restart binary (`./restart.sh` hoặc `launchctl kick -k system/com.omniproxy`)
-- **Verify:** Grep log sau restart tìm `"rotating without cooldown"` cho EADDRNOTAVAIL/http2 timeout
+- **Immediate:** Restart binary (`./restart.sh` hoặc `launchctl kick -k system/com.omniproxy`) ✅ **Đã làm 2026-09-16 08:39**
+- **Verify:** Grep log sau restart tìm `"rotating without cooldown"` cho EADDRNOTAVAIL/http2 timeout → ✅ Không có recurrence nào sau restart (hai lỗi chưa tái xuất hiện)
 - **Monitor:** Nếu variant mới xuất hiện (string khác), thêm vào `isTransientNetworkError`
+
+## Finding mới post-restart (ngoài phạm vi phase 06 gốc)
+
+Sau restart, log hiện một lỗi **khác** đang rơi vào `unclassified failure — recording cooldown`:
+
+```
+[AccountFailover] VIBE: unclassified failure for model qwen3.8-max — recording cooldown
+(err: external anthropic SSE stream ended before message_stop)
+```
+
+**Phân tích:**
+- Error source: `external_anthropic_stream.go:116` — stream kết thúc mà không nhận được event `message_stop` terminal
+- `IsKiroTruncatedError` cố ý exclude external errors (chỉ match string chứa "kiro") → lỗi này không được cover
+- Khác với Kiro truncation (200 OK blank body): đây là stream bị cắt giữa chừng, có thể do network drop hoặc upstream reset
+- Hiện tại mỗi lần xảy ra → model-lock cooldown cho account VIBE
+
+**Khuyến nghị:** Tạo phase riêng hoặc ticket để phân loại đúng. Hai lựa chọn:
+1. Coi là transient network error → rotate without cooldown (nếu nguyên nhân chính là network)
+2. Coi là external-truncated error tương tự Kiro → short cooldown scoped cho Alibaba Cloud dialect (nếu nguyên nhân chính là upstream)
+
+Cần thêm data point (tần suất, correlation với network events) trước khi quyết định.
