@@ -197,11 +197,15 @@ func (h *Handler) probeAccountCapability(account *config.Account, capability str
 	}
 
 	endpoint := openAICompatibleEndpoint(account.BaseURL, path)
+	dialect := externalAPIDialect(account)
 	if capability == capabilityChat {
-		// Honour the account's chat-path override so a provider whose canonical
-		// /v1/chat/completions is unreachable is not reported as a dead chat
-		// endpoint while its configured path works.
-		endpoint = openAICompatibleEndpoint(account.BaseURL, externalChatPath(account))
+		// A Responses or Messages gateway must be probed in its own dialect:
+		// posting a chat-completions body to one reads as "no chat" on a
+		// healthy account, which the matrix reports as missing vision too.
+		endpoint = probeChatEndpoint(account, dialect)
+		if dialectBody := probeChatRequestBody(dialect, model); dialectBody != nil {
+			body = dialectBody
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
 	defer cancel()
@@ -210,9 +214,13 @@ func (h *Handler) probeAccountCapability(account *config.Account, capability str
 		result.Detail = err.Error()
 		return result
 	}
-	req.Header.Set("Authorization", "Bearer "+credential)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "*/*")
+	if capability == capabilityChat {
+		applyChatProbeAuth(req, account, credential, dialect)
+	} else {
+		req.Header.Set("Authorization", "Bearer "+credential)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Accept", "*/*")
+	}
 
 	client := GetRestClientForProxy(ResolveAccountProxyURL(account))
 	started := time.Now()

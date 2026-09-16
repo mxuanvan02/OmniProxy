@@ -568,13 +568,10 @@ func externalWireModelID(payload *KiroPayload, account *config.Account) string {
 	// "omniproxy/" internally for combo routing); external OpenAI-compatible
 	// providers receive the bare model ID so their model registry can match it.
 	modelID = stripInternalModelPrefix(modelID)
-	// External providers (e.g. bddevlab) use dash-form model IDs
-	// ("claude-opus-4-8") while OmniProxy's ParseModelAndThinking normalises
-	// to dot-form ("claude-opus-4.8"). Revert to dash-form so the external
-	// provider's model registry can match. Only applies to claude-* models;
-	// other model families (gpt-*, o1-*, etc.) pass through unchanged.
-	modelID = dotToDashClaudeVersion(modelID)
-	return applyExternalModelMapping(account, modelID)
+	// The dash-form Claude revert and the per-account mapping are shared with
+	// the Responses dialect, so they live in resolveExternalModelID rather than
+	// being restated here.
+	return resolveExternalModelID(account, modelID)
 }
 
 // applyExternalModelMapping rewrites a public model ID to the model ID used by
@@ -794,10 +791,14 @@ func openAIUserContent(text string, images []KiroImage) interface{} {
 	return content
 }
 
-// resolveExternalModelID preserves model identity; discovery belongs to the
-// catalog refresh path, never the inference path.
+// resolveExternalModelID completes the model-ID chain for dialects that strip
+// the internal routing prefix themselves before calling it (the Responses
+// builder). It applies the same two rewrites externalWireModelID does — the
+// dot-to-dash Claude version revert and the per-account model mapping — so every
+// external dialect sends a provider the ID its registry actually recognises.
+// Discovery still belongs to the catalog refresh path, never the inference path.
 func resolveExternalModelID(account *config.Account, requested string) string {
-	return strings.TrimSpace(requested)
+	return applyExternalModelMapping(account, dotToDashClaudeVersion(strings.TrimSpace(requested)))
 }
 
 // dotToDashClaudeVersion reverts OmniProxy's dot-form normalisation
