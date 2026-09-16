@@ -20,8 +20,9 @@ const defaultSVGPrompt = `Create a simple, colorful SVG illustration of a cute a
 // something a simple "say ok" health check cannot verify.
 func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Model  string `json:"model"`
-		Prompt string `json:"prompt"`
+		Model     string `json:"model"`
+		Prompt    string `json:"prompt"`
+		AccountID string `json:"accountId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -39,19 +40,45 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 		prompt = defaultSVGPrompt
 	}
 
-	// Route through the same model-aware pool the live proxy uses, so the test
-	// hits an account that actually serves this model (and honours cooldown and
-	// quota). Picking "first enabled account" would land on an upstream that
-	// silently rejects the model, making the capability result meaningless.
-	account := h.pool.GetNextForModel(model)
-	if account == nil {
-		w.WriteHeader(503)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success": false,
-			"model":   model,
-			"error":   "No available account serves this model",
-		})
-		return
+	// A pinned account is tested directly — the point is to verify what that
+	// specific account can do, not what the pool would route to. Without a pin
+	// fall back to the same model-aware selection the live proxy uses, so the
+	// test hits an account that actually serves the model (and honours cooldown
+	// and quota) instead of one that silently rejects it.
+	var account *config.Account
+	if id := strings.TrimSpace(req.AccountID); id != "" {
+		account = h.pool.GetByID(id)
+		if account == nil {
+			w.WriteHeader(404)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"model":   model,
+				"error":   "Account not found",
+			})
+			return
+		}
+		// Service adapters (search/image) have no chat path; sending their
+		// credentials through dispatchChat would misroute them to Kiro/OpenAI.
+		if isServiceAccount(account) {
+			w.WriteHeader(400)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"model":   model,
+				"error":   "Service accounts cannot run chat-based SVG tests",
+			})
+			return
+		}
+	} else {
+		account = h.pool.GetNextForModel(model)
+		if account == nil {
+			w.WriteHeader(503)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": false,
+				"model":   model,
+				"error":   "No available account serves this model",
+			})
+			return
+		}
 	}
 
 	if err := h.ensureValidToken(account); err != nil {
@@ -90,10 +117,12 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(502)
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":   false,
-			"error":     err.Error(),
-			"model":     model,
-			"elapsedMs": elapsed,
+			"success":     false,
+			"error":       err.Error(),
+			"model":       model,
+			"accountId":   account.ID,
+			"accountName": accountLabel(account),
+			"elapsedMs":   elapsed,
 		})
 		return
 	}
@@ -101,12 +130,14 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 	svg := extractSVG(content)
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":    svg != "",
-		"svg":        svg,
-		"rawReply":   content,
-		"model":      model,
-		"elapsedMs":  elapsed,
-		"tokensUsed": inTok + outTok,
+		"success":     svg != "",
+		"svg":         svg,
+		"rawReply":    content,
+		"model":       model,
+		"accountId":   account.ID,
+		"accountName": accountLabel(account),
+		"elapsedMs":   elapsed,
+		"tokensUsed":  inTok + outTok,
 	})
 }
 

@@ -124,7 +124,7 @@ export const api = {
   applyCliTool: (tool:string, body:Record<string,unknown>) => request(`/cli-tools/${encodeURIComponent(tool)}`, {method:'POST', body:JSON.stringify(body)}),
 }
 
-export interface SVGTestResult { success:boolean; svg:string; rawReply:string; model:string; elapsedMs:number; tokensUsed:number; error?:string }
-export async function testModelSVG(model:string, prompt?:string): Promise<SVGTestResult> {
-  return request<SVGTestResult>('/test-model-svg', {method:'POST', body:JSON.stringify({model, prompt})})
+export interface SVGTestResult { success:boolean; svg:string; rawReply:string; model:string; accountId?:string; accountName?:string; elapsedMs:number; tokensUsed:number; error?:string }
+export async function testModelSVG(model:string, prompt?:string, accountId?:string): Promise<SVGTestResult> {
+  return request<SVGTestResult>('/test-model-svg', {method:'POST', body:JSON.stringify({model, prompt, accountId})})
 }

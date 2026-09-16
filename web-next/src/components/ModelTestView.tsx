@@ -1,20 +1,43 @@
-import { useState } from 'react'
-import type { SVGTestResult } from '../lib/api'
-import { testModelSVG } from '../lib/api'
+import { useEffect, useState } from 'react'
+import type { Account, SVGTestResult } from '../lib/api'
+import { api, testModelSVG } from '../lib/api'
 import { Card, PageHeader } from './Shell'
 
+// Mirrors proxy.isServiceAccount: search/image accounts are service adapters,
+// not chat providers, so they cannot answer an SVG prompt.
+function isChatAccount(a: Account): boolean {
+  const caps = Array.isArray(a.capabilities) ? a.capabilities : []
+  const kind = (a.providerKind ?? '').toLowerCase()
+  return !caps.some((c) => ['search', 'image'].includes(String(c).toLowerCase()))
+    && kind !== 'search' && kind !== 'image'
+}
+
+function accountName(a: Account): string {
+  return (a.nickname || a.email || a.id).trim()
+}
+
 export function ModelTestView({ models }: { models: string[] }) {
+  const [accounts, setAccounts] = useState<Account[]>([])
+  const [selectedAccount, setSelectedAccount] = useState('')
   const [selectedModel, setSelectedModel] = useState(models[0] ?? '')
   const [customPrompt, setCustomPrompt] = useState('')
   const [result, setResult] = useState<SVGTestResult | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
+  useEffect(() => {
+    let alive = true
+    api.accounts()
+      .then((list) => { if (alive) setAccounts(list.filter((a) => a.enabled && isChatAccount(a))) })
+      .catch(() => { if (alive) setAccounts([]) })
+    return () => { alive = false }
+  }, [])
+
   async function runTest() {
     if (!selectedModel) return
     setLoading(true); setError(''); setResult(null)
     try {
-      const res = await testModelSVG(selectedModel, customPrompt || undefined)
+      const res = await testModelSVG(selectedModel, customPrompt || undefined, selectedAccount || undefined)
       setResult(res)
       if (!res.success && !res.svg) setError(res.error ?? 'Model không trả về SVG hợp lệ')
     } catch (e: unknown) {
@@ -34,6 +57,19 @@ export function ModelTestView({ models }: { models: string[] }) {
       {/* Controls */}
       <Card className="p-5 space-y-4">
         <div className="flex flex-wrap gap-3">
+          <select
+            value={selectedAccount}
+            onChange={(e) => setSelectedAccount(e.target.value)}
+            className="input min-w-56 flex-1"
+            aria-label="Chọn account"
+          >
+            <option value="">Tự động (pool chọn account phục vụ model)</option>
+            {accounts.map((a) => (
+              <option key={a.id} value={a.id}>
+                {accountName(a)}{a.provider ? ` · ${a.provider}` : ''}
+              </option>
+            ))}
+          </select>
           <select
             value={selectedModel}
             onChange={(e) => setSelectedModel(e.target.value)}
@@ -67,6 +103,9 @@ export function ModelTestView({ models }: { models: string[] }) {
             <span aria-hidden>⚠</span> SVG TEST
           </div>
           <div className="text-sm text-slate-300">{result.model}</div>
+          {result.accountName && (
+            <div className="mt-0.5 text-xs text-slate-400">account: {result.accountName}</div>
+          )}
           <div className="mt-1 text-xs text-slate-400">
             {result.elapsedMs} ms · {result.tokensUsed} tokens
           </div>
