@@ -803,3 +803,49 @@ func TestMusicOnlyAccountIsInServicePool(t *testing.T) {
 		t.Fatal("music-only account must be assigned to the service pool")
 	}
 }
+
+func TestIsKiroTruncatedError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"kiro without assistant output", errors.New("kiro SSE stream ended without assistant output"), true},
+		{"kiro blank", errors.New("kiro response blank"), true},
+		{"kiro truncated", errors.New("kiro stream truncated mid-response"), true},
+		{"external without kiro marker", errors.New("external SSE stream ended without assistant output"), false},
+		{"unrelated error", errors.New("connection refused"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsKiroTruncatedError(tc.err)
+			if got != tc.want {
+				t.Errorf("IsKiroTruncatedError(%q) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsExternalSSETruncatedError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"message_stop missing", errors.New("external anthropic SSE stream ended before message_stop"), true},
+		{"without assistant output", errors.New("external SSE stream ended without assistant output"), true},
+		{"missing external marker", errors.New("anthropic SSE stream ended before message_stop"), false},
+		{"kiro truncation", errors.New("kiro SSE stream ended without assistant output"), false},
+		{"unrelated error", errors.New("connection reset by peer"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := IsExternalSSETruncatedError(tc.err)
+			if got != tc.want {
+				t.Errorf("IsExternalSSETruncatedError(%q) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}

@@ -32,7 +32,7 @@ func (h *Handler) waitForPoolRecovery(ctx context.Context, model string, exclude
 	if *wave >= poolRecoveryWaves || len(excluded) == 0 || lastErr == nil {
 		return false
 	}
-	if clientGone(ctx, lastErr) || (!pool.IsTransientError(lastErr) && !pool.IsKiroTruncatedError(lastErr)) {
+	if clientGone(ctx, lastErr) || (!pool.IsTransientError(lastErr) && !pool.IsKiroTruncatedError(lastErr) && !pool.IsExternalSSETruncatedError(lastErr)) {
 		return false
 	}
 	*wave++
@@ -343,6 +343,14 @@ func (h *Handler) handleAccountFailure(account *config.Account, err error, model
 		class := h.pool.RecordErrorClass(account.ID, err, model)
 		logger.Warnf("[AccountFailover] %s: %s cooldown for model %s (kiro blank/truncated: %s)",
 			account.Email, class, model, truncateForLog(errMsg))
+	case pool.IsExternalSSETruncatedError(err):
+		// External dialect SSE stream ended without its terminal event (e.g.
+		// Alibaba Cloud Messages missing message_stop). Upstream closed the
+		// connection gracefully but prematurely — not a credential fault, not
+		// a network blip. Rotate without cooldown like network errors; retrying
+		// the same account on the same endpoint may hit the same upstream bug.
+		logger.Debugf("[AccountFailover] %s: external SSE truncated for model %s — rotating without cooldown (err: %s)",
+			account.Email, model, truncateForLog(errMsg))
 	case isNetworkError(errMsg):
 		// Network errors (connection refused, DNS failure, timeout) affect all
 		// accounts equally when the gateway is down. Do NOT model-lock — just

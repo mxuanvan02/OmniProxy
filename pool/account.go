@@ -1468,6 +1468,23 @@ func IsKiroTruncatedError(err error) bool {
 		strings.Contains(lower, "truncated")
 }
 
+// IsExternalSSETruncatedError reports whether err indicates an external dialect
+// SSE stream that ended without its terminal event (e.g. Alibaba Cloud Messages
+// missing message_stop). Like Kiro truncation this is an upstream-side failure,
+// not a credential fault — rotate without cooldown. The marker check prevents
+// matching unrelated "stream ended" errors from other subsystems.
+func IsExternalSSETruncatedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	if !strings.Contains(lower, "external") {
+		return false
+	}
+	return strings.Contains(lower, "ended before message_stop") ||
+		strings.Contains(lower, "ended without assistant output")
+}
+
 func (p *AccountPool) DisableAccount(id, reason string) {
 	if err := config.SetAccountBanStatus(id, "DISABLED", reason); err != nil {
 		// best effort — even if persistence fails, drop it from memory
