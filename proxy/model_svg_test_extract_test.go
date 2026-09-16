@@ -54,3 +54,52 @@ func TestClassifySVGReply(t *testing.T) {
 		})
 	}
 }
+
+func TestClassifySVGReplyWithStopReason(t *testing.T) {
+	truncated := `<svg viewBox="0 0 900 600"><path d="M0 0" dur="0.9s" repeatCount`
+	tests := []struct {
+		name       string
+		stop       string
+		wantReason string
+	}{
+		{
+			name:       "token-cap stop reason keeps the cap message",
+			stop:       "max_tokens",
+			wantReason: "SVG was cut off before </svg> — output likely hit the token cap",
+		},
+		{
+			name:       "length stop reason keeps the cap message",
+			stop:       "length",
+			wantReason: "SVG was cut off before </svg> — output likely hit the token cap",
+		},
+		{
+			name:       "early stream end is reported, not blamed on the cap",
+			stop:       "end_turn",
+			wantReason: "SVG was cut off before </svg> — stream ended early (stop_reason=end_turn)",
+		},
+		{
+			name:       "unknown stop reason falls back to the cap message",
+			stop:       "",
+			wantReason: "SVG was cut off before </svg> — output likely hit the token cap",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svg, reason := classifySVGReplyWithStop(truncated, tt.stop)
+			if svg != "" {
+				t.Errorf("classifySVGReplyWithStop() svg = %q, want empty", svg)
+			}
+			if reason != tt.wantReason {
+				t.Errorf("classifySVGReplyWithStop() reason = %q, want %q", reason, tt.wantReason)
+			}
+		})
+	}
+
+	t.Run("complete SVG ignores the stop reason", func(t *testing.T) {
+		svg, reason := classifySVGReplyWithStop(`<svg viewBox="0 0 4 4"><rect width="4" height="4"/></svg>`, "end_turn")
+		if svg == "" || reason != "" {
+			t.Errorf("classifySVGReplyWithStop() svg=%q reason=%q, want svg and no reason", svg, reason)
+		}
+	})
+}

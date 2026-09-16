@@ -104,10 +104,12 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 
 	var content string
 	var inTok, outTok int
+	var stopReason string
 	callback := &KiroStreamCallback{
 		OnText:         func(text string, _ bool) { content += text },
 		OnToolUse:      func(_ KiroToolUse) {},
 		OnComplete:     func(in, out int) { inTok, outTok = in, out },
+		OnStopReason:   func(reason string) { stopReason = reason },
 		OnError:        func(_ error) {},
 		OnCredits:      func(_ float64) {},
 		OnContextUsage: func(_ float64) {},
@@ -145,7 +147,7 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	svg, failReason := classifySVGReply(content)
+	svg, failReason := classifySVGReplyWithStop(content, stopReason)
 
 	persistSVGTestResult(prompt, model, svgTestEntry{
 		AccountID:   account.ID,

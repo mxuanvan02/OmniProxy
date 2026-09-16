@@ -41,6 +41,14 @@ func extractSVG(s string) string {
 // reply means "raise the budget or simplify the prompt", not "this provider
 // can't draw".
 func classifySVGReply(content string) (svg string, reason string) {
+	return classifySVGReplyWithStop(content, "")
+}
+
+// classifySVGReplyWithStop refines the truncation reason with the upstream
+// terminal stop reason. A reply cut by the output ceiling reports the cap,
+// while one whose stream simply ended early (a recovered truncation) says so —
+// the two need opposite remedies, so conflating them misleads the comparison.
+func classifySVGReplyWithStop(content, stopReason string) (svg string, reason string) {
 	if svg = extractSVG(content); svg != "" {
 		return svg, ""
 	}
@@ -49,8 +57,21 @@ func classifySVGReply(content string) (svg string, reason string) {
 	case strings.TrimSpace(content) == "":
 		return "", "empty reply from model"
 	case strings.Contains(lower, "<svg"):
+		if stopReason != "" && !isTokenCapStopReason(stopReason) {
+			return "", "SVG was cut off before </svg> — stream ended early (stop_reason=" + stopReason + ")"
+		}
 		return "", "SVG was cut off before </svg> — output likely hit the token cap"
 	default:
 		return "", "reply contained no SVG markup"
 	}
+}
+
+// isTokenCapStopReason reports whether a normalized upstream stop reason means
+// the reply was cut by the output-token ceiling rather than ending on its own.
+func isTokenCapStopReason(reason string) bool {
+	switch strings.ToLower(reason) {
+	case "max_tokens", "length", "max_output_tokens":
+		return true
+	}
+	return false
 }
