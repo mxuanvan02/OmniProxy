@@ -3776,6 +3776,14 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 		originalModel = routeModel
 	}
 	req.Model = routeModel
+	// Deployment-variant rescue: when no healthy account serves the exact name,
+	// fall back to a same-family variant (qwen3.8-max -> qwen3.8-max-cn) before
+	// the pool lookup. originalModel feeds the outbound wire ID, so it must
+	// follow the rewrite or the gateway would receive a name it does not serve.
+	if resolved := h.resolveModelAlias(req.Model); resolved != req.Model {
+		req.Model = resolved
+		originalModel = resolved
+	}
 	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
 	thinkingResponseOpts := resolveClaudeThinkingResponseOptions(req.Thinking, thinkingCfg.ClaudeFormat)
 	estimatedInputTokens := estimateClaudeRequestInputTokens(effectiveReq)
@@ -5185,6 +5193,13 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	originalModel := stripThinkingSuffix(req.Model, thinkingCfg.Suffix)
 	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
 	req.Model = actualModel
+	// Deployment-variant rescue (see resolveModelAlias): exact unavailable ->
+	// same-family variant. originalModel feeds the outbound wire ID, so it must
+	// follow the rewrite or the gateway would receive a name it does not serve.
+	if resolved := h.resolveModelAlias(req.Model); resolved != req.Model {
+		req.Model = resolved
+		originalModel = resolved
+	}
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(&req)
 
 	kiroPayload := OpenAIToKiro(&req, thinking)

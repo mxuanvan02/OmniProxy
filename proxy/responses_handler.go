@@ -139,6 +139,13 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	originalModel := stripThinkingSuffix(openaiReq.Model, thinkingCfg.Suffix)
 	actualModel, thinking := ParseModelAndThinking(openaiReq.Model, thinkingCfg.Suffix)
 	openaiReq.Model = actualModel
+	// Deployment-variant rescue (see resolveModelAlias): exact unavailable ->
+	// same-family variant. originalModel feeds the outbound wire ID, so it must
+	// follow the rewrite or the gateway would receive a name it does not serve.
+	if resolved := h.resolveModelAlias(openaiReq.Model); resolved != openaiReq.Model {
+		openaiReq.Model = resolved
+		originalModel = resolved
+	}
 
 	estimatedInputTokens := estimateOpenAIRequestInputTokens(openaiReq)
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
