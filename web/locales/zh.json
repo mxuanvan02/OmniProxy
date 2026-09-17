@@ -1100,5 +1100,16 @@
   "svgtest.badgeRaw": "Raw",
   "svgtest.badgeThink": "Think",
   "svgtest.badgeLegacy": "旧版",
-  "svgtest.filterResultModels": "按模型筛选结果"
+  "svgtest.filterResultModels": "按模型筛选结果",
+  "svgtest.sweep": "扫描 effort",
+  "svgtest.sweepHint": "以 low、medium、high 推理 effort 运行 think 模式，绘制质量与 token 花费的关系",
+  "svgtest.curveTitle": "质量与推理 effort",
+  "svgtest.curveEmpty": "尚无扫描结果 — 点击扫描 effort 以绘制质量与推理 effort 的关系",
+  "svgtest.curveOmitted": "已排除 {0} 个失败档位",
+  "svgtest.curveFlatNote": "使用 Messages 方言的账户推理预算固定，因此其档位是结构性的直线，而非实测结果",
+  "svgtest.badgeEffort": "effort {0}",
+  "svgtest.scoreReasons": "失分项",
+  "svgtest.efficiency": "{0} 分/1k tok",
+  "svgtest.efficiencyNA": "效率 n/a",
+  "svgtest.tokens": "token"
 }

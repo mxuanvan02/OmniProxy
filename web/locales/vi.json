@@ -1100,5 +1100,16 @@
   "svgtest.badgeRaw": "Raw",
   "svgtest.badgeThink": "Think",
   "svgtest.badgeLegacy": "Cũ",
-  "svgtest.filterResultModels": "Lọc kết quả theo model"
+  "svgtest.filterResultModels": "Lọc kết quả theo model",
+  "svgtest.sweep": "Quét effort",
+  "svgtest.sweepHint": "Chạy chế độ think ở effort low, medium và high để vẽ chất lượng theo lượng token bỏ ra",
+  "svgtest.curveTitle": "Chất lượng theo effort suy luận",
+  "svgtest.curveEmpty": "Chưa có bậc sweep nào — bấm Quét effort để vẽ chất lượng theo effort suy luận",
+  "svgtest.curveOmitted": "Đã loại {0} bậc bị lỗi",
+  "svgtest.curveFlatNote": "Tài khoản dùng dialect Messages giữ ngân sách suy luận cố định, nên các bậc của chúng là đường thẳng theo cấu trúc chứ không phải kết quả đo được",
+  "svgtest.badgeEffort": "effort {0}",
+  "svgtest.scoreReasons": "Điểm bị trừ",
+  "svgtest.efficiency": "{0} điểm/1k tok",
+  "svgtest.efficiencyNA": "hiệu suất n/a",
+  "svgtest.tokens": "token"
 }

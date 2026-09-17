@@ -22,6 +22,9 @@ let svgtestState = {
   loading: false,
   bound: false,
   running: false,
+  sweeping: false,         // an effort sweep is in flight
+  curveVisible: false,     // the effort curve card is shown for the current group
+  lastEntries: [],         // full entry set of the current group, curve source
   deleting: false,
 };
 
@@ -202,6 +205,31 @@ function svgtestModeBadge(mode) {
   span.textContent = m === 'think' ? t('svgtest.badgeThink')
     : m === 'raw' ? t('svgtest.badgeRaw')
       : t('svgtest.badgeLegacy');
+  return span;
+}
+
+// svgtestEffortBadge tags a sweep rung with the reasoning effort it ran at. Only
+// think-mode runs carry one, so an empty effort renders nothing rather than a
+// misleading "—": a raw run did not pull that lever at all.
+function svgtestEffortBadge(effort) {
+  const e = (effort || '').toLowerCase();
+  if (!e) return null;
+  const span = document.createElement('span');
+  span.className = 'badge badge-info svgtest-effort-badge';
+  span.textContent = t('svgtest.badgeEffort', e);
+  return span;
+}
+
+// svgtestScoreBadge renders the rubric's 0-100 grade with a colour that makes a
+// weak result stand out in a grid without reading the number: good is success,
+// middling is warning, weak is error. A failed run scores 0 and is badged as
+// failed by the caller instead, so this only ever sees a real grade.
+function svgtestScoreBadge(score) {
+  const n = Number(score) || 0;
+  const span = document.createElement('span');
+  span.className = 'badge svgtest-score-badge ' +
+    (n >= 85 ? 'badge-success' : n >= 60 ? 'badge-warning' : 'badge-error');
+  span.textContent = n + '/100';
   return span;
 }
 

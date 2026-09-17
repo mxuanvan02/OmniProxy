@@ -25,44 +25,73 @@ async function runSvgTest() {
   if (svgtestState.running) return;
   const pairs = svgtestPlannedPairs();
   if (pairs.length === 0) { toast(t('svgtest.needSelection'), 'warning'); return; }
-  const promptBox = document.getElementById('svgtestPrompt');
-  const prompt = (promptBox ? promptBox.value : '').trim() || svgtestState.defaultPrompt;
+  const prompt = svgtestCurrentPrompt();
 
   // The UI expands a "both" selection into one POST per mode; a single-mode
   // selection posts once. The server runs exactly one mode per request and
   // stores each under its own mode-suffixed filename, so raw and think never
-  // overwrite each other.
+  // overwrite each other. A plain run leaves effort empty, which think mode
+  // reads as its own default.
   const modes = svgtestState.mode === 'both' ? ['raw', 'think'] : [svgtestState.mode];
+  const jobs = [];
+  for (const p of pairs) {
+    for (const mode of modes) jobs.push({ model: p.model, accountId: p.accountId, mode: mode, effort: '' });
+  }
+  await runSvgTestJobs(jobs, prompt, ['svgtestRunBtn'], false);
+}
 
+// runSvgTestSweep posts think mode once per effort rung for each pair, so one
+// (model, account) accumulates a low→medium→high ladder in storage. That ladder
+// is what the curve plots: it shows whether a model actually buys quality with
+// more reasoning, or spends tokens for nothing. It is a separate button from Run
+// because it is several times the calls, and an operator comparing two modes
+// should not pay for a sweep they did not ask for.
+async function runSvgTestSweep() {
+  if (svgtestState.running) return;
+  const pairs = svgtestPlannedPairs();
+  if (pairs.length === 0) { toast(t('svgtest.needSelection'), 'warning'); return; }
+  const prompt = svgtestCurrentPrompt();
+  const levels = ['low', 'medium', 'high'];
+  const jobs = [];
+  for (const p of pairs) {
+    for (const effort of levels) jobs.push({ model: p.model, accountId: p.accountId, mode: 'think', effort: effort });
+  }
+  await runSvgTestJobs(jobs, prompt, ['svgtestSweepBtn'], true);
+}
+
+function svgtestCurrentPrompt() {
+  const promptBox = document.getElementById('svgtestPrompt');
+  return (promptBox ? promptBox.value : '').trim() || svgtestState.defaultPrompt;
+}
+
+// runSvgTestJobs posts one job at a time and reports progress, then lands the UI
+// on the group the server wrote. `curve` asks for the effort curve to be rendered
+// afterwards, which only a sweep has the data for.
+async function runSvgTestJobs(jobs, prompt, buttonIds, curve) {
   svgtestState.running = true;
-  const runBtn = document.getElementById('svgtestRunBtn');
   const status = document.getElementById('svgtestStatus');
-  if (runBtn) runBtn.disabled = true;
-  const total = pairs.length * modes.length;
+  const buttons = buttonIds.map(id => document.getElementById(id)).filter(Boolean);
+  buttons.forEach(b => { b.disabled = true; });
+  const total = jobs.length;
   let done = 0;
   if (status) status.textContent = t('svgtest.running', '0', String(total));
 
   // Every POST response echoes the promptKey the server derived from this
   // prompt; capture one so the run can select its own group afterwards.
   let reportedKey = '';
-  const tasks = [];
-  for (const p of pairs) {
-    for (const mode of modes) {
-      tasks.push(api('/test-model-svg', {
-        method: 'POST',
-        body: JSON.stringify({ model: p.model, prompt: prompt, accountId: p.accountId, mode: mode }),
-      }).then(res => res.json().catch(() => ({}))).then(d => {
-        if (d && d.promptKey) reportedKey = d.promptKey;
-      }).catch(() => {}).finally(() => {
-        done++;
-        if (status) status.textContent = t('svgtest.running', String(done), String(total));
-      }));
-    }
-  }
+  const tasks = jobs.map(job => api('/test-model-svg', {
+    method: 'POST',
+    body: JSON.stringify({ model: job.model, prompt: prompt, accountId: job.accountId, mode: job.mode, effort: job.effort }),
+  }).then(res => res.json().catch(() => ({}))).then(d => {
+    if (d && d.promptKey) reportedKey = d.promptKey;
+  }).catch(() => {}).finally(() => {
+    done++;
+    if (status) status.textContent = t('svgtest.running', String(done), String(total));
+  }));
   await Promise.all(tasks);
 
   svgtestState.running = false;
-  if (runBtn) runBtn.disabled = false;
+  buttons.forEach(b => { b.disabled = false; });
   if (status) status.textContent = t('svgtest.done');
   // Re-read history, then land on the group the server just wrote. Every POST
   // response carries the same promptKey (it is derived from the prompt), so one
@@ -70,7 +99,7 @@ async function runSvgTest() {
   const groups = await loadSvgTestGroups();
   const known = new Set(groups.map(g => g.promptKey));
   const key = known.has(reportedKey) ? reportedKey : (groups[0] ? groups[0].promptKey : '');
-  selectSvgTestGroup(key);
+  selectSvgTestGroup(key, curve);
 }
 
 async function loadSvgTestGroups() {
@@ -102,10 +131,10 @@ function svgtestGroupOption(g) {
   return opt;
 }
 
-function selectSvgTestGroup(key) {
+function selectSvgTestGroup(key, curve) {
   const sel = document.getElementById('svgtestGroupHistory');
   if (sel) sel.value = key;
-  renderSvgTestGroup(key);
+  renderSvgTestGroup(key, curve);
 }
 
 function bindSvgTestEvents() {
@@ -113,6 +142,8 @@ function bindSvgTestEvents() {
   const byId = id => document.getElementById(id);
   const runBtn = byId('svgtestRunBtn');
   if (runBtn) runBtn.addEventListener('click', runSvgTest);
+  const sweepBtn = byId('svgtestSweepBtn');
+  if (sweepBtn) sweepBtn.addEventListener('click', runSvgTestSweep);
   const refresh = byId('svgtestRefreshBtn');
   if (refresh) refresh.addEventListener('click', loadSvgTestMatrix);
   const mf = byId('svgtestModelFilter');

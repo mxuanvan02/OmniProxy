@@ -26,6 +26,7 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 		Prompt    string `json:"prompt"`
 		AccountID string `json:"accountId"`
 		Mode      string `json:"mode"`
+		Effort    string `json:"effort"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -95,8 +96,10 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 
 	// The mode, not the model suffix, decides reasoning here: raw forces it off
 	// and think forces it on across every dialect, so the comparison isolates
-	// rendering ability from reasoning budget.
+	// rendering ability from reasoning budget. The effort refines think mode for
+	// the sweep, where several rungs of one pair must land in one curve.
 	mode := resolveSVGTestMode(req.Mode)
+	effort := normalizeSVGTestEffort(req.Effort)
 
 	start := time.Now()
 
@@ -106,22 +109,33 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 		MaxTokens: externalAnthropicDefaultMaxTokens,
 		Stream:    false,
 	}
-	kiroPayload := buildSVGTestPayload(openaiReq, actualModel, mode)
+	kiroPayload := buildSVGTestPayload(openaiReq, actualModel, mode, effort)
 
 	var content string
 	var inTok, outTok int
 	var stopReason string
+	var attemptProduced bool
 	callback := &KiroStreamCallback{
-		OnText:         func(text string, _ bool) { content += text },
-		OnToolUse:      func(_ KiroToolUse) {},
+		OnText:         func(text string, _ bool) { content += text; attemptProduced = true },
+		OnToolUse:      func(_ KiroToolUse) { attemptProduced = true },
 		OnComplete:     func(in, out int) { inTok, outTok = in, out },
 		OnStopReason:   func(reason string) { stopReason = reason },
 		OnError:        func(_ error) {},
 		OnCredits:      func(_ float64) {},
 		OnContextUsage: func(_ float64) {},
+		OnOutput:       func() { attemptProduced = true },
+		HasOutput:      func() bool { return attemptProduced },
+		OnReset: func() {
+			content, inTok, outTok, stopReason, attemptProduced = "", 0, 0, "", false
+		},
 	}
 
-	err := dispatchChat(r.Context(), account, kiroPayload, callback)
+	// Retried rather than dispatched once: the gateway this test runs through
+	// round-robins across backends that disagree on the request shape, so an
+	// intermittent 400 is a property of the gateway, not of the model. Without
+	// the retry that flakiness is recorded as a model failure and skews the
+	// comparison. The retry only fires while nothing has been emitted.
+	err := dispatchSVGTestWithRetry(r.Context(), account, kiroPayload, callback, dispatchChat, svgTestMaxAttempts)
 	elapsed := time.Since(start).Milliseconds()
 
 	// The prompt, not a client-chosen id, identifies the comparison group: two
@@ -136,6 +150,7 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 			Provider:    providerLabelOf(account.Provider),
 			Dialect:     externalAPIDialect(account),
 			Mode:        mode,
+			Effort:      effort,
 			Success:     false,
 			Error:       err.Error(),
 			ElapsedMs:   elapsed,
@@ -147,6 +162,7 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 			"error":       err.Error(),
 			"model":       model,
 			"mode":        mode,
+			"effort":      effort,
 			"promptKey":   promptKey,
 			"accountId":   account.ID,
 			"accountName": accountLabel(account),
@@ -156,6 +172,7 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 	}
 
 	svg, failReason := classifySVGReplyWithStop(content, stopReason)
+	score, scoreReasons := scoreSVG(svg)
 
 	persistSVGTestResult(prompt, model, svgTestEntry{
 		AccountID:   account.ID,
@@ -163,6 +180,7 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 		Provider:    providerLabelOf(account.Provider),
 		Dialect:     externalAPIDialect(account),
 		Mode:        mode,
+		Effort:      effort,
 		Success:     svg != "",
 		SVG:         svg,
 		Error:       failReason,
@@ -170,17 +188,27 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 		TokensUsed:  inTok + outTok,
 	})
 
+	// Score and efficiency are computed here for the live response and again on
+	// every read of the stored file, from the same rubric, so what the operator
+	// sees immediately and what the archive reports later cannot disagree.
+	efficiency, hasEfficiency := svgTestEfficiency(score, inTok+outTok)
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success":     svg != "",
-		"svg":         svg,
-		"error":       failReason,
-		"rawReply":    content,
-		"model":       model,
-		"mode":        mode,
-		"promptKey":   promptKey,
-		"accountId":   account.ID,
-		"accountName": accountLabel(account),
-		"elapsedMs":   elapsed,
-		"tokensUsed":  inTok + outTok,
+		"success":       svg != "",
+		"svg":           svg,
+		"error":         failReason,
+		"rawReply":      content,
+		"model":         model,
+		"mode":          mode,
+		"effort":        effort,
+		"promptKey":     promptKey,
+		"accountId":     account.ID,
+		"accountName":   accountLabel(account),
+		"elapsedMs":     elapsed,
+		"tokensUsed":    inTok + outTok,
+		"score":         score,
+		"scoreReasons":  scoreReasons,
+		"efficiency":    efficiency,
+		"hasEfficiency": hasEfficiency,
 	})
 }

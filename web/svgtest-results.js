@@ -5,11 +5,21 @@
 // grid and lets the operator drop a stored result (usually a failed attempt)
 // so it stops cluttering the comparison.
 
-async function renderSvgTestGroup(key) {
+async function renderSvgTestGroup(key, curve) {
   const box = document.getElementById('svgtestResults');
   if (!box) return;
   svgtestState.currentGroup = key || '';
-  if (!key) { box.replaceChildren(); return; }
+  if (!key) {
+    box.replaceChildren();
+    svgtestState.lastEntries = [];
+    svgtestState.curveVisible = false;
+    if (typeof hideSvgTestCurve === 'function') hideSvgTestCurve();
+    return;
+  }
+  // A run or sweep asks for the curve; a filter re-render (curve undefined)
+  // keeps whatever was showing, so narrowing by model name does not drop the
+  // curve the operator just produced.
+  if (curve !== undefined) svgtestState.curveVisible = !!curve;
   box.replaceChildren(svgtestEmpty('svgtest.loading'));
   let data;
   try {
@@ -17,11 +27,17 @@ async function renderSvgTestGroup(key) {
     data = await res.json();
   } catch (e) { box.replaceChildren(svgtestEmpty('svgtest.loadError')); return; }
   const entries = Array.isArray(data.entries) ? data.entries : [];
+  svgtestState.lastEntries = entries;
   box.replaceChildren();
   const kw = svgtestState.resultModelFilter;
   const shown = kw ? entries.filter(e => (e.model || '').toLowerCase().includes(kw)) : entries;
   if (shown.length === 0) { box.replaceChildren(svgtestEmpty('svgtest.noResults')); return; }
   for (const e of shown) box.appendChild(buildSvgTestCard(e));
+  // The curve is drawn from the full entry set, not the filtered view: a sweep
+  // is per (model, account) pair, and filtering by model name must not drop a
+  // rung and leave a misleading line.
+  if (svgtestState.curveVisible && typeof renderSvgTestCurve === 'function') renderSvgTestCurve(entries);
+  else if (typeof hideSvgTestCurve === 'function') hideSvgTestCurve();
 }
 
 function buildSvgTestCard(e) {
@@ -49,10 +65,21 @@ function buildSvgTestCard(e) {
   del.setAttribute('aria-label', t('svgtest.delete'));
   del.innerHTML = '<i class="fa-solid fa-trash" aria-hidden="true"></i>';
   del.addEventListener('click', () => deleteSvgTestEntry(e, del));
-  head.append(model, name, prov, svgtestDialectBadge(e.dialect), svgtestModeBadge(e.mode), state, del);
+  // A failed run has no drawing to grade, so its "failed" badge already says it
+  // all; the score badge only appears on a real result. The effort badge is
+  // null for raw and legacy runs, which append() would drop, so filter it out.
+  const badges = [prov, svgtestDialectBadge(e.dialect), svgtestModeBadge(e.mode), svgtestEffortBadge(e.effort)];
+  if (ok) badges.push(svgtestScoreBadge(e.score));
+  badges.push(state, del);
+  head.append(model, name, ...badges.filter(Boolean));
   const meta = document.createElement('div');
   meta.className = 'svgtest-card-meta';
-  meta.textContent = (e.elapsedMs || 0) + 'ms' + (e.tokensUsed ? ' · ' + e.tokensUsed + ' tokens' : '');
+  meta.textContent = svgtestCardMeta(e, ok);
+  // The rubric's lost-point reasons are the only way to explain a middling score,
+  // so surface them on hover rather than widening the card for every result.
+  if (ok && Array.isArray(e.scoreReasons) && e.scoreReasons.length > 0) {
+    meta.title = t('svgtest.scoreReasons') + ': ' + e.scoreReasons.join(', ');
+  }
   card.append(head, meta);
 
   const body = document.createElement('div');
@@ -90,7 +117,8 @@ async function deleteSvgTestEntry(e, btn) {
   const url = '/test-model-svg/groups/' + encodeURIComponent(key) + '/entries' +
     '?model=' + encodeURIComponent(e.model || '') +
     '&accountId=' + encodeURIComponent(e.accountId || '') +
-    '&mode=' + encodeURIComponent(e.mode || '');
+    '&mode=' + encodeURIComponent(e.mode || '') +
+    '&effort=' + encodeURIComponent(e.effort || '');
   let res = null;
   try { res = await api(url, { method: 'DELETE' }); } catch (err) { res = null; }
   svgtestState.deleting = false;
@@ -104,10 +132,32 @@ async function deleteSvgTestEntry(e, btn) {
   selectSvgTestGroup(still ? key : (groups.length > 0 ? groups[0].promptKey : ''));
 }
 
+// svgtestCardMeta builds the one-line summary under a card: score, efficiency,
+// latency, and token spend. Efficiency is score per thousand tokens — the figure
+// that answers "which model bought the most quality for its spend". It renders
+// "n/a" rather than a number whenever the token count is missing, because some
+// chat gateways ignore stream_options.include_usage and report no usage at all;
+// a division by zero or a fabricated rate there would be a lie in the grid.
+function svgtestCardMeta(e, ok) {
+  const parts = [];
+  if (ok) {
+    parts.push((Number(e.score) || 0) + '/100');
+    const tokens = Number(e.tokensUsed) || 0;
+    if (tokens > 0) {
+      const eff = (Number(e.score) || 0) / tokens * 1000;
+      parts.push(t('svgtest.efficiency', eff.toFixed(1)));
+    } else {
+      parts.push(t('svgtest.efficiencyNA'));
+    }
+  }
+  parts.push((e.elapsedMs || 0) + 'ms');
+  if (e.tokensUsed) parts.push(e.tokensUsed + ' ' + t('svgtest.tokens'));
+  return parts.join(' · ');
+}
+
 // Shared render primitives: the pickers (svgtest.js) and this grid both show
 // placeholder and empty rows, so they live here once for both.
-function svgtestEmpty(key) {
-  const el = document.createElement('div');
+function svgtestEmpty(key) {  const el = document.createElement('div');
   el.className = 'empty-state';
   el.textContent = t(key);
   return el;

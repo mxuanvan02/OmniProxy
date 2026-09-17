@@ -64,7 +64,8 @@ func loadSVGTestGroup(groupDir, promptKey string) *svgTestGroupMeta {
 		meta.ResultCount++
 		meta.Results = append(meta.Results, svgTestSummary{
 			Model: entry.Model, AccountID: entry.AccountID, AccountName: entry.AccountName,
-			Provider: entry.Provider, Dialect: entry.Dialect, Mode: entry.Mode, Success: entry.Success, HasSVG: entry.SVG != "",
+			Provider: entry.Provider, Dialect: entry.Dialect, Mode: entry.Mode, Effort: entry.Effort,
+			Success: entry.Success, HasSVG: entry.SVG != "", Score: entry.Score,
 		})
 	}
 	if meta.ResultCount == 0 {
@@ -76,13 +77,10 @@ func loadSVGTestGroup(groupDir, promptKey string) *svgTestGroupMeta {
 	}
 	sort.Strings(meta.Models)
 	sort.Slice(meta.Results, func(i, j int) bool {
-		if meta.Results[i].Model != meta.Results[j].Model {
-			return meta.Results[i].Model < meta.Results[j].Model
-		}
-		if meta.Results[i].AccountName != meta.Results[j].AccountName {
-			return meta.Results[i].AccountName < meta.Results[j].AccountName
-		}
-		return meta.Results[i].Mode < meta.Results[j].Mode
+		return svgTestResultLess(
+			meta.Results[i].Model, meta.Results[i].AccountName, meta.Results[i].Mode, meta.Results[i].Effort,
+			meta.Results[j].Model, meta.Results[j].AccountName, meta.Results[j].Mode, meta.Results[j].Effort,
+		)
 	})
 	return meta
 }
@@ -104,19 +102,51 @@ func getSVGTestGroupEntries(dir, promptKey string) []svgTestEntry {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if out[i].Model != out[j].Model {
-			return out[i].Model < out[j].Model
-		}
-		if out[i].AccountName != out[j].AccountName {
-			return out[i].AccountName < out[j].AccountName
-		}
-		return out[i].Mode < out[j].Mode
+		return svgTestResultLess(out[i].Model, out[i].AccountName, out[i].Mode, out[i].Effort, out[j].Model, out[j].AccountName, out[j].Mode, out[j].Effort)
 	})
 	return out
 }
 
+// svgTestResultLess orders results the way an operator reads them: grouped by
+// model, then by account, then by mode, then by reasoning effort. Putting
+// effort last keeps a sweep's low-to-high rungs adjacent inside one cell.
+func svgTestResultLess(modelA, accountA, modeA, effortA, modelB, accountB, modeB, effortB string) bool {
+	if modelA != modelB {
+		return modelA < modelB
+	}
+	if accountA != accountB {
+		return accountA < accountB
+	}
+	if modeA != modeB {
+		return modeA < modeB
+	}
+	return svgTestEffortRank(effortA) < svgTestEffortRank(effortB)
+}
+
+// svgTestEffortRank orders effort by increasing spend so a sweep curve is
+// already sorted low→high. Unspecified and unrecognised values rank first;
+// "max" is the top rung.
+func svgTestEffortRank(effort string) int {
+	switch normalizeSVGTestEffort(effort) {
+	case "low":
+		return 1
+	case "medium":
+		return 2
+	case "high":
+		return 3
+	case "max":
+		return 4
+	default:
+		return 0
+	}
+}
+
 // readSVGTestEntry loads one entry file, returning nil for the metadata file,
-// unreadable files, and anything that is not a valid entry.
+// unreadable files, and anything that is not a valid entry. The score is
+// recomputed here rather than read from disk: this is the single funnel both
+// readers go through, so legacy files written before scoring existed still get
+// a grade and a rubric change re-grades everything instead of leaving stale
+// numbers in the archive.
 func readSVGTestEntry(path string) *svgTestEntry {
 	if strings.HasSuffix(path, "_meta.json") || !strings.HasSuffix(path, ".json") {
 		return nil
@@ -128,6 +158,11 @@ func readSVGTestEntry(path string) *svgTestEntry {
 	var entry svgTestEntry
 	if json.Unmarshal(raw, &entry) != nil {
 		return nil
+	}
+	if entry.Success {
+		entry.Score, entry.ScoreReasons = scoreSVG(entry.SVG)
+	} else {
+		entry.Score, entry.ScoreReasons = 0, nil
 	}
 	return &entry
 }

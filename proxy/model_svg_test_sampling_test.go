@@ -109,3 +109,103 @@ func TestOpenAIToKiroMarksExplicitTemperature(t *testing.T) {
 		t.Errorf("OpenAIToKiro(no temperature) config = %+v, want no HasTemperature", payload.InferenceConfig)
 	}
 }
+
+func TestNormalizeSVGTestEffort(t *testing.T) {
+	cases := map[string]string{
+		"low": "low", "LOW": "low", "  low ": "low",
+		"medium": "medium", "Medium": "medium",
+		"high": "high", "max": "max",
+		"": "", "extreme": "", "lowx": "", "raw": "", "think": "",
+	}
+	for in, want := range cases {
+		if got := normalizeSVGTestEffort(in); got != want {
+			t.Errorf("normalizeSVGTestEffort(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// The sweep walks this ladder low to high, so the levels must be exactly the
+// ascending set the UI offers and must not include "max" — the gateways that
+// accept it disagree on whether it means anything above "high", which would put
+// a guaranteed-empty rung on the curve.
+func TestSVGTestEffortLevels(t *testing.T) {
+	want := []string{"low", "medium", "high"}
+	if len(svgTestEffortLevels) != len(want) {
+		t.Fatalf("svgTestEffortLevels = %v, want %v", svgTestEffortLevels, want)
+	}
+	for i, level := range want {
+		if svgTestEffortLevels[i] != level {
+			t.Errorf("svgTestEffortLevels[%d] = %q, want %q", i, svgTestEffortLevels[i], level)
+		}
+		if svgTestEffortRank(level) == 0 {
+			t.Errorf("effort level %q ranks as unspecified", level)
+		}
+	}
+	for i := 1; i < len(svgTestEffortLevels); i++ {
+		if svgTestEffortRank(svgTestEffortLevels[i-1]) >= svgTestEffortRank(svgTestEffortLevels[i]) {
+			t.Errorf("ladder is not ascending at %q then %q", svgTestEffortLevels[i-1], svgTestEffortLevels[i])
+		}
+	}
+}
+
+// Reasoning effort is the only lever the sweep moves, so it must come from one
+// place: raw always turns reasoning off no matter what effort is passed, think
+// honours an explicit rung and otherwise falls back to the default. If a sweep
+// rung and a plain think run could drift apart the curve would not be measuring
+// the same thing at each point.
+func TestSVGTestReasoningEffort(t *testing.T) {
+	tests := []struct {
+		mode   string
+		effort string
+		want   string
+	}{
+		{"raw", "", ""},
+		{"raw", "high", ""},
+		{"raw", "max", ""},
+		{"think", "", svgTestThinkEffort},
+		{"think", "  HIGH ", "high"},
+		{"think", "low", "low"},
+		{"think", "medium", "medium"},
+		{"think", "max", "max"},
+		{"think", "extreme", svgTestThinkEffort},
+	}
+	for _, tt := range tests {
+		if got := svgTestReasoningEffort(tt.mode, tt.effort); got != tt.want {
+			t.Errorf("svgTestReasoningEffort(%q, %q) = %q, want %q", tt.mode, tt.effort, got, tt.want)
+		}
+	}
+}
+
+// buildSVGTestPayload must put the resolved effort on the payload, pin the
+// temperature, and force reasoning off in raw mode. This is what makes a sweep
+// rung an actual difference upstream rather than a label stored beside an
+// identical request.
+func TestBuildSVGTestPayloadAppliesEffort(t *testing.T) {
+	req := &OpenAIRequest{
+		Model:     "qwen3.8-max-cn",
+		Messages:  []OpenAIMessage{{Role: "user", Content: "draw"}},
+		MaxTokens: externalAnthropicDefaultMaxTokens,
+	}
+
+	think := buildSVGTestPayload(req, "qwen3.8-max-cn", "think", "low")
+	if think.InferenceConfig == nil || think.InferenceConfig.ReasoningEffort != "low" {
+		t.Errorf("think/low reasoning effort = %+v, want low", think.InferenceConfig)
+	}
+	if !think.InferenceConfig.HasTemperature || think.InferenceConfig.Temperature != svgTestDeterministicTemperature {
+		t.Errorf("think payload temperature = %+v, want the pinned %v", think.InferenceConfig, svgTestDeterministicTemperature)
+	}
+
+	raw := buildSVGTestPayload(req, "qwen3.8-max-cn", "raw", "high")
+	if raw.InferenceConfig == nil || raw.InferenceConfig.ReasoningEffort != "" {
+		t.Errorf("raw payload carried reasoning effort %+v, want it forced off", raw.InferenceConfig)
+	}
+	if !raw.InferenceConfig.HasTemperature {
+		t.Error("raw payload lost the temperature pin")
+	}
+
+	// Both modes must share one sampling so the only difference between a raw and
+	// a think run is reasoning.
+	if think.InferenceConfig.Temperature != raw.InferenceConfig.Temperature {
+		t.Errorf("modes disagree on temperature: think=%v raw=%v", think.InferenceConfig.Temperature, raw.InferenceConfig.Temperature)
+	}
+}

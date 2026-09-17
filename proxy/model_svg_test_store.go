@@ -16,21 +16,26 @@ import (
 
 // svgTestEntry is one (model, account) outcome inside a prompt group. Results
 // are stored one file per pair under data/svg-tests/<promptKey>/ so the same
-// prompt can be rendered as a model x provider comparison grid.
+// prompt can be rendered as a model x provider comparison grid. Score and
+// ScoreReasons are derived on read, not persisted, so the rubric can improve
+// without a migration and stored values can never disagree with it.
 type svgTestEntry struct {
-	PromptKey   string `json:"promptKey"`
-	Model       string `json:"model"`
-	AccountID   string `json:"accountId"`
-	AccountName string `json:"accountName"`
-	Provider    string `json:"provider"`
-	Dialect     string `json:"dialect,omitempty"`
-	Mode        string `json:"mode,omitempty"`
-	Success     bool   `json:"success"`
-	SVG         string `json:"svg"`
-	Error       string `json:"error,omitempty"`
-	ElapsedMs   int64  `json:"elapsedMs"`
-	TokensUsed  int    `json:"tokensUsed"`
-	SavedAt     int64  `json:"savedAt"`
+	PromptKey    string   `json:"promptKey"`
+	Model        string   `json:"model"`
+	AccountID    string   `json:"accountId"`
+	AccountName  string   `json:"accountName"`
+	Provider     string   `json:"provider"`
+	Dialect      string   `json:"dialect,omitempty"`
+	Mode         string   `json:"mode,omitempty"`
+	Effort       string   `json:"effort,omitempty"`
+	Success      bool     `json:"success"`
+	SVG          string   `json:"svg"`
+	Error        string   `json:"error,omitempty"`
+	ElapsedMs    int64    `json:"elapsedMs"`
+	TokensUsed   int      `json:"tokensUsed"`
+	SavedAt      int64    `json:"savedAt"`
+	Score        int      `json:"score"`
+	ScoreReasons []string `json:"scoreReasons,omitempty"`
 }
 
 // svgTestGroupMeta summarises one prompt without carrying SVG payloads.
@@ -45,7 +50,9 @@ type svgTestGroupMeta struct {
 	Results     []svgTestSummary `json:"results"`
 }
 
-// svgTestSummary is the per-(model, account) row shown in the group list.
+// svgTestSummary is the per-(model, account) row shown in the group list. Score
+// is recomputed from the stored SVG on load, so the list and the detail view
+// always agree even after the rubric changes.
 type svgTestSummary struct {
 	Model       string `json:"model"`
 	AccountID   string `json:"accountId"`
@@ -53,8 +60,10 @@ type svgTestSummary struct {
 	Provider    string `json:"provider"`
 	Dialect     string `json:"dialect,omitempty"`
 	Mode        string `json:"mode,omitempty"`
+	Effort      string `json:"effort,omitempty"`
 	Success     bool   `json:"success"`
 	HasSVG      bool   `json:"hasSvg"`
+	Score       int    `json:"score"`
 }
 
 // svgPromptKeyPattern keeps derived keys filesystem-safe: the key becomes a
@@ -101,16 +110,24 @@ func normalizeSVGTestMode(mode string) string {
 	}
 }
 
-// svgEntryFileName keys a stored result by model, account AND mode. The mode
-// suffix is what lets a raw and a think run of the same pair coexist instead of
-// overwriting each other. An empty mode keeps the legacy two-part name so
-// results written before modes existed are still found by the reader and delete.
-// Account ids are UUIDs and mode is a fixed word, so the separator is
-// unambiguous.
-func svgEntryFileName(model, accountID, mode string) string {
+// svgEntryFileName keys a stored result by model, account, mode AND effort. The
+// mode suffix is what lets a raw and a think run of the same pair coexist; the
+// effort suffix is what lets several rungs of one sweep coexist instead of the
+// last one overwriting the rest. Effort is scoped to think mode: raw forces
+// reasoning off, so an effort there is a lever the run never pulled and naming a
+// file after it would fork identical raw runs. Empty segments keep the shorter
+// legacy name so results written before modes or efforts existed are still found
+// by the reader and delete. Account ids are UUIDs and both suffixes are fixed
+// words, so the separator stays unambiguous.
+func svgEntryFileName(model, accountID, mode, effort string) string {
 	stem := sanitizeIDForFile(model) + "--" + sanitizeIDForFile(accountID)
 	if m := normalizeSVGTestMode(mode); m != "" {
 		stem += "--" + m
+		if m == svgTestModeThink {
+			if e := normalizeSVGTestEffort(effort); e != "" {
+				stem += "--" + e
+			}
+		}
 	}
 	return stem + ".json"
 }
@@ -130,7 +147,7 @@ func saveSVGTestEntry(dir string, entry svgTestEntry) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(groupDir, svgEntryFileName(entry.Model, entry.AccountID, entry.Mode)), data, 0o644)
+	return os.WriteFile(filepath.Join(groupDir, svgEntryFileName(entry.Model, entry.AccountID, entry.Mode, entry.Effort)), data, 0o644)
 }
 
 // saveSVGTestMeta records the group's prompt text once. Every result rewrites it
