@@ -27,3 +27,33 @@ func svgTestTemperature(model string) (float64, bool) {
 	}
 	return svgTestDeterministicTemperature, true
 }
+
+// buildSVGTestPayload shapes the one request the test sends upstream. It is
+// deliberately bare: the operator's prompt goes out exactly as typed, with no
+// thinking preamble injected and no reasoning level requested, so what comes
+// back reflects how the model chooses to spend its own budget on this prompt.
+// That is the measurement — two models handed the same words, one of which
+// decides to think hard and one of which does not, and the difference in score
+// versus tokens is the result.
+//
+// The only thing pinned is the temperature, and that pin exists so repeated runs
+// of the same prompt are comparable rather than each drawing a fresh random
+// sample. It is applied to the payload rather than the OpenAI request, because a
+// zero temperature cannot survive that request's own zero-value ambiguity.
+// Model families that reject a temperature override keep their own sampling.
+func buildSVGTestPayload(openaiReq *OpenAIRequest, actualModel string) *KiroPayload {
+	payload := OpenAIToKiro(openaiReq, false)
+	if payload.InferenceConfig == nil {
+		payload.InferenceConfig = &InferenceConfig{}
+	}
+	if temp, ok := svgTestTemperature(actualModel); ok {
+		payload.InferenceConfig.Temperature = temp
+		payload.InferenceConfig.HasTemperature = true
+	}
+	// Left empty on purpose. Every dialect builder omits its reasoning field when
+	// this is blank (external_openai.go, external_openai_responses.go and the
+	// anthropic path all gate on it), so no dialect turns reasoning on by itself
+	// and none is told how hard to think.
+	payload.InferenceConfig.ReasoningEffort = ""
+	return payload
+}

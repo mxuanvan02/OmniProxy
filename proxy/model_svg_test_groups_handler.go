@@ -157,11 +157,10 @@ func (h *Handler) apiGetSVGTestGroup(w http.ResponseWriter, _ *http.Request, key
 }
 
 // apiDeleteSVGTestResult DELETE /admin/api/test-model-svg/groups/{key}/entries
-// ?model=&accountId=&mode=&effort= removes one stored (model, account, mode,
-// effort) result — typically a failed attempt the operator no longer wants
-// cluttering the comparison. When it was the group's last entry the group
-// directory goes with it, so the history never lists a prompt with nothing left
-// to show.
+// ?model=&accountId= removes one stored (model, account) result — typically a
+// failed attempt the operator no longer wants cluttering the comparison. When it
+// was the group's last entry the group directory goes with it, so the history
+// never lists a prompt with nothing left to show.
 func (h *Handler) apiDeleteSVGTestResult(w http.ResponseWriter, r *http.Request, key string) {
 	if !validSVGPromptKey(key) {
 		w.WriteHeader(http.StatusBadRequest)
@@ -170,15 +169,13 @@ func (h *Handler) apiDeleteSVGTestResult(w http.ResponseWriter, r *http.Request,
 	}
 	model := r.URL.Query().Get("model")
 	accountID := r.URL.Query().Get("accountId")
-	mode := r.URL.Query().Get("mode")
-	effort := r.URL.Query().Get("effort")
 	if model == "" || accountID == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Model and account are required"})
 		return
 	}
 	dir := svgTestStoreDir()
-	removed, groupEmpty, err := deleteSVGTestEntry(dir, key, model, accountID, mode, effort)
+	removed, groupEmpty, err := deleteSVGTestEntry(dir, key, model, accountID)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})

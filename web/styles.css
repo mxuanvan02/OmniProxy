@@ -4855,11 +4855,13 @@ img.brand-icon {
 }
 .svgtest-pick:hover { background: var(--accent); }
 .svgtest-pick[data-warn] { opacity: 0.65; }
+/* Names are never truncated: the whole point of the picker and the results grid
+   is telling one model or account from another, and an ellipsis defeats that.
+   Long ids wrap onto their own lines instead of being cut off. */
 .svgtest-pick-name {
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .svgtest-pick-prov { flex: 0 0 auto; }
 .svgtest-pick-badge { flex: 0 0 auto; min-width: 1.5rem; text-align: center; }
@@ -4884,15 +4886,6 @@ img.brand-icon {
 .svgtest-status {
   font-size: 0.8125rem;
   color: var(--muted-foreground);
-}
-.svgtest-mode-group {
-  display: inline-flex;
-  gap: 0.25rem;
-}
-.svgtest-mode-btn[aria-pressed="true"] {
-  background: var(--primary);
-  color: var(--primary-foreground);
-  border-color: var(--primary);
 }
 .svgtest-results-wrap {
   display: grid;
@@ -4930,13 +4923,15 @@ img.brand-icon {
   color: var(--foreground);
   flex: 0 0 100%;
 }
+/* Not truncated: an account id like VIBE_800_01 or a long display name has to be
+   readable in the grid, and the head already wraps, so the name takes as many
+   lines as it needs. */
 .svgtest-card-name {
   font-weight: 600;
   font-size: 0.8125rem;
   flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .svgtest-card-meta {
   padding: 0.25rem 0.75rem;
@@ -4968,12 +4963,17 @@ img.brand-icon {
   word-break: break-word;
 }
 
-/* ── Effort curve ─────────────────────────────────────── */
-.svgtest-curve {
+/* ── Capability scatter ───────────────────────────────── */
+.svgtest-scatter {
   padding: 0.5rem 0.75rem 0.75rem;
 }
-.svgtest-curve-svg { display: block; }
-.svgtest-curve-legend {
+.svgtest-scatter-svg { display: block; }
+.svgtest-scatter-hint {
+  font-size: 0.6875rem;
+  font-weight: 400;
+  color: var(--muted-foreground);
+}
+.svgtest-scatter-legend {
   display: flex;
   flex-wrap: wrap;
   gap: 0.375rem 0.875rem;
@@ -4981,24 +4981,31 @@ img.brand-icon {
   font-size: 0.6875rem;
   color: var(--muted-foreground);
 }
-.svgtest-curve-key {
+.svgtest-scatter-key {
   display: inline-flex;
   align-items: center;
   gap: 0.3125rem;
+  overflow-wrap: anywhere;
 }
-.svgtest-curve-key i {
+.svgtest-scatter-key i {
   width: 0.5rem;
   height: 0.5rem;
   border-radius: 9999px;
   flex: 0 0 auto;
 }
-.svgtest-curve-note {
+/* The size legend carries no swatch, so it is set apart from the model keys
+   rather than reading as one more model. */
+.svgtest-scatter-sizekey {
+  font-style: italic;
+  border-left: 1px solid var(--border);
+  padding-left: 0.875rem;
+}
+.svgtest-scatter-note {
   padding-top: 0.5rem;
   font-size: 0.6875rem;
   color: var(--muted-foreground);
 }
-.svgtest-score-badge,
-.svgtest-effort-badge { flex: 0 0 auto; }
+.svgtest-score-badge { flex: 0 0 auto; }
 
 /* ── Recent Requests error row ───────────────────────── */
 .usage-recent-error-row {

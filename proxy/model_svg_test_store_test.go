@@ -186,8 +186,8 @@ func TestGetSVGTestGroupEntriesRejectsTraversal(t *testing.T) {
 }
 
 func TestSVGEntryFileNameSeparatesModelAndAccount(t *testing.T) {
-	a := svgEntryFileName("gpt-4o", "acc-1", "", "")
-	b := svgEntryFileName("claude-opus-5", "acc-1", "", "")
+	a := svgEntryFileName("gpt-4o", "acc-1")
+	b := svgEntryFileName("claude-opus-5", "acc-1")
 	if a == b {
 		t.Errorf("two models on one account collided: %q == %q", a, b)
 	}
@@ -196,83 +196,31 @@ func TestSVGEntryFileNameSeparatesModelAndAccount(t *testing.T) {
 	}
 }
 
-// An empty mode must keep the legacy two-part name so results written before
-// modes existed still resolve; a non-empty mode appends a third segment. Model
-// ids pass through sanitizeIDForFile, so dots become underscores.
-func TestSVGEntryFileNameModeSuffix(t *testing.T) {
-	legacy := svgEntryFileName("glm-5.3", "acc-1", "", "")
-	raw := svgEntryFileName("glm-5.3", "acc-1", "raw", "")
-	think := svgEntryFileName("glm-5.3", "acc-1", "think", "")
-	if legacy != "glm-5_3--acc-1.json" {
-		t.Errorf("legacy name = %q, want glm-5_3--acc-1.json", legacy)
+// One pair has exactly one stored result now: every run sends the same bare
+// prompt with no knobs to vary, so the name is model plus account and nothing
+// else. Model ids pass through sanitizeIDForFile, so dots become underscores,
+// and two accounts holding the same model must not overwrite each other.
+func TestSVGEntryFileNameIsKeyedByPair(t *testing.T) {
+	if got := svgEntryFileName("glm-5.3", "acc-1"); got != "glm-5_3--acc-1.json" {
+		t.Errorf("name = %q, want glm-5_3--acc-1.json", got)
 	}
-	if raw != "glm-5_3--acc-1--raw.json" {
-		t.Errorf("raw name = %q, want glm-5_3--acc-1--raw.json", raw)
+	first := svgEntryFileName("qwen3.8-max-cn", "acc-1")
+	second := svgEntryFileName("qwen3.8-max-cn", "acc-2")
+	if first == second {
+		t.Errorf("two accounts on one model collided: %q == %q", first, second)
 	}
-	// The two modes of one pair must never collide, or one run overwrites the
-	// other and the raw-vs-think comparison the feature exists for is lost.
-	if raw == think || raw == legacy || think == legacy {
-		t.Errorf("mode names collided: legacy=%q raw=%q think=%q", legacy, raw, think)
-	}
-}
-
-// A sweep runs one pair at several reasoning efforts, and every rung must land in
-// its own file. If the effort were dropped from the name the last rung would
-// overwrite the rest and the curve would collapse to a single point — exactly
-// the comparison the sweep exists to produce.
-func TestSVGEntryFileNameEffortSuffix(t *testing.T) {
-	base := svgEntryFileName("qwen3.8-max-cn", "acc-1", "think", "")
-	low := svgEntryFileName("qwen3.8-max-cn", "acc-1", "think", "low")
-	medium := svgEntryFileName("qwen3.8-max-cn", "acc-1", "think", "medium")
-	high := svgEntryFileName("qwen3.8-max-cn", "acc-1", "think", "high")
-
-	if base != "qwen3_8-max-cn--acc-1--think.json" {
-		t.Errorf("pre-sweep think name = %q, want qwen3_8-max-cn--acc-1--think.json", base)
-	}
-	if low != "qwen3_8-max-cn--acc-1--think--low.json" {
-		t.Errorf("low rung name = %q, want qwen3_8-max-cn--acc-1--think--low.json", low)
-	}
-	seen := map[string]string{base: "base", low: "low", medium: "medium", high: "high"}
-	if len(seen) != 4 {
-		t.Errorf("sweep rungs collided: %v", seen)
-	}
-	// Effort only has meaning in think mode — raw forces reasoning off, so an
-	// effort there would imply a lever the run did not pull. It is dropped from
-	// the name to keep raw results comparable across sweeps.
-	if got := svgEntryFileName("qwen3.8-max-cn", "acc-1", "raw", "high"); got != "qwen3_8-max-cn--acc-1--raw.json" {
-		t.Errorf("raw with effort = %q, want the plain raw name qwen3_8-max-cn--acc-1--raw.json", got)
-	}
-	// An unrecognised effort must not invent a segment: the plain think file and
-	// the one for a bogus effort have to be the same file, or a typo silently
-	// forks a group the UI cannot address.
-	if got := svgEntryFileName("qwen3.8-max-cn", "acc-1", "think", "extreme"); got != base {
-		t.Errorf("unknown effort = %q, want the pre-sweep name %q", got, base)
-	}
-}
-
-func TestNormalizeSVGTestMode(t *testing.T) {
-	cases := map[string]string{
-		"raw": "raw", "RAW": "raw", "  raw ": "raw",
-		"think": "think", "Think": "think",
-		"": "", "both": "", "bogus": "", "rawx": "",
-	}
-	for in, want := range cases {
-		if got := normalizeSVGTestMode(in); got != want {
-			t.Errorf("normalizeSVGTestMode(%q) = %q, want %q", in, got, want)
+	// sanitizeIDForFile passes '-' through unchanged, so "--" is not escaped and a
+	// model id ending in one could in principle blur into the account id. That does
+	// not bite because account ids are UUIDs (12111913-21ce-442f-...) and a UUID
+	// never contains "--": the separator is unambiguous in practice, not by
+	// construction. Pin it, so a future non-UUID account id fails here first.
+	for _, acct := range []string{"12111913-21ce-442f-9ca7-ec3b9a6f6255", "15dc0b0a-2bf1-4525-b56a-f1f092ab67ea"} {
+		if strings.Contains(acct, "--") {
+			t.Errorf("account id %q contains the separator; entry names would be ambiguous", acct)
 		}
 	}
-}
-
-func TestResolveSVGTestMode(t *testing.T) {
-	// A bare API call has no UI to expand "both" into two requests, so empty,
-	// "both" and anything unknown all collapse to the raw single-call baseline.
-	cases := map[string]string{
-		"think": "think", "Think": "think",
-		"raw": "raw", "": "raw", "both": "raw", "bogus": "raw",
-	}
-	for in, want := range cases {
-		if got := resolveSVGTestMode(in); got != want {
-			t.Errorf("resolveSVGTestMode(%q) = %q, want %q", in, got, want)
-		}
+	if svgEntryFileName("qwen3.8-max-cn", "12111913-21ce-442f-9ca7-ec3b9a6f6255") !=
+		"qwen3_8-max-cn--12111913-21ce-442f-9ca7-ec3b9a6f6255.json" {
+		t.Error("real account id did not produce the expected entry name")
 	}
 }

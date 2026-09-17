@@ -25,8 +25,6 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 		Model     string `json:"model"`
 		Prompt    string `json:"prompt"`
 		AccountID string `json:"accountId"`
-		Mode      string `json:"mode"`
-		Effort    string `json:"effort"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -94,13 +92,6 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 	thinkingCfg := config.GetThinkingConfig()
 	actualModel, _ := ParseModelAndThinking(model, thinkingCfg.Suffix)
 
-	// The mode, not the model suffix, decides reasoning here: raw forces it off
-	// and think forces it on across every dialect, so the comparison isolates
-	// rendering ability from reasoning budget. The effort refines think mode for
-	// the sweep, where several rungs of one pair must land in one curve.
-	mode := resolveSVGTestMode(req.Mode)
-	effort := normalizeSVGTestEffort(req.Effort)
-
 	start := time.Now()
 
 	openaiReq := &OpenAIRequest{
@@ -109,7 +100,7 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 		MaxTokens: externalAnthropicDefaultMaxTokens,
 		Stream:    false,
 	}
-	kiroPayload := buildSVGTestPayload(openaiReq, actualModel, mode, effort)
+	kiroPayload := buildSVGTestPayload(openaiReq, actualModel)
 
 	var content string
 	var inTok, outTok int
@@ -149,8 +140,6 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 			AccountName: accountLabel(account),
 			Provider:    providerLabelOf(account.Provider),
 			Dialect:     externalAPIDialect(account),
-			Mode:        mode,
-			Effort:      effort,
 			Success:     false,
 			Error:       err.Error(),
 			ElapsedMs:   elapsed,
@@ -161,8 +150,6 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 			"success":     false,
 			"error":       err.Error(),
 			"model":       model,
-			"mode":        mode,
-			"effort":      effort,
 			"promptKey":   promptKey,
 			"accountId":   account.ID,
 			"accountName": accountLabel(account),
@@ -179,8 +166,6 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 		AccountName: accountLabel(account),
 		Provider:    providerLabelOf(account.Provider),
 		Dialect:     externalAPIDialect(account),
-		Mode:        mode,
-		Effort:      effort,
 		Success:     svg != "",
 		SVG:         svg,
 		Error:       failReason,
@@ -199,8 +184,6 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 		"error":         failReason,
 		"rawReply":      content,
 		"model":         model,
-		"mode":          mode,
-		"effort":        effort,
 		"promptKey":     promptKey,
 		"accountId":     account.ID,
 		"accountName":   accountLabel(account),

@@ -131,26 +131,29 @@ func TestLoadSVGTestGroupSummariesCarryScore(t *testing.T) {
 	}
 }
 
-// A sweep stores one pair at several efforts, and getSVGTestGroupEntries must
-// return them low-to-high so the curve is already ordered and the grid groups a
-// pair's rungs together.
-func TestGetSVGTestGroupEntriesOrdersSweepRungs(t *testing.T) {
+// getSVGTestGroupEntries feeds the comparison grid, so it must return results in
+// a stable model-then-account order rather than directory order: the grid groups
+// one model's accounts together, and a reader cannot follow a list that reshuffles
+// on every read.
+func TestGetSVGTestGroupEntriesOrdersByModelThenAccount(t *testing.T) {
 	dir := t.TempDir()
 	key := svgPromptKey("draw a pelican")
 	if err := saveSVGTestMeta(dir, key, "draw a pelican"); err != nil {
 		t.Fatalf("saveSVGTestMeta: %v", err)
 	}
-	// Seeded out of order and with a raw rung, to prove mode sorts before effort
-	// and effort sorts by spend rather than alphabetically.
-	order := []struct{ mode, effort string }{
-		{"think", "high"}, {"raw", ""}, {"think", "low"}, {"think", "medium"},
+	// Seeded out of alphabetical order on both axes.
+	order := []struct{ model, accountID, accountName string }{
+		{"qwen3.8-max", "acc-2", "zeta@example.com"},
+		{"glm-5.3", "acc-9", "alpha@example.com"},
+		{"qwen3.8-max", "acc-1", "beta@example.com"},
+		{"glm-5.3", "acc-3", "mid@example.com"},
 	}
 	for _, o := range order {
 		if err := saveSVGTestEntry(dir, svgTestEntry{
-			PromptKey: key, Model: "qwen3.8-max-cn", AccountID: "acc-1", AccountName: "beta@example.com",
-			Mode: o.mode, Effort: o.effort, Success: true, SVG: svgScoreFixture(30, "cx"), TokensUsed: 1000,
+			PromptKey: key, Model: o.model, AccountID: o.accountID, AccountName: o.accountName,
+			Success: true, SVG: svgScoreFixture(30, "cx"), TokensUsed: 1000,
 		}); err != nil {
-			t.Fatalf("seed %s/%s: %v", o.mode, o.effort, err)
+			t.Fatalf("seed %s/%s: %v", o.model, o.accountID, err)
 		}
 	}
 
@@ -158,12 +161,17 @@ func TestGetSVGTestGroupEntriesOrdersSweepRungs(t *testing.T) {
 	if len(entries) != 4 {
 		t.Fatalf("got %d entries, want 4", len(entries))
 	}
-	// raw sorts before think ("" < "raw" < "think"); think rungs follow low→high.
+	// Sorted by model first, then by account name.
 	got := make([]string, len(entries))
 	for i, e := range entries {
-		got[i] = e.Mode + "/" + e.Effort
+		got[i] = e.Model + " @ " + e.AccountName
 	}
-	want := []string{"raw/", "think/low", "think/medium", "think/high"}
+	want := []string{
+		"glm-5.3 @ alpha@example.com",
+		"glm-5.3 @ mid@example.com",
+		"qwen3.8-max @ beta@example.com",
+		"qwen3.8-max @ zeta@example.com",
+	}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("entry %d = %q, want %q (full order %v)", i, got[i], want[i], got)
@@ -171,11 +179,21 @@ func TestGetSVGTestGroupEntriesOrdersSweepRungs(t *testing.T) {
 	}
 }
 
-func TestSVGTestEffortRank(t *testing.T) {
-	cases := map[string]int{"": 0, "bogus": 0, "low": 1, "medium": 2, "high": 3, "max": 4}
-	for in, want := range cases {
-		if got := svgTestEffortRank(in); got != want {
-			t.Errorf("svgTestEffortRank(%q) = %d, want %d", in, got, want)
+func TestSVGTestResultLessOrdersModelThenAccount(t *testing.T) {
+	cases := []struct {
+		modelA, accountA, modelB, accountB string
+		want                               bool
+	}{
+		{"glm-5.3", "zeta", "qwen3.8-max", "alpha", true},  // model wins
+		{"qwen3.8-max", "alpha", "glm-5.3", "zeta", false}, // model wins the other way
+		{"glm-5.3", "alpha", "glm-5.3", "beta", true},      // same model: account decides
+		{"glm-5.3", "beta", "glm-5.3", "alpha", false},
+		{"glm-5.3", "alpha", "glm-5.3", "alpha", false}, // identical is not less-than
+	}
+	for _, tt := range cases {
+		if got := svgTestResultLess(tt.modelA, tt.accountA, tt.modelB, tt.accountB); got != tt.want {
+			t.Errorf("svgTestResultLess(%q,%q, %q,%q) = %v, want %v",
+				tt.modelA, tt.accountA, tt.modelB, tt.accountB, got, tt.want)
 		}
 	}
 }

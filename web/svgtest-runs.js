@@ -27,36 +27,11 @@ async function runSvgTest() {
   if (pairs.length === 0) { toast(t('svgtest.needSelection'), 'warning'); return; }
   const prompt = svgtestCurrentPrompt();
 
-  // The UI expands a "both" selection into one POST per mode; a single-mode
-  // selection posts once. The server runs exactly one mode per request and
-  // stores each under its own mode-suffixed filename, so raw and think never
-  // overwrite each other. A plain run leaves effort empty, which think mode
-  // reads as its own default.
-  const modes = svgtestState.mode === 'both' ? ['raw', 'think'] : [svgtestState.mode];
-  const jobs = [];
-  for (const p of pairs) {
-    for (const mode of modes) jobs.push({ model: p.model, accountId: p.accountId, mode: mode, effort: '' });
-  }
-  await runSvgTestJobs(jobs, prompt, ['svgtestRunBtn'], false);
-}
-
-// runSvgTestSweep posts think mode once per effort rung for each pair, so one
-// (model, account) accumulates a low→medium→high ladder in storage. That ladder
-// is what the curve plots: it shows whether a model actually buys quality with
-// more reasoning, or spends tokens for nothing. It is a separate button from Run
-// because it is several times the calls, and an operator comparing two modes
-// should not pay for a sweep they did not ask for.
-async function runSvgTestSweep() {
-  if (svgtestState.running) return;
-  const pairs = svgtestPlannedPairs();
-  if (pairs.length === 0) { toast(t('svgtest.needSelection'), 'warning'); return; }
-  const prompt = svgtestCurrentPrompt();
-  const levels = ['low', 'medium', 'high'];
-  const jobs = [];
-  for (const p of pairs) {
-    for (const effort of levels) jobs.push({ model: p.model, accountId: p.accountId, mode: 'think', effort: effort });
-  }
-  await runSvgTestJobs(jobs, prompt, ['svgtestSweepBtn'], true);
+  // One POST per (model, account) pair, each sending the same bare prompt. The
+  // server stores one result per pair, so a re-run replaces rather than
+  // accumulates — the grid always shows the latest reading of each pair.
+  const jobs = pairs.map(p => ({ model: p.model, accountId: p.accountId }));
+  await runSvgTestJobs(jobs, prompt, ['svgtestRunBtn']);
 }
 
 function svgtestCurrentPrompt() {
@@ -65,9 +40,9 @@ function svgtestCurrentPrompt() {
 }
 
 // runSvgTestJobs posts one job at a time and reports progress, then lands the UI
-// on the group the server wrote. `curve` asks for the effort curve to be rendered
-// afterwards, which only a sweep has the data for.
-async function runSvgTestJobs(jobs, prompt, buttonIds, curve) {
+// on the group the server wrote. The scatter follows the open group on its own,
+// so a run needs no extra flag to get one.
+async function runSvgTestJobs(jobs, prompt, buttonIds) {
   svgtestState.running = true;
   const status = document.getElementById('svgtestStatus');
   const buttons = buttonIds.map(id => document.getElementById(id)).filter(Boolean);
@@ -81,7 +56,7 @@ async function runSvgTestJobs(jobs, prompt, buttonIds, curve) {
   let reportedKey = '';
   const tasks = jobs.map(job => api('/test-model-svg', {
     method: 'POST',
-    body: JSON.stringify({ model: job.model, prompt: prompt, accountId: job.accountId, mode: job.mode, effort: job.effort }),
+    body: JSON.stringify({ model: job.model, prompt: prompt, accountId: job.accountId }),
   }).then(res => res.json().catch(() => ({}))).then(d => {
     if (d && d.promptKey) reportedKey = d.promptKey;
   }).catch(() => {}).finally(() => {
@@ -99,7 +74,7 @@ async function runSvgTestJobs(jobs, prompt, buttonIds, curve) {
   const groups = await loadSvgTestGroups();
   const known = new Set(groups.map(g => g.promptKey));
   const key = known.has(reportedKey) ? reportedKey : (groups[0] ? groups[0].promptKey : '');
-  selectSvgTestGroup(key, curve);
+  selectSvgTestGroup(key);
 }
 
 async function loadSvgTestGroups() {
@@ -131,10 +106,10 @@ function svgtestGroupOption(g) {
   return opt;
 }
 
-function selectSvgTestGroup(key, curve) {
+function selectSvgTestGroup(key) {
   const sel = document.getElementById('svgtestGroupHistory');
   if (sel) sel.value = key;
-  renderSvgTestGroup(key, curve);
+  renderSvgTestGroup(key);
 }
 
 function bindSvgTestEvents() {
@@ -142,8 +117,6 @@ function bindSvgTestEvents() {
   const byId = id => document.getElementById(id);
   const runBtn = byId('svgtestRunBtn');
   if (runBtn) runBtn.addEventListener('click', runSvgTest);
-  const sweepBtn = byId('svgtestSweepBtn');
-  if (sweepBtn) sweepBtn.addEventListener('click', runSvgTestSweep);
   const refresh = byId('svgtestRefreshBtn');
   if (refresh) refresh.addEventListener('click', loadSvgTestMatrix);
   const mf = byId('svgtestModelFilter');
@@ -170,25 +143,12 @@ function bindSvgTestEvents() {
   });
   const history = byId('svgtestGroupHistory');
   if (history) history.addEventListener('change', function () { renderSvgTestGroup(this.value); });
-  bindSvgTestModeGroup(byId('svgtestModeGroup'));
   const rmf = byId('svgtestResultModelFilter');
   if (rmf) rmf.addEventListener('input', function () {
     svgtestState.resultModelFilter = this.value.trim().toLowerCase();
     renderSvgTestGroup(svgtestState.currentGroup);
   });
   svgtestState.bound = true;
-}
-
-// bindSvgTestModeGroup wires the Raw / Think / Both segmented control. One
-// button is pressed at a time; aria-pressed drives the highlight in CSS so the
-// active mode is exposed to assistive tech as well as visually.
-function bindSvgTestModeGroup(group) {
-  if (!group) return;
-  const buttons = group.querySelectorAll('.svgtest-mode-btn');
-  buttons.forEach(btn => btn.addEventListener('click', () => {
-    svgtestState.mode = btn.dataset.mode;
-    buttons.forEach(b => b.setAttribute('aria-pressed', String(b === btn)));
-  }));
 }
 
 function initSvgTestPage() {

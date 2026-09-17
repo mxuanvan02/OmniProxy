@@ -26,8 +26,6 @@ type svgTestEntry struct {
 	AccountName  string   `json:"accountName"`
 	Provider     string   `json:"provider"`
 	Dialect      string   `json:"dialect,omitempty"`
-	Mode         string   `json:"mode,omitempty"`
-	Effort       string   `json:"effort,omitempty"`
 	Success      bool     `json:"success"`
 	SVG          string   `json:"svg"`
 	Error        string   `json:"error,omitempty"`
@@ -59,8 +57,6 @@ type svgTestSummary struct {
 	AccountName string `json:"accountName"`
 	Provider    string `json:"provider"`
 	Dialect     string `json:"dialect,omitempty"`
-	Mode        string `json:"mode,omitempty"`
-	Effort      string `json:"effort,omitempty"`
 	Success     bool   `json:"success"`
 	HasSVG      bool   `json:"hasSvg"`
 	Score       int    `json:"score"`
@@ -94,42 +90,12 @@ func svgTestStoreDir() string {
 	return filepath.Join(data, "svg-tests")
 }
 
-// normalizeSVGTestMode maps a caller-supplied mode onto one of the two stored
-// modes, or "" for anything else. "" means "legacy/unspecified": a result saved
-// before modes existed, or a run that did not ask for a specific one. Keeping
-// "" distinct from "raw" means the legacy files on disk stay readable and the
-// UI can badge them separately instead of mislabeling them as a raw run.
-func normalizeSVGTestMode(mode string) string {
-	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "raw":
-		return "raw"
-	case "think":
-		return "think"
-	default:
-		return ""
-	}
-}
-
-// svgEntryFileName keys a stored result by model, account, mode AND effort. The
-// mode suffix is what lets a raw and a think run of the same pair coexist; the
-// effort suffix is what lets several rungs of one sweep coexist instead of the
-// last one overwriting the rest. Effort is scoped to think mode: raw forces
-// reasoning off, so an effort there is a lever the run never pulled and naming a
-// file after it would fork identical raw runs. Empty segments keep the shorter
-// legacy name so results written before modes or efforts existed are still found
-// by the reader and delete. Account ids are UUIDs and both suffixes are fixed
-// words, so the separator stays unambiguous.
-func svgEntryFileName(model, accountID, mode, effort string) string {
-	stem := sanitizeIDForFile(model) + "--" + sanitizeIDForFile(accountID)
-	if m := normalizeSVGTestMode(mode); m != "" {
-		stem += "--" + m
-		if m == svgTestModeThink {
-			if e := normalizeSVGTestEffort(effort); e != "" {
-				stem += "--" + e
-			}
-		}
-	}
-	return stem + ".json"
+// svgEntryFileName keys a stored result by model and account, which is the whole
+// identity of a run now: every test sends the same bare prompt and no run-time
+// knobs, so one pair has exactly one result. Account ids are UUIDs, so the "--"
+// separator stays unambiguous.
+func svgEntryFileName(model, accountID string) string {
+	return sanitizeIDForFile(model) + "--" + sanitizeIDForFile(accountID) + ".json"
 }
 
 // saveSVGTestEntry writes one (model, account) result into the prompt group.
@@ -147,7 +113,7 @@ func saveSVGTestEntry(dir string, entry svgTestEntry) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(groupDir, svgEntryFileName(entry.Model, entry.AccountID, entry.Mode, entry.Effort)), data, 0o644)
+	return os.WriteFile(filepath.Join(groupDir, svgEntryFileName(entry.Model, entry.AccountID)), data, 0o644)
 }
 
 // saveSVGTestMeta records the group's prompt text once. Every result rewrites it

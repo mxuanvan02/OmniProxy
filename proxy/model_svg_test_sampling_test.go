@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"strings"
 	"testing"
 
 	"omniproxy/config"
@@ -110,102 +111,70 @@ func TestOpenAIToKiroMarksExplicitTemperature(t *testing.T) {
 	}
 }
 
-func TestNormalizeSVGTestEffort(t *testing.T) {
-	cases := map[string]string{
-		"low": "low", "LOW": "low", "  low ": "low",
-		"medium": "medium", "Medium": "medium",
-		"high": "high", "max": "max",
-		"": "", "extreme": "", "lowx": "", "raw": "", "think": "",
-	}
-	for in, want := range cases {
-		if got := normalizeSVGTestEffort(in); got != want {
-			t.Errorf("normalizeSVGTestEffort(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
-// The sweep walks this ladder low to high, so the levels must be exactly the
-// ascending set the UI offers and must not include "max" — the gateways that
-// accept it disagree on whether it means anything above "high", which would put
-// a guaranteed-empty rung on the curve.
-func TestSVGTestEffortLevels(t *testing.T) {
-	want := []string{"low", "medium", "high"}
-	if len(svgTestEffortLevels) != len(want) {
-		t.Fatalf("svgTestEffortLevels = %v, want %v", svgTestEffortLevels, want)
-	}
-	for i, level := range want {
-		if svgTestEffortLevels[i] != level {
-			t.Errorf("svgTestEffortLevels[%d] = %q, want %q", i, svgTestEffortLevels[i], level)
-		}
-		if svgTestEffortRank(level) == 0 {
-			t.Errorf("effort level %q ranks as unspecified", level)
-		}
-	}
-	for i := 1; i < len(svgTestEffortLevels); i++ {
-		if svgTestEffortRank(svgTestEffortLevels[i-1]) >= svgTestEffortRank(svgTestEffortLevels[i]) {
-			t.Errorf("ladder is not ascending at %q then %q", svgTestEffortLevels[i-1], svgTestEffortLevels[i])
-		}
-	}
-}
-
-// Reasoning effort is the only lever the sweep moves, so it must come from one
-// place: raw always turns reasoning off no matter what effort is passed, think
-// honours an explicit rung and otherwise falls back to the default. If a sweep
-// rung and a plain think run could drift apart the curve would not be measuring
-// the same thing at each point.
-func TestSVGTestReasoningEffort(t *testing.T) {
-	tests := []struct {
-		mode   string
-		effort string
-		want   string
-	}{
-		{"raw", "", ""},
-		{"raw", "high", ""},
-		{"raw", "max", ""},
-		{"think", "", svgTestThinkEffort},
-		{"think", "  HIGH ", "high"},
-		{"think", "low", "low"},
-		{"think", "medium", "medium"},
-		{"think", "max", "max"},
-		{"think", "extreme", svgTestThinkEffort},
-	}
-	for _, tt := range tests {
-		if got := svgTestReasoningEffort(tt.mode, tt.effort); got != tt.want {
-			t.Errorf("svgTestReasoningEffort(%q, %q) = %q, want %q", tt.mode, tt.effort, got, tt.want)
-		}
-	}
-}
-
-// buildSVGTestPayload must put the resolved effort on the payload, pin the
-// temperature, and force reasoning off in raw mode. This is what makes a sweep
-// rung an actual difference upstream rather than a label stored beside an
-// identical request.
-func TestBuildSVGTestPayloadAppliesEffort(t *testing.T) {
+// The whole measurement rests on the prompt going upstream bare: no injected
+// thinking preamble, and no reasoning level requested of any dialect. If either
+// leaked in, every result would be describing the proxy's configuration rather
+// than how the model chose to spend its own budget, and the comparison would be
+// measuring the test harness.
+func TestBuildSVGTestPayloadSendsTheBarePrompt(t *testing.T) {
+	const prompt = "draw a pelican riding a bicycle as SVG"
 	req := &OpenAIRequest{
 		Model:     "qwen3.8-max-cn",
-		Messages:  []OpenAIMessage{{Role: "user", Content: "draw"}},
+		Messages:  []OpenAIMessage{{Role: "user", Content: prompt}},
 		MaxTokens: externalAnthropicDefaultMaxTokens,
 	}
 
-	think := buildSVGTestPayload(req, "qwen3.8-max-cn", "think", "low")
-	if think.InferenceConfig == nil || think.InferenceConfig.ReasoningEffort != "low" {
-		t.Errorf("think/low reasoning effort = %+v, want low", think.InferenceConfig)
+	payload := buildSVGTestPayload(req, "qwen3.8-max-cn")
+
+	if payload.InferenceConfig == nil {
+		t.Fatal("payload lost its inference config")
 	}
-	if !think.InferenceConfig.HasTemperature || think.InferenceConfig.Temperature != svgTestDeterministicTemperature {
-		t.Errorf("think payload temperature = %+v, want the pinned %v", think.InferenceConfig, svgTestDeterministicTemperature)
+	if got := payload.InferenceConfig.ReasoningEffort; got != "" {
+		t.Errorf("reasoning effort = %q, want empty so no dialect turns thinking on", got)
+	}
+	if !payload.InferenceConfig.HasTemperature || payload.InferenceConfig.Temperature != svgTestDeterministicTemperature {
+		t.Errorf("temperature = %+v, want the pinned %v", payload.InferenceConfig, svgTestDeterministicTemperature)
 	}
 
-	raw := buildSVGTestPayload(req, "qwen3.8-max-cn", "raw", "high")
-	if raw.InferenceConfig == nil || raw.InferenceConfig.ReasoningEffort != "" {
-		t.Errorf("raw payload carried reasoning effort %+v, want it forced off", raw.InferenceConfig)
+	// The user turn must still be the operator's own words.
+	got := payload.ConversationState.CurrentMessage.UserInputMessage.Content
+	if !strings.Contains(got, prompt) {
+		t.Errorf("payload user content lost the operator's text: %q", got)
 	}
-	if !raw.InferenceConfig.HasTemperature {
-		t.Error("raw payload lost the temperature pin")
+	if strings.Contains(got, ThinkingModePrompt) {
+		t.Error("payload user content contains ThinkingModePrompt; the test must send the prompt as typed")
 	}
 
-	// Both modes must share one sampling so the only difference between a raw and
-	// a think run is reasoning.
-	if think.InferenceConfig.Temperature != raw.InferenceConfig.Temperature {
-		t.Errorf("modes disagree on temperature: think=%v raw=%v", think.InferenceConfig.Temperature, raw.InferenceConfig.Temperature)
+	// The translator injects a forced-reasoning preamble as a system priming pair
+	// at the head of history (translator.go:1361), and records that it did so.
+	// Neither must happen here: with no system message in the request there is
+	// nothing to prime with, and thinking must not be switched on for the model.
+	if payload.hasPriming {
+		t.Error("payload carries system priming; a bare prompt should inject none")
+	}
+	for i, h := range payload.ConversationState.History {
+		if h.UserInputMessage != nil && strings.Contains(h.UserInputMessage.Content, ThinkingModePrompt) {
+			t.Errorf("history[%d] contains ThinkingModePrompt; reasoning must not be forced on", i)
+		}
+	}
+}
+
+// A model family that rejects a temperature override must keep its own sampling
+// rather than be handed a pin that makes the upstream answer HTTP 400 — a 400
+// would be recorded as the model failing to draw, which is not what happened.
+func TestBuildSVGTestPayloadLeavesRejectingFamiliesAlone(t *testing.T) {
+	req := &OpenAIRequest{
+		Model:    "gpt-5.2",
+		Messages: []OpenAIMessage{{Role: "user", Content: "draw"}},
+	}
+	payload := buildSVGTestPayload(req, "gpt-5.2")
+	if payload.InferenceConfig == nil {
+		t.Fatal("payload lost its inference config")
+	}
+	if payload.InferenceConfig.HasTemperature {
+		t.Errorf("temperature pinned for a family that rejects overrides: %+v", payload.InferenceConfig)
+	}
+	if payload.InferenceConfig.ReasoningEffort != "" {
+		t.Errorf("reasoning effort = %q, want empty", payload.InferenceConfig.ReasoningEffort)
 	}
 }

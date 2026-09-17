@@ -13,7 +13,6 @@ let svgtestState = {
   selAccounts: new Set(),
   modelFilter: '',
   accountFilter: '',
-  mode: 'both',            // 'raw' | 'think' | 'both' — how each pair is run
   resultModelFilter: '',   // narrows the results grid by model name
   defaultPrompt: '',
   promptDirty: false,      // operator typed; stop overwriting the box on refresh
@@ -22,9 +21,6 @@ let svgtestState = {
   loading: false,
   bound: false,
   running: false,
-  sweeping: false,         // an effort sweep is in flight
-  curveVisible: false,     // the effort curve card is shown for the current group
-  lastEntries: [],         // full entry set of the current group, curve source
   deleting: false,
 };
 
@@ -189,34 +185,6 @@ function svgtestDialectBadge(dialect) {
     : d === 'anthropic' ? 'svgtest.dialectMessages'
       : d === 'chat' ? 'svgtest.dialectChat' : '';
   span.textContent = key ? t(key) : d;
-  return span;
-}
-
-// svgtestModeBadge tags a stored result with the run mode that produced it:
-// think (reasoning forced on) reads as info, raw (reasoning forced off) as
-// muted. Results saved before modes existed carry no mode and are badged as
-// legacy rather than silently folded into "raw" — they were run under the old
-// suffix-derived config, which is neither.
-function svgtestModeBadge(mode) {
-  const m = (mode || '').toLowerCase();
-  const span = document.createElement('span');
-  span.className = 'badge svgtest-mode-badge ' +
-    (m === 'think' ? 'badge-info' : m === 'raw' ? 'badge-muted' : 'badge-muted');
-  span.textContent = m === 'think' ? t('svgtest.badgeThink')
-    : m === 'raw' ? t('svgtest.badgeRaw')
-      : t('svgtest.badgeLegacy');
-  return span;
-}
-
-// svgtestEffortBadge tags a sweep rung with the reasoning effort it ran at. Only
-// think-mode runs carry one, so an empty effort renders nothing rather than a
-// misleading "—": a raw run did not pull that lever at all.
-function svgtestEffortBadge(effort) {
-  const e = (effort || '').toLowerCase();
-  if (!e) return null;
-  const span = document.createElement('span');
-  span.className = 'badge badge-info svgtest-effort-badge';
-  span.textContent = t('svgtest.badgeEffort', e);
   return span;
 }
 

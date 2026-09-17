@@ -5,21 +5,15 @@
 // grid and lets the operator drop a stored result (usually a failed attempt)
 // so it stops cluttering the comparison.
 
-async function renderSvgTestGroup(key, curve) {
+async function renderSvgTestGroup(key) {
   const box = document.getElementById('svgtestResults');
   if (!box) return;
   svgtestState.currentGroup = key || '';
   if (!key) {
     box.replaceChildren();
-    svgtestState.lastEntries = [];
-    svgtestState.curveVisible = false;
-    if (typeof hideSvgTestCurve === 'function') hideSvgTestCurve();
+    if (typeof hideSvgTestScatter === 'function') hideSvgTestScatter();
     return;
   }
-  // A run or sweep asks for the curve; a filter re-render (curve undefined)
-  // keeps whatever was showing, so narrowing by model name does not drop the
-  // curve the operator just produced.
-  if (curve !== undefined) svgtestState.curveVisible = !!curve;
   box.replaceChildren(svgtestEmpty('svgtest.loading'));
   let data;
   try {
@@ -27,17 +21,18 @@ async function renderSvgTestGroup(key, curve) {
     data = await res.json();
   } catch (e) { box.replaceChildren(svgtestEmpty('svgtest.loadError')); return; }
   const entries = Array.isArray(data.entries) ? data.entries : [];
-  svgtestState.lastEntries = entries;
   box.replaceChildren();
   const kw = svgtestState.resultModelFilter;
   const shown = kw ? entries.filter(e => (e.model || '').toLowerCase().includes(kw)) : entries;
-  if (shown.length === 0) { box.replaceChildren(svgtestEmpty('svgtest.noResults')); return; }
-  for (const e of shown) box.appendChild(buildSvgTestCard(e));
-  // The curve is drawn from the full entry set, not the filtered view: a sweep
-  // is per (model, account) pair, and filtering by model name must not drop a
-  // rung and leave a misleading line.
-  if (svgtestState.curveVisible && typeof renderSvgTestCurve === 'function') renderSvgTestCurve(entries);
-  else if (typeof hideSvgTestCurve === 'function') hideSvgTestCurve();
+  if (shown.length === 0) { box.replaceChildren(svgtestEmpty('svgtest.noResults')); }
+  else for (const e of shown) box.appendChild(buildSvgTestCard(e));
+  // The scatter belongs to whichever group is open, not only to one a run just
+  // produced: it is drawn from stored results, so a group picked from the history
+  // has everything the chart needs. It reads the full entry set, not the filtered
+  // view — the chart compares models against each other, and narrowing the grid by
+  // name must not drop one and leave a misleading spread.
+  if (typeof renderSvgTestScatter === 'function') renderSvgTestScatter(entries);
+  else if (typeof hideSvgTestScatter === 'function') hideSvgTestScatter();
 }
 
 function buildSvgTestCard(e) {
@@ -66,9 +61,8 @@ function buildSvgTestCard(e) {
   del.innerHTML = '<i class="fa-solid fa-trash" aria-hidden="true"></i>';
   del.addEventListener('click', () => deleteSvgTestEntry(e, del));
   // A failed run has no drawing to grade, so its "failed" badge already says it
-  // all; the score badge only appears on a real result. The effort badge is
-  // null for raw and legacy runs, which append() would drop, so filter it out.
-  const badges = [prov, svgtestDialectBadge(e.dialect), svgtestModeBadge(e.mode), svgtestEffortBadge(e.effort)];
+  // all; the score badge only appears on a real result.
+  const badges = [prov, svgtestDialectBadge(e.dialect)];
   if (ok) badges.push(svgtestScoreBadge(e.score));
   badges.push(state, del);
   head.append(model, name, ...badges.filter(Boolean));
@@ -116,9 +110,7 @@ async function deleteSvgTestEntry(e, btn) {
   if (btn) btn.disabled = true;
   const url = '/test-model-svg/groups/' + encodeURIComponent(key) + '/entries' +
     '?model=' + encodeURIComponent(e.model || '') +
-    '&accountId=' + encodeURIComponent(e.accountId || '') +
-    '&mode=' + encodeURIComponent(e.mode || '') +
-    '&effort=' + encodeURIComponent(e.effort || '');
+    '&accountId=' + encodeURIComponent(e.accountId || '');
   let res = null;
   try { res = await api(url, { method: 'DELETE' }); } catch (err) { res = null; }
   svgtestState.deleting = false;
@@ -138,6 +130,8 @@ async function deleteSvgTestEntry(e, btn) {
 // "n/a" rather than a number whenever the token count is missing, because some
 // chat gateways ignore stream_options.include_usage and report no usage at all;
 // a division by zero or a fabricated rate there would be a lie in the grid.
+// Latency goes through fmtElapsed: the real spread runs from a 403ms refusal to a
+// 451s generation, and a bare millisecond count cannot be compared at a glance.
 function svgtestCardMeta(e, ok) {
   const parts = [];
   if (ok) {
@@ -150,17 +144,36 @@ function svgtestCardMeta(e, ok) {
       parts.push(t('svgtest.efficiencyNA'));
     }
   }
-  parts.push((e.elapsedMs || 0) + 'ms');
-  if (e.tokensUsed) parts.push(e.tokensUsed + ' ' + t('svgtest.tokens'));
+  parts.push(fmtElapsed(e.elapsedMs));
+  if (e.tokensUsed) parts.push(fmtTokens(e.tokensUsed) + ' ' + t('svgtest.tokens'));
   return parts.join(' · ');
 }
 
-// Shared render primitives: the pickers (svgtest.js) and this grid both show
-// placeholder and empty rows, so they live here once for both.
+// Shared render primitives: the pickers (svgtest.js), this grid and the scatter
+// all need these, so they live here once for all three. This file loads before
+// svgtest-scatter.js, which is the direction the dependency has to point.
 function svgtestEmpty(key) {  const el = document.createElement('div');
   el.className = 'empty-state';
   el.textContent = t(key);
   return el;
+}
+
+// fmtElapsed renders the wall time a run actually took. The spread is enormous
+// in practice — 403ms for a refused call up to 451321ms for a model that thought
+// for seven and a half minutes — so the unit follows the magnitude. A bare
+// millisecond count cannot be compared at a glance, and comparing time between
+// models is half of what this feature measures.
+//
+// Both branches round through the value they are about to print. Without that a
+// time just under the next unit carries past it: 59999ms would render as "60.0s"
+// and 119900ms as "1m 60s", which read as errors rather than as roundings.
+function fmtElapsed(ms) {
+  const n = Number(ms) || 0;
+  if (n < 1000) return n + 'ms';
+  const secs = (n / 1000).toFixed(1);
+  if (Number(secs) < 60) return secs + 's';
+  const whole = Math.round(n / 1000);
+  return Math.floor(whole / 60) + 'm ' + (whole % 60) + 's';
 }
 
 function svgtestSkeleton(n) {

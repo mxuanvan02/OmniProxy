@@ -390,29 +390,18 @@
           </div>
 
           <div class="svgtest-run-row">
-            <div class="svgtest-mode-group" id="svgtestModeGroup" role="group"
-              data-i18n-aria-label="svgtest.modeLabel">
-              <button class="btn btn-outline btn-sm svgtest-mode-btn" type="button" data-mode="raw"
-                aria-pressed="false" data-i18n="svgtest.modeRaw"></button>
-              <button class="btn btn-outline btn-sm svgtest-mode-btn" type="button" data-mode="think"
-                aria-pressed="false" data-i18n="svgtest.modeThink"></button>
-              <button class="btn btn-outline btn-sm svgtest-mode-btn" type="button" data-mode="both"
-                aria-pressed="true" data-i18n="svgtest.modeBoth"></button>
-            </div>
             <button class="btn btn-primary" id="svgtestRunBtn" type="button">
               <i class="fa-solid fa-play" aria-hidden="true"></i><span data-i18n="svgtest.run"></span></button>
-            <button class="btn btn-outline" id="svgtestSweepBtn" type="button"
-              data-i18n-title="svgtest.sweepHint">
-              <i class="fa-solid fa-chart-line" aria-hidden="true"></i><span data-i18n="svgtest.sweep"></span></button>
             <span class="svgtest-status" id="svgtestStatus"></span>
           </div>
         </div>
 
-        <div class="card" id="svgtestCurveCard" hidden>
+        <div class="card" id="svgtestScatterCard" hidden>
           <div class="card-header">
-            <span class="card-title" data-i18n="svgtest.curveTitle"></span>
+            <span class="card-title" data-i18n="svgtest.scatterTitle"></span>
+            <span class="svgtest-scatter-hint" data-i18n="svgtest.scatterHint"></span>
           </div>
-          <div id="svgtestCurve" class="svgtest-curve"></div>
+          <div id="svgtestScatter" class="svgtest-scatter"></div>
         </div>
 
         <div class="card">
@@ -997,7 +986,7 @@
   <script>
     (function () {
       var v = window.__v || Date.now();
-      var scripts = ['/admin/toast.js', '/admin/app.js', '/admin/settings.js', '/admin/accounts.js', '/admin/combos.js', '/admin/apiCli.js', '/admin/usage.js', '/admin/quota.js', '/admin/logs.js', '/admin/svgtest.js', '/admin/svgtest-runs.js', '/admin/svgtest-results.js', '/admin/svgtest-curve.js'];
+      var scripts = ['/admin/toast.js', '/admin/app.js', '/admin/settings.js', '/admin/accounts.js', '/admin/combos.js', '/admin/apiCli.js', '/admin/usage.js', '/admin/quota.js', '/admin/logs.js', '/admin/svgtest.js', '/admin/svgtest-runs.js', '/admin/svgtest-results.js', '/admin/svgtest-scatter.js'];
       scripts.forEach(function (src) {
         var el = document.createElement('script');
         el.src = src + '?v=' + v;

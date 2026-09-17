@@ -64,7 +64,7 @@ func loadSVGTestGroup(groupDir, promptKey string) *svgTestGroupMeta {
 		meta.ResultCount++
 		meta.Results = append(meta.Results, svgTestSummary{
 			Model: entry.Model, AccountID: entry.AccountID, AccountName: entry.AccountName,
-			Provider: entry.Provider, Dialect: entry.Dialect, Mode: entry.Mode, Effort: entry.Effort,
+			Provider: entry.Provider, Dialect: entry.Dialect,
 			Success: entry.Success, HasSVG: entry.SVG != "", Score: entry.Score,
 		})
 	}
@@ -78,8 +78,8 @@ func loadSVGTestGroup(groupDir, promptKey string) *svgTestGroupMeta {
 	sort.Strings(meta.Models)
 	sort.Slice(meta.Results, func(i, j int) bool {
 		return svgTestResultLess(
-			meta.Results[i].Model, meta.Results[i].AccountName, meta.Results[i].Mode, meta.Results[i].Effort,
-			meta.Results[j].Model, meta.Results[j].AccountName, meta.Results[j].Mode, meta.Results[j].Effort,
+			meta.Results[i].Model, meta.Results[i].AccountName,
+			meta.Results[j].Model, meta.Results[j].AccountName,
 		)
 	})
 	return meta
@@ -102,43 +102,19 @@ func getSVGTestGroupEntries(dir, promptKey string) []svgTestEntry {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
-		return svgTestResultLess(out[i].Model, out[i].AccountName, out[i].Mode, out[i].Effort, out[j].Model, out[j].AccountName, out[j].Mode, out[j].Effort)
+		return svgTestResultLess(out[i].Model, out[i].AccountName, out[j].Model, out[j].AccountName)
 	})
 	return out
 }
 
 // svgTestResultLess orders results the way an operator reads them: grouped by
-// model, then by account, then by mode, then by reasoning effort. Putting
-// effort last keeps a sweep's low-to-high rungs adjacent inside one cell.
-func svgTestResultLess(modelA, accountA, modeA, effortA, modelB, accountB, modeB, effortB string) bool {
+// model, then by account. That pair is the whole identity of a result now — a
+// run sends the same bare prompt every time with no knobs to vary.
+func svgTestResultLess(modelA, accountA, modelB, accountB string) bool {
 	if modelA != modelB {
 		return modelA < modelB
 	}
-	if accountA != accountB {
-		return accountA < accountB
-	}
-	if modeA != modeB {
-		return modeA < modeB
-	}
-	return svgTestEffortRank(effortA) < svgTestEffortRank(effortB)
-}
-
-// svgTestEffortRank orders effort by increasing spend so a sweep curve is
-// already sorted low→high. Unspecified and unrecognised values rank first;
-// "max" is the top rung.
-func svgTestEffortRank(effort string) int {
-	switch normalizeSVGTestEffort(effort) {
-	case "low":
-		return 1
-	case "medium":
-		return 2
-	case "high":
-		return 3
-	case "max":
-		return 4
-	default:
-		return 0
-	}
+	return accountA < accountB
 }
 
 // readSVGTestEntry loads one entry file, returning nil for the metadata file,
