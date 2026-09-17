@@ -102,6 +102,51 @@ func TestReadSVGTestEntrySkipsNonEntries(t *testing.T) {
 	}
 }
 
+// Results written by the removed mode/effort scheme sit in the same group
+// directory under longer names (model--account--think--high.json). They must be
+// invisible to the reader: delete addresses a pair by its single current name,
+// so a legacy file that still rendered would be a card the operator can neither
+// remove nor replace — a re-run of the pair would add a second card beside it,
+// and the group could never report empty.
+func TestReadSVGTestEntrySkipsLegacyModeAndEffortFiles(t *testing.T) {
+	dir := t.TempDir()
+	key := svgPromptKey("draw a pelican")
+	groupDir := filepath.Join(dir, key)
+	if err := os.MkdirAll(groupDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// The contents are a perfectly valid entry; only the name is from the old
+	// scheme, which is exactly what a real archive left behind contains.
+	legacy := `{"promptKey":"` + key + `","model":"qwen3.8-max","accountId":"acc-1","success":false,"error":"HTTP 400 from host: Bad Request","tokensUsed":0}`
+	names := []string{"qwen3_8-max--acc-1--think--high.json", "qwen3_8-max--acc-1--raw.json"}
+	for _, name := range names {
+		if err := os.WriteFile(filepath.Join(groupDir, name), []byte(legacy), 0o644); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	for _, name := range names {
+		if got := readSVGTestEntry(filepath.Join(groupDir, name)); got != nil {
+			t.Errorf("%s produced %+v, want nil", name, got)
+		}
+	}
+	// The group views must agree with the single-file read, or the grid would
+	// still show what the delete cannot reach.
+	if entries := getSVGTestGroupEntries(dir, key); len(entries) != 0 {
+		t.Errorf("group entries = %d, want 0 (legacy files must not surface)", len(entries))
+	}
+	if meta := loadSVGTestGroup(groupDir, key); meta != nil {
+		t.Errorf("group summary = %+v, want nil for a legacy-only group", meta)
+	}
+	// The pair's current name still reads, so a fresh run of the pair is visible
+	// and deletable as usual.
+	if err := os.WriteFile(filepath.Join(groupDir, "qwen3_8-max--acc-1.json"), []byte(legacy), 0o644); err != nil {
+		t.Fatalf("write current name: %v", err)
+	}
+	if got := readSVGTestEntry(filepath.Join(groupDir, "qwen3_8-max--acc-1.json")); got == nil {
+		t.Error("the pair's current file was skipped, want it read")
+	}
+}
+
 // The group summary is what the history list renders, so it must carry the score
 // too — computed on read, matching the detail view.
 func TestLoadSVGTestGroupSummariesCarryScore(t *testing.T) {

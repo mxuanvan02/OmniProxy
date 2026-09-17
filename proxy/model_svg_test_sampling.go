@@ -51,8 +51,9 @@ func buildSVGTestPayload(openaiReq *OpenAIRequest, actualModel string) *KiroPayl
 		payload.InferenceConfig.HasTemperature = true
 	}
 	// Left empty on purpose. Every dialect builder omits its reasoning field when
-	// this is blank (external_openai.go, external_openai_responses.go and the
-	// anthropic path all gate on it), so no dialect turns reasoning on by itself
+	// this is blank — the chat path gates on it at external_openai.go, the
+	// responses path at responses_upstream.go and the anthropic path at
+	// external_anthropic_params.go — so no dialect turns reasoning on by itself
 	// and none is told how hard to think.
 	payload.InferenceConfig.ReasoningEffort = ""
 	return payload

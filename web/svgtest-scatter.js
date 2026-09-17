@@ -86,6 +86,20 @@ function svgtestScatterTicks(minLog, maxLog) {
   return ticks;
 }
 
+// svgtestScatterXTicks labels the token axis. The 1/2/5 ladder is what a log axis
+// wants, but a narrow spread can contain none of it — one stored result, or a
+// group whose runs all cost about the same, would otherwise draw its dots on an
+// axis with no number anywhere on it. When the ladder comes up empty the axis
+// falls back to naming the cheapest and dearest run in the group, which is the
+// one comparison a tight spread still makes.
+function svgtestScatterXTicks(minLog, maxLog, tokens) {
+  const ticks = svgtestScatterTicks(minLog, maxLog);
+  if (ticks.length > 0) return ticks;
+  const lo = Math.min.apply(null, tokens);
+  const hi = Math.max.apply(null, tokens);
+  return lo === hi ? [lo] : [lo, hi];
+}
+
 function renderSvgTestScatter(entries) {
   const card = document.getElementById('svgtestScatterCard');
   const box = document.getElementById('svgtestScatter');
@@ -134,7 +148,7 @@ function renderSvgTestScatter(entries) {
     html += '<text x="' + (pad.left - 6) + '" y="' + (y + 4) + '" text-anchor="end" fill="var(--muted-foreground)" font-size="10">' +
       Math.round(val) + '</text>';
   }
-  for (const v of svgtestScatterTicks(minLog, maxLog)) {
+  for (const v of svgtestScatterXTicks(minLog, maxLog, tokens)) {
     const x = xAt(v);
     html += '<line x1="' + x + '" y1="' + pad.top + '" x2="' + x + '" y2="' + (pad.top + ch) +
       '" stroke="var(--border)" stroke-opacity="0.2" stroke-width="1"/>';

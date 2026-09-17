@@ -132,11 +132,11 @@ func svgTestRetryable(err error) bool {
 	// The backoff ladder is calibrated for failures that clear on the next pick,
 	// not for a gateway that stayed silent for five minutes.
 	//
-	// Observed: a low|medium|high sweep of api.hcnsec.cn failed all three rungs at
-	// 300363ms, 300004ms and 300003ms, and a reasoning-off raw probe of the same
-	// pair failed identically at 300325ms. Raw mode proves the model was not
-	// out-thinking the clock, and four independent attempts landing within 360ms
-	// of each other proves the gateway was wedged rather than unlucky.
+	// Observed: three attempts at api.hcnsec.cn failed at 300363ms, 300004ms and
+	// 300003ms, and a fourth probe of the same pair with reasoning left off failed
+	// identically at 300325ms. That probe proves the model was not out-thinking the
+	// clock, and four independent attempts landing within 360ms of each other
+	// proves the gateway was wedged rather than unlucky.
 	//
 	// A slow model cannot produce this error. CallExternalOpenAI sets body["stream"]
 	// unconditionally (external_openai.go:326), so a responsive gateway sends its

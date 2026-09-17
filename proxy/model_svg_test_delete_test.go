@@ -120,3 +120,25 @@ func TestDeleteSVGTestEntryIsScopedToItsModel(t *testing.T) {
 		t.Fatalf("left = %+v, want only the qwen3.8-max entry", left)
 	}
 }
+
+// A group whose only remaining file is a legacy mode/effort result must still
+// report empty once the pair's current result is deleted. The reader ignores the
+// legacy name, so groupEmpty is true and the handler's cleanup removes the whole
+// directory, taking the unreadable leftover with it; without that, the prompt
+// would stay listed forever with nothing the grid can show or delete.
+func TestDeleteSVGTestEntryReportsEmptyDespiteLegacyFiles(t *testing.T) {
+	dir := t.TempDir()
+	seedSVGTestEntry(t, dir, "p-key7", "glm-5.3", "acct-a")
+	legacy := filepath.Join(dir, "p-key7", "glm-5_3--acct-a--think--high.json")
+	if err := os.WriteFile(legacy, []byte(`{"model":"glm-5.3","accountId":"acct-a","success":false}`), 0o644); err != nil {
+		t.Fatalf("seed legacy file: %v", err)
+	}
+
+	removed, groupEmpty, err := deleteSVGTestEntry(dir, "p-key7", "glm-5.3", "acct-a")
+	if err != nil || !removed {
+		t.Fatalf("removed=%v err=%v, want true/nil", removed, err)
+	}
+	if !groupEmpty {
+		t.Error("groupEmpty = false with only an unreadable legacy file left; the group cleanup would never fire")
+	}
+}

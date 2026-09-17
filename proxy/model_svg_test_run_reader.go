@@ -135,6 +135,17 @@ func readSVGTestEntry(path string) *svgTestEntry {
 	if json.Unmarshal(raw, &entry) != nil {
 		return nil
 	}
+	// A file counts as an entry only if its name is the key its own contents
+	// declare. Results written by the removed mode/effort scheme sit beside
+	// today's files under longer names (model--account--think--high.json), and
+	// reading anything that parses would surface them as rows that can never be
+	// deleted — delete addresses the pair's single current name — while a re-run
+	// of the pair adds a second card next to the ghost and keeps the group from
+	// ever reporting empty. Keying the read on the name the contents claim keeps
+	// reader and delete addressing the same file, whatever older schemes left.
+	if filepath.Base(path) != svgEntryFileName(entry.Model, entry.AccountID) {
+		return nil
+	}
 	if entry.Success {
 		entry.Score, entry.ScoreReasons = scoreSVG(entry.SVG)
 	} else {
