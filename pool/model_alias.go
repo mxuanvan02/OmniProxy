@@ -177,3 +177,35 @@ func (p *AccountPool) aliasCandidateAvailable(candidate string, now time.Time, a
 	}
 	return false
 }
+
+// FindAvailableFallbackModel returns the first operator-configured fallback the
+// pool can actually serve right now, or "" when none of them is healthy. Unlike
+// FindAvailableAliasModel it crosses model families: it is the last rescue for a
+// request the pool never served at all (a Claude name advertised on a Qwen-only
+// pool), where no deploy variant exists to fall back to. fallbacks is the
+// ordered Config.ModelFallbacks list; entries are normalized so the returned ID
+// matches the catalog name the upstream gateway serves. Caller must not hold
+// p.mu, and must only call this after the exact model and its same-family alias
+// both came back unavailable, so the happy path never pays for the scan.
+func (p *AccountPool) FindAvailableFallbackModel(fallbacks []string) string {
+	if p == nil || len(fallbacks) == 0 {
+		return ""
+	}
+	// Read config before taking p.mu to preserve the lock order used by Reload.
+	allowOverUsage := config.GetAllowOverUsage()
+	now := time.Now()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	seen := make(map[string]bool, len(fallbacks))
+	for _, fallback := range fallbacks {
+		candidate := normalizeCatalogModelID(fallback)
+		if candidate == "" || seen[candidate] {
+			continue
+		}
+		seen[candidate] = true
+		if p.aliasCandidateAvailable(candidate, now, allowOverUsage) {
+			return candidate
+		}
+	}
+	return ""
+}

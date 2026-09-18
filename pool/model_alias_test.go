@@ -59,8 +59,8 @@ func TestRankAliasCandidatesOrdering(t *testing.T) {
 	}
 	got := rankAliasCandidates("qwen3.8-max", key, names)
 	want := []string{
-		"qwen3.8-max",      // exact
-		"qwen3.8-max-cn",   // locale, configured order
+		"qwen3.8-max",    // exact
+		"qwen3.8-max-cn", // locale, configured order
 		"qwen3.8-max-on",
 		"qwen3.8-max-0901", // snapshot, newest first
 		"qwen3.8-max-0813",
@@ -132,5 +132,63 @@ func TestFindAvailableAliasModelIgnoresBehaviourVariants(t *testing.T) {
 
 	if got := p.FindAvailableAliasModel("qwen3.8-max"); got != "" {
 		t.Fatalf("alias = %q, want empty: agent variants are distinct models", got)
+	}
+}
+
+// The cross-family rescue must return the first fallback an eligible account
+// can serve, crossing model families where FindAvailableAliasModel stops. A
+// nil pool or an empty list must decline rather than invent a candidate.
+func TestFindAvailableFallbackModelNilPoolAndEmptyList(t *testing.T) {
+	var p *AccountPool
+	if got := p.FindAvailableFallbackModel([]string{"qwen3.8-max"}); got != "" {
+		t.Fatalf("nil pool returned %q, want empty", got)
+	}
+	p = newModelPool(config.Account{ID: "acc", AuthMethod: "external_openai"})
+	p.SetModelList("acc", []string{"qwen3.8-max"})
+	if got := p.FindAvailableFallbackModel(nil); got != "" {
+		t.Fatalf("empty fallback list returned %q, want empty", got)
+	}
+}
+
+// A request the pool never served (a Claude name on a Qwen-only pool) has no
+// same-family variant, so the cross-family list is the only rescue. The first
+// servable entry wins, an unavailable earlier entry is skipped, and the
+// returned ID is the normalized catalog name the upstream gateway serves.
+func TestFindAvailableFallbackModelPicksFirstServable(t *testing.T) {
+	p := newModelPool(
+		config.Account{ID: "qwen", AuthMethod: "external_openai"},
+	)
+	p.SetModelList("qwen", []string{"qwen3.8-max", "glm-5.3"})
+
+	// Exact claude-opus-5 is not in any catalog, so the family rescue declines.
+	if got := p.FindAvailableAliasModel("claude-opus-5"); got != "" {
+		t.Fatalf("alias = %q, want empty: claude family has no pooled member", got)
+	}
+	// The first fallback is unhealthy (no account serves it), the second wins.
+	got := p.FindAvailableFallbackModel([]string{"deepseek-chat", "qwen3.8-max", "glm-5.3"})
+	if got != "qwen3.8-max" {
+		t.Fatalf("fallback = %q, want qwen3.8-max", got)
+	}
+}
+
+// A fallback whose only account is cooling down must be skipped so the rescue
+// never offers a model the pool would then reject.
+func TestFindAvailableFallbackModelSkipsCoolingAccount(t *testing.T) {
+	p := newModelPool(
+		config.Account{ID: "qwen", AuthMethod: "external_openai"},
+		config.Account{ID: "glm", AuthMethod: "external_openai"},
+	)
+	p.SetModelList("qwen", []string{"qwen3.8-max"})
+	p.SetModelList("glm", []string{"glm-5.3"})
+
+	p.cooldowns["qwen"] = time.Now().Add(time.Minute)
+	got := p.FindAvailableFallbackModel([]string{"qwen3.8-max", "glm-5.3"})
+	if got != "glm-5.3" {
+		t.Fatalf("fallback = %q, want glm-5.3 after qwen cools down", got)
+	}
+
+	p.cooldowns["glm"] = time.Now().Add(time.Minute)
+	if got := p.FindAvailableFallbackModel([]string{"qwen3.8-max", "glm-5.3"}); got != "" {
+		t.Fatalf("fallback = %q, want empty when every fallback cools down", got)
 	}
 }

@@ -195,6 +195,31 @@ func SetExtraModels(ids []string) error {
 	return saveLocked()
 }
 
+// GetModelFallbacks returns a snapshot of the ordered cross-family fallback
+// list used when a requested model has no healthy account and no same-family
+// variant either. See Config.ModelFallbacks for the rationale.
+func GetModelFallbacks() []string {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil {
+		return nil
+	}
+	out := make([]string, len(cfg.ModelFallbacks))
+	copy(out, cfg.ModelFallbacks)
+	return out
+}
+
+// SetModelFallbacks replaces the cross-family fallback list and persists it.
+func SetModelFallbacks(ids []string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if cfg == nil {
+		return errors.New("config not initialized")
+	}
+	cfg.ModelFallbacks = append([]string(nil), ids...)
+	return saveLocked()
+}
+
 // PublishDiscoveredModels reports whether the default /v1/models response
 // includes the account-discovered model cache. See Config.PublishDiscoveredModels.
 func PublishDiscoveredModels() bool {

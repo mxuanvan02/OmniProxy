@@ -613,6 +613,15 @@ type Config struct {
 	// downstream agents (e.g. Hermes) don't auto-correct them away.
 	ExtraModels []string `json:"extraModels,omitempty"`
 
+	// ModelFallbacks is an ordered list of models to serve when the requested
+	// model has no healthy account AND no same-family deploy variant either —
+	// the cross-family rescue for a request the pool never served (e.g. a
+	// Claude name advertised via ExtraModels on a Qwen-only pool). The first
+	// entry an eligible account can answer with wins; an empty list disables
+	// the rescue and preserves the historical "No available accounts" 503.
+	// Typically the pool's main model, so a mis-pinned sub-agent still runs.
+	ModelFallbacks []string `json:"modelFallbacks,omitempty"`
+
 	// PublishDiscoveredModels advertises the account-discovered model cache in
 	// the default /v1/models response — the same set ?catalog=all exposes.
 	// Off by default so conservative clients keep the canonical catalog;
