@@ -16,6 +16,14 @@ import (
 // surfaces send byte-identical text and therefore land in the same prompt group.
 const defaultSVGPrompt = `Tạo một tệp HTML với nội dung là hình động 2D vẽ một con bồ nông đang đạp xe đạp bằng SVG. Yêu cầu bắt buộc: SVG hợp lệ có thuộc tính viewBox, dùng thẻ <animate> (SMIL) cho chuyển động (bánh xe đạp quay, thân chim nhấp nhô), không tham chiếu tài nguyên bên ngoài. Chỉ trả về mã SVG thô — không markdown fence, không giải thích, không thẻ bao ngoài.`
 
+// svgTestMaxTokens caps the reply. Heavy-reasoning models (deepseek-v4.1-flash)
+// spend the whole 8192 default Anthropic budget thinking and emit an empty
+// content, which reads as "empty reply from model" even though the model can
+// draw. This is an output ceiling, not a target: non-reasoning models still
+// stop after a few KB. Raised so reasoning has room to finish and still leave
+// budget for the SVG itself.
+const svgTestMaxTokens = 32000
+
 // apiTestModelSVG sends a prompt that asks the model to generate an SVG image,
 // then extracts and returns the raw SVG markup. This tests whether the model
 // can follow complex visual instructions and produce valid structured output —
@@ -97,7 +105,7 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 	openaiReq := &OpenAIRequest{
 		Model:     actualModel,
 		Messages:  []OpenAIMessage{{Role: "user", Content: prompt}},
-		MaxTokens: externalAnthropicDefaultMaxTokens,
+		MaxTokens: svgTestMaxTokens,
 		Stream:    false,
 	}
 	kiroPayload := buildSVGTestPayload(openaiReq, actualModel)
@@ -107,7 +115,18 @@ func (h *Handler) apiTestModelSVG(w http.ResponseWriter, r *http.Request) {
 	var stopReason string
 	var attemptProduced bool
 	callback := &KiroStreamCallback{
-		OnText:         func(text string, _ bool) { content += text; attemptProduced = true },
+		OnText: func(text string, isThinking bool) {
+			// Reasoning models (e.g. qwen3.8-max) narrate before drawing and often
+			// echo a literal <svg>...</svg> mid-thought. Folding that into content
+			// makes extractSVG grab the first <svg (in the reasoning) and the last
+			// </svg> (the real answer), swallowing the whole monologue. Keep only
+			// the answer channel; reasoning still counts as produced output.
+			attemptProduced = true
+			if isThinking {
+				return
+			}
+			content += text
+		},
 		OnToolUse:      func(_ KiroToolUse) { attemptProduced = true },
 		OnComplete:     func(in, out int) { inTok, outTok = in, out },
 		OnStopReason:   func(reason string) { stopReason = reason },
