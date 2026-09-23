@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { AccountsView } from './components/AccountsView'
 import { ApiView } from './components/ApiView'
+import { CapabilitiesView } from './components/CapabilitiesView'
 import { Login } from './components/Login'
 import { LogsView } from './components/LogsView'
 import { Overview } from './components/Overview'
@@ -24,7 +25,7 @@ import {
   type UsageStats,
 } from './lib/api'
 
-const VALID_SECTIONS: Section[] = ['overview', 'accounts', 'providers', 'usage', 'quota', 'modeltest', 'api', 'settings', 'logs']
+const VALID_SECTIONS: Section[] = ['overview', 'accounts', 'capabilities', 'providers', 'usage', 'quota', 'modeltest', 'api', 'settings', 'logs']
 const EMPTY_CAPABILITIES: CapabilityMatrix = { capabilities: [], accounts: [] }
 const UsageView = lazy(() => import('./components/UsageView').then((module) => ({ default: module.UsageView })))
 const ModelTestView = lazy(() => import('./components/ModelTestView').then((module) => ({ default: module.ModelTestView })))
@@ -145,6 +146,8 @@ export function App() {
     ? <Overview status={status} usage={usage} accounts={accounts} onNavigate={setSection} />
     : section === 'accounts'
       ? <AccountsView accounts={accounts} capabilityMatrix={capabilities} onProbe={probeCapabilities} probingAccountId={probingAccountId} onReload={load} />
+      : section === 'capabilities'
+      ? <CapabilitiesView capabilities={capabilities} />
       : section === 'providers'
         ? <ProvidersView accounts={accounts} usage={usage} pool={pool} period={usagePeriod} onPeriod={setUsagePeriod} onReload={load} />
         : section === 'usage'

@@ -62,7 +62,7 @@
   "accounts.trialDays": "天后到期",
   "accounts.copyJSON": "复制 JSON",
   "accounts.copyJSONSuccess": "JSON 已复制到剪贴板",
-"accounts.copyVerifyLink": "复制验证链接",
+  "accounts.copyVerifyLink": "复制验证链接",
   "accounts.copyVerifyLinkSuccess": "验证链接已复制",
   "accounts.overage": "超额调用",
   "accounts.overageOn": "超额开",
@@ -237,6 +237,11 @@
   "detail.allowedModelsUnrestricted": "不限制：目录中的所有模型都可路由到该账号。",
   "detail.allowedModelsCount": "已限制为 {0} 个模型。",
   "detail.allowedModelsEmpty": "缓存中暂无模型，请点击加载实时目录。",
+  "detail.modelKindChat": "对话",
+  "detail.modelKindImage": "图像生成",
+  "detail.modelKindVoice": "语音 / 音频",
+  "detail.modelKindVideo": "视频",
+  "detail.modelKindEmbedding": "嵌入 / 重排",
   "detail.loading": "加载中...",
   "detail.noModels": "无可用模型",
   "detail.loadFailed": "加载失败",
@@ -1104,5 +1109,9 @@
   "svgtest.scoreReasons": "失分项",
   "svgtest.efficiency": "{0} 分/1k tok",
   "svgtest.efficiencyNA": "效率 n/a",
-  "svgtest.tokens": "token"
+  "svgtest.tokens": "token",
+  "tabs.capabilities": "能力",
+  "capabilities.title": "能力 (Capabilities)",
+  "capabilities.refresh": "刷新",
+  "capabilities.hint": "OmniProxy 提供的每类 API — 聊天、图像、语音、视频、音乐、嵌入 — 附带验证状态和供 Agent/CLI 使用的端点。"
 }

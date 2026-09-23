@@ -62,7 +62,7 @@
   "accounts.trialDays": "ngày còn lại",
   "accounts.copyJSON": "Sao chép JSON",
   "accounts.copyJSONSuccess": "Đã sao chép JSON vào clipboard",
-"accounts.copyVerifyLink": "Sao chép link xác thực",
+  "accounts.copyVerifyLink": "Sao chép link xác thực",
   "accounts.copyVerifyLinkSuccess": "Đã sao chép link xác thực",
   "accounts.overage": "Vượt hạn mức",
   "accounts.overageOn": "Vượt hạn mức:BẬT",
@@ -237,6 +237,11 @@
   "detail.allowedModelsUnrestricted": "Không giới hạn: mọi model trong danh mục đều được định tuyến.",
   "detail.allowedModelsCount": "Đang giới hạn ở {0} model.",
   "detail.allowedModelsEmpty": "Bộ nhớ đệm chưa có model. Bấm tải danh mục trực tiếp.",
+  "detail.modelKindChat": "Chat",
+  "detail.modelKindImage": "Sinh hình ảnh",
+  "detail.modelKindVoice": "Giọng nói / âm thanh",
+  "detail.modelKindVideo": "Video",
+  "detail.modelKindEmbedding": "Embedding / rerank",
   "detail.loading": "Đang tải...",
   "detail.noModels": "Không có model khả dụng",
   "detail.loadFailed": "Tải thất bại",
@@ -1104,5 +1109,9 @@
   "svgtest.scoreReasons": "Điểm bị trừ",
   "svgtest.efficiency": "{0} điểm/1k tok",
   "svgtest.efficiencyNA": "hiệu suất n/a",
-  "svgtest.tokens": "token"
+  "svgtest.tokens": "token",
+  "tabs.capabilities": "Năng lực",
+  "capabilities.title": "Năng lực (Capabilities)",
+  "capabilities.refresh": "Làm mới",
+  "capabilities.hint": "Từng loại API OmniProxy phục vụ — chat, ảnh, giọng nói, video, nhạc, embedding — kèm trạng thái xác minh và endpoint để Agent/CLI trỏ vào."
 }

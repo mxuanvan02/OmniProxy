@@ -62,7 +62,7 @@
   "accounts.trialDays": "d left",
   "accounts.copyJSON": "Copy JSON",
   "accounts.copyJSONSuccess": "JSON copied to clipboard",
-"accounts.copyVerifyLink": "Copy verification link",
+  "accounts.copyVerifyLink": "Copy verification link",
   "accounts.copyVerifyLinkSuccess": "Verification link copied",
   "accounts.overage": "Overage",
   "accounts.overageOn": "Overage:ON",
@@ -237,6 +237,11 @@
   "detail.allowedModelsUnrestricted": "Unrestricted: every catalog model may route here.",
   "detail.allowedModelsCount": "Restricted to {0} model(s).",
   "detail.allowedModelsEmpty": "No cached models yet. Use load live catalog.",
+  "detail.modelKindChat": "Chat",
+  "detail.modelKindImage": "Image generation",
+  "detail.modelKindVoice": "Voice / audio",
+  "detail.modelKindVideo": "Video",
+  "detail.modelKindEmbedding": "Embedding / rerank",
   "detail.loading": "Loading...",
   "detail.noModels": "No models available",
   "detail.loadFailed": "Load failed",
@@ -1104,5 +1109,9 @@
   "svgtest.scoreReasons": "Lost points",
   "svgtest.efficiency": "{0} pts/1k tok",
   "svgtest.efficiencyNA": "efficiency n/a",
-  "svgtest.tokens": "tokens"
+  "svgtest.tokens": "tokens",
+  "tabs.capabilities": "Capabilities",
+  "capabilities.title": "Capabilities",
+  "capabilities.refresh": "Refresh",
+  "capabilities.hint": "Each API type OmniProxy serves — chat, image, voice, video, music, embedding — with verification status and the endpoint an Agent/CLI can point at."
 }

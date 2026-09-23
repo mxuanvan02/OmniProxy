@@ -1524,14 +1524,26 @@ let detailAllowedError = '';
           if (b.modelId === 'auto') return 1;
           return (a.rateMultiplier || 1) - (b.rateMultiplier || 1);
         });
-        c.innerHTML = sorted.map(m => {
+        const modelCard = m => {
           const ratio = m.rateMultiplier || 1;
           return '<div class="model-item">' +
             '<div class="model-name">' + escapeHtml(m.modelId) + '</div>' +
             '<div class="model-credit"><span class="credit-ratio">' + escapeHtml(t('detail.creditMultiplier', ratio)) + '</span></div>' +
             '<div class="model-info">' + escapeHtml(m.description || '') + '</div>' +
             '</div>';
-        }).join('') || '<p class="empty-state">' + escapeHtml(t('detail.noModels')) + '</p>';
+        };
+        const byKind = {};
+        sorted.forEach(m => {
+          const kind = classifyModelKind(m.modelId);
+          (byKind[kind] = byKind[kind] || []).push(m);
+        });
+        c.innerHTML = MODEL_KIND_ORDER
+          .filter(kind => byKind[kind] && byKind[kind].length)
+          .map(kind =>
+            '<div class="model-kind-header" style="font-weight:600;margin:0.6rem 0 0.25rem;opacity:0.75">' +
+            escapeHtml(modelKindLabel(kind)) + ' (' + byKind[kind].length + ')</div>' +
+            byKind[kind].map(modelCard).join('')
+          ).join('') || '<p class="empty-state">' + escapeHtml(t('detail.noModels')) + '</p>';
       } else {
         c.innerHTML = '<p class="message message-error">' + escapeHtml(t('detail.loadFailed')) + ': ' + escapeHtml(d.error || '') + '</p>';
         toast(t('detail.loadFailed') + (d.error ? ': ' + d.error : ''), 'error');
@@ -1562,6 +1574,10 @@ let detailAllowedError = '';
       ? t('detail.allowedModelsUnrestricted')
       : t('detail.allowedModelsCount', detailAllowedSelected.size);
   }
+  // Model-capability classifier lives in the shared model-kind.js (loaded
+  // blocking before this script) so accounts.js and app.js stay in sync. It is
+  // referenced directly, like escapeHtml: re-declaring these names here would
+  // be a global lexical collision with model-kind.js and fail the whole file.
   function renderAllowedModels() {
     const box = $('allowedModelsBox');
     if (!box) return;
@@ -1586,11 +1602,23 @@ let detailAllowedError = '';
       box.innerHTML = summary + '<p class="empty-state">' + escapeHtml(detailAllowedError || t('detail.allowedModelsEmpty')) + '</p>';
       return;
     }
-    box.innerHTML = summary + options.map(id =>
+    const groups = {};
+    options.forEach(id => {
+      const kind = classifyModelKind(id);
+      (groups[kind] = groups[kind] || []).push(id);
+    });
+    const modelRow = id =>
       '<label class="model-item" style="grid-template-columns:auto 1fr">' +
       '<input type="checkbox" class="allowedModelBox" value="' + escapeAttr(id) + '"' + (detailAllowedSelected.has(id) ? ' checked' : '') + ' />' +
-      '<span class="model-name">' + escapeHtml(id) + '</span></label>'
-    ).join('') + errorBlock;
+      '<span class="model-name">' + escapeHtml(id) + '</span></label>';
+    const sections = MODEL_KIND_ORDER
+      .filter(kind => groups[kind] && groups[kind].length)
+      .map(kind =>
+        '<div class="model-kind-header" style="font-weight:600;margin:0.6rem 0 0.25rem;opacity:0.75">' +
+        escapeHtml(modelKindLabel(kind)) + ' (' + groups[kind].length + ')</div>' +
+        groups[kind].map(modelRow).join('')
+      ).join('');
+    box.innerHTML = summary + sections + errorBlock;
   }
   function syncAllowedModelsFromDom() {
     const boxes = Array.from(qsa('.allowedModelBox'));

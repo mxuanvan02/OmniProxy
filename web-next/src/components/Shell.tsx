@@ -1,9 +1,10 @@
 import type { ReactNode } from 'react'
 
-export type Section = 'overview'|'accounts'|'providers'|'usage'|'quota'|'api'|'settings'|'logs'|'modeltest'
+export type Section = 'overview'|'accounts'|'capabilities'|'providers'|'usage'|'quota'|'api'|'settings'|'logs'|'modeltest'
 const items: Array<{id:Section; label:string; hint:string; icon:string}> = [
   {id:'overview',label:'Tổng quan',hint:'Sức khoẻ hệ thống',icon:'⌂'},
   {id:'accounts',label:'Tài khoản',hint:'Pool & model',icon:'◎'},
+  {id:'capabilities',label:'Năng lực',hint:'Chat, ảnh, giọng nói…',icon:'✦'},
   {id:'providers',label:'Nhà cung cấp',hint:'Vendor, model & lỗi',icon:'⇄'},
   {id:'usage',label:'Sử dụng',hint:'Token & chi phí',icon:'↗'},
   {id:'quota',label:'Hạn mức',hint:'Quota & reset',icon:'◔'},

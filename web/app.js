@@ -692,12 +692,21 @@ let customSelectRefreshQueued = false;
       const list = $('modelsPanelList');
       const models = window.__availableModels || [];
       if (list) {
-        list.innerHTML = models.length === 0
-          ? '<span class="empty-state">No models</span>'
-          : models.map(function (id) {
-              const cls = id === 'auto' ? ' models-panel-chip models-panel-chip--auto' : ' models-panel-chip';
-              return '<span class="' + cls.trim() + '">' + escapeHtml(id) + '</span>';
-            }).join('');
+        const chip = function (id) {
+          const cls = id === 'auto' ? ' models-panel-chip models-panel-chip--auto' : ' models-panel-chip';
+          return '<span class="' + cls.trim() + '">' + escapeHtml(id) + '</span>';
+        };
+        if (models.length === 0) {
+          list.innerHTML = '<span class="empty-state">No models</span>';
+        } else if (typeof window.groupModelsByKind === 'function') {
+          list.innerHTML = window.groupModelsByKind(models).map(function (g) {
+            return '<div class="model-kind-header" style="font-weight:600;margin:0.6rem 0 0.25rem;opacity:0.75;width:100%">' +
+              escapeHtml(g.label) + ' (' + g.ids.length + ')</div>' +
+              g.ids.map(chip).join('');
+          }).join('');
+        } else {
+          list.innerHTML = models.map(chip).join('');
+        }
       }
       panel.classList.remove('hidden');
     } else {
@@ -875,6 +884,7 @@ let customSelectRefreshQueued = false;
     else { if (typeof destroyLogsPage === 'function') destroyLogsPage(); }
     if (tab === 'svgtest') { if (typeof initSvgTestPage === 'function') initSvgTestPage(); }
     if (tab === 'accounts') { if (typeof loadCombos === 'function') loadCombos(); }
+    if (tab === 'capabilities') { if (typeof initCapabilitiesPage === 'function') initCapabilitiesPage(); }
     if (tab === 'api') { renderCliTools(); if (apiKeysCache.length === 0) loadApiKeys(); loadCliToolStatus(); }
   }
   // Event wiring

@@ -5384,3 +5384,43 @@ img.brand-icon {
 .quota-page-btn:hover:not(:disabled) { background: var(--accent); }
 .quota-page-btn:disabled { opacity: 0.4; cursor: not-allowed; }
 .quota-page-info { font-size: 12px; color: var(--muted-foreground); }
+
+/* Capabilities tab */
+.cap-hint { font-size: 13px; color: var(--muted-foreground); margin: 0 0 1rem; }
+.cap-empty { padding: 2rem; text-align: center; color: var(--muted-foreground); font-size: 14px; }
+.cap-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0.75rem; margin-bottom: 1.5rem; }
+@media (min-width: 640px) { .cap-stats { grid-template-columns: repeat(4, 1fr); } }
+.cap-stat { border: 1px solid var(--border); border-radius: 12px; background: var(--card); padding: 0.85rem 1rem; }
+.cap-stat-value { font-size: 1.6rem; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--foreground); }
+.cap-stat-value.cap-stat-ok { color: var(--success); }
+.cap-stat-value.cap-stat-warn { color: var(--warning); }
+.cap-stat-value.cap-stat-muted { color: var(--muted-foreground); }
+.cap-stat-label { margin-top: 0.2rem; font-size: 12px; color: var(--muted-foreground); }
+
+.cap-group { margin-bottom: 1.5rem; }
+.cap-group-head { display: flex; align-items: center; gap: 0.5rem; margin-bottom: 0.75rem; flex-wrap: wrap; }
+.cap-group-hint { font-size: 12px; color: var(--muted-foreground); }
+.cap-badge { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.cap-badge .cap-dot { width: 6px; height: 6px; border-radius: 999px; background: currentColor; }
+.cap-badge.cap-tone-verified { background: color-mix(in srgb, var(--success) 16%, transparent); color: var(--success); }
+.cap-badge.cap-tone-available { background: color-mix(in srgb, var(--warning) 20%, transparent); color: var(--warning); }
+.cap-badge.cap-tone-none { background: var(--muted); color: var(--muted-foreground); }
+
+.cap-grid { display: grid; grid-template-columns: 1fr; gap: 0.75rem; }
+@media (min-width: 768px) { .cap-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 1200px) { .cap-grid { grid-template-columns: repeat(3, 1fr); } }
+.cap-card { border: 1px solid var(--border); border-radius: 12px; background: var(--card); padding: 0.85rem 1rem; }
+.cap-card.cap-tone-verified { border-color: color-mix(in srgb, var(--success) 55%, var(--border)); }
+.cap-card.cap-tone-available { border-color: color-mix(in srgb, var(--warning) 55%, var(--border)); }
+.cap-card.cap-tone-none { opacity: 0.7; }
+.cap-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.5rem; }
+.cap-card-head h3 { margin: 0; font-size: 14px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cap-count { flex-shrink: 0; font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums; color: var(--muted-foreground); }
+.cap-card-sub { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.35rem; flex-wrap: wrap; }
+.cap-code { display: inline-block; padding: 1px 6px; border-radius: 5px; background: var(--muted); color: var(--muted-foreground); font-size: 10px; }
+.cap-note { font-size: 11px; color: var(--muted-foreground); }
+.cap-endpoints-wrap { margin-top: 0.6rem; border-top: 1px solid var(--border); padding-top: 0.5rem; }
+.cap-endpoints-wrap summary { cursor: pointer; font-size: 12px; color: var(--muted-foreground); list-style: revert; }
+.cap-endpoints-wrap summary:hover { color: var(--foreground); }
+.cap-endpoints { list-style: none; margin: 0.5rem 0 0; padding: 0; display: flex; flex-direction: column; gap: 0.3rem; }
+.cap-endpoints code { display: block; word-break: break-all; font-size: 12px; color: var(--foreground); }

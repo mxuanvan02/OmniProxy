@@ -21,6 +21,7 @@
       // Blocking, parser-inserted so it always runs before the body script
       // loader below (whose dynamic scripts are async/unordered).
       document.write('<script src="/admin/escape.js?v=' + v + '"><\/script>');
+      document.write('<script src="/admin/model-kind.js?v=' + v + '"><\/script>');
     })();
   </script>
 </head>
@@ -107,6 +108,8 @@
           <div class="tabs" id="tabBar">
             <button type="button" class="tab active" data-tab="accounts"><i class="fa-solid fa-users tab-icon"></i><span
                 data-i18n="tabs.accounts"></span></button>
+            <button type="button" class="tab" data-tab="capabilities"><i class="fa-solid fa-star tab-icon"></i><span
+                data-i18n="tabs.capabilities">Năng lực</span></button>
             <button type="button" class="tab" data-tab="settings"><i class="fa-solid fa-sliders tab-icon"></i><span
                 data-i18n="tabs.settings"></span></button>
             <button type="button" class="tab" data-tab="api"><i class="fa-solid fa-plug tab-icon"></i><span
@@ -489,6 +492,21 @@
             </div>
             <div id="combosList" style="margin-top:0.75rem;"></div>
           </div>
+        </div>
+      </div>
+
+      <!-- Capabilities tab -->
+      <div id="tabCapabilities" class="tab-content hidden">
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title" data-i18n="capabilities.title">Năng lực (Capabilities)</span>
+            <div class="card-actions">
+              <button class="btn btn-outline btn-sm" id="capabilitiesRefreshBtn" type="button">
+                <i class="fa-solid fa-rotate" aria-hidden="true"></i><span data-i18n="capabilities.refresh">Làm mới</span></button>
+            </div>
+          </div>
+          <p class="cap-hint" data-i18n="capabilities.hint">Từng loại API OmniProxy phục vụ — chat, ảnh, giọng nói, video, nhạc, embedding — kèm trạng thái xác minh và endpoint để Agent/CLI trỏ vào.</p>
+          <div id="capabilitiesList"></div>
         </div>
       </div>
 
@@ -986,7 +1004,7 @@
   <script>
     (function () {
       var v = window.__v || Date.now();
-      var scripts = ['/admin/toast.js', '/admin/app.js', '/admin/settings.js', '/admin/accounts.js', '/admin/combos.js', '/admin/apiCli.js', '/admin/usage.js', '/admin/quota.js', '/admin/logs.js', '/admin/svgtest.js', '/admin/svgtest-runs.js', '/admin/svgtest-results.js', '/admin/svgtest-scatter.js'];
+      var scripts = ['/admin/toast.js', '/admin/app.js', '/admin/settings.js', '/admin/accounts.js', '/admin/combos.js', '/admin/apiCli.js', '/admin/capabilities.js', '/admin/usage.js', '/admin/quota.js', '/admin/logs.js', '/admin/svgtest.js', '/admin/svgtest-runs.js', '/admin/svgtest-results.js', '/admin/svgtest-scatter.js'];
       scripts.forEach(function (src) {
         var el = document.createElement('script');
         el.src = src + '?v=' + v;
