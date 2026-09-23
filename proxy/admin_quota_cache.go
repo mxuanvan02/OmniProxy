@@ -102,10 +102,11 @@ func (h *Handler) apiGetQuotaOverview(w http.ResponseWriter, r *http.Request) {
 	accounts := h.pool.GetAllAccountsFull()
 
 	providerSummaries := map[string]*quotaProviderSummary{
-		"kiro":     {Provider: "kiro", Label: "Kiro / CodeWhisperer"},
-		"codex":    {Provider: "codex", Label: "Codex (ChatGPT)"},
-		"external": {Provider: "external", Label: "External OpenAI-compatible"},
-		"trial":    {Provider: "trial", Label: "Trial"},
+		"kiro":        {Provider: "kiro", Label: "Kiro / CodeWhisperer"},
+		"codex":       {Provider: "codex", Label: "Codex (ChatGPT)"},
+		"antigravity": {Provider: "antigravity", Label: "Google Antigravity"},
+		"external":    {Provider: "external", Label: "External OpenAI-compatible"},
+		"trial":       {Provider: "trial", Label: "Trial"},
 	}
 
 	var accountRows []quotaAccountRow
@@ -215,6 +216,8 @@ func providerLabelOf(p string) string {
 		return "External IdP"
 	case "OpenAI Codex", "codex":
 		return "Codex (ChatGPT)"
+	case "Google Antigravity", "antigravity":
+		return "Google Antigravity"
 	case "external":
 		return "External OpenAI-compatible"
 	case "trial":
@@ -531,6 +534,9 @@ func deriveAccountStatus(a config.Account) string {
 }
 
 func pickProviderSummary(a config.Account, m map[string]*quotaProviderSummary) *quotaProviderSummary {
+	if isAntigravityAccount(&a) {
+		return m["antigravity"]
+	}
 	if a.CodexPlanType != "" || a.CodexPrimaryUsedPercent > 0 || a.ChatGPTAccountID != "" {
 		return m["codex"]
 	}

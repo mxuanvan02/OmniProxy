@@ -187,6 +187,13 @@ type Account struct {
 	// outbound external-provider request is rewritten.
 	ModelMappings map[string]string `json:"modelMappings,omitempty"`
 
+	// AntigravityCodingFilter controls scrubbing of non-Antigravity coding-tool
+	// names from the system prompt before it reaches Cloud Code Assist. Only the
+	// Antigravity provider consults it. Empty or "off" disables it (the default);
+	// "rewrite" replaces matched names with "Antigravity"; "block" rejects the
+	// request when a name is found. Ignored for every other AuthMethod.
+	AntigravityCodingFilter string `json:"antigravityCodingFilter,omitempty"`
+
 	// AllowedModels restricts this account to an explicit set of public model
 	// IDs. Empty preserves the legacy unrestricted behavior. The routing pool
 	// enforces this before consulting the discovered upstream catalog, so a
@@ -909,6 +916,14 @@ func loadLocked() error {
 			}
 			cfg.Accounts[i].LegacyAllowOverage = false
 			overageMigrated = true
+		}
+		// Antigravity is an OAuth provider, not an external API key; its accounts
+		// were once created with region "external" and carried that stale label.
+		// Normalize on load so the dashboard groups them under Antigravity. The
+		// field is only a display label — routing keys off AuthMethod.
+		if cfg.Accounts[i].AuthMethod == "antigravity" && cfg.Accounts[i].Region != "antigravity" {
+			cfg.Accounts[i].Region = "antigravity"
+			addedAtMigrated = true
 		}
 	}
 	if overageMigrated || addedAtMigrated {

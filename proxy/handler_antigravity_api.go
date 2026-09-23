@@ -194,7 +194,7 @@ func antigravityAccountFromTokens(accessToken, refreshToken string, expiresAt in
 		ExpiresAt:       expiresAt,
 		GoogleSubject:   strings.TrimSpace(subject),
 		GoogleProjectID: strings.TrimSpace(projectID),
-		Region:          "external",
+		Region:          "antigravity",
 		Enabled:         true,
 		BanStatus:       "ACTIVE",
 		MachineId:       config.GenerateMachineId(),

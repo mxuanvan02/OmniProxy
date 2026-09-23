@@ -1481,6 +1481,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// routing
 	switch {
+	// Gemini-native inbound endpoints (Antigravity IDE endpoint override).
+	// Unauthenticated: only reachable on loopback. Must come before /v1/* routes
+	// so "/v1internal:*" is not swallowed by prefix matches.
+	case isAntigravityInbound(path):
+		h.handleAntigravityInbound(w, r)
+
 	// API endpoints (require API Key auth)
 	case path == "/v1/messages" || path == "/messages" || path == "/anthropic/v1/messages":
 		ar := h.authenticateForClaude(w, r)

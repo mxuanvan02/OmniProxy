@@ -786,6 +786,17 @@ func kiroPayloadToAntigravityRequest(payload *KiroPayload, account *config.Accou
 		}
 	}
 
+	// Scrub non-Antigravity coding-tool names from the system prompt before it
+	// reaches Cloud Code Assist. Off unless the account opts in; see
+	// antigravity_coding_filter.go and the ToS note at the top of this file.
+	if account != nil && account.AntigravityCodingFilter != "" {
+		scrubbed, blocked := applyAntigravityCodingFilter(account.AntigravityCodingFilter, systemInstruction)
+		if blocked {
+			return nil, fmt.Errorf("blocked_by_antigravity_coding_filter: system prompt names a non-Antigravity coding client")
+		}
+		systemInstruction = scrubbed
+	}
+
 	contents := make([]map[string]interface{}, 0, len(history)+1)
 	appendTurn := func(role string, parts []map[string]interface{}) {
 		if len(parts) == 0 {
