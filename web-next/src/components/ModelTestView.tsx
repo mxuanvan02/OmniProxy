@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { Account, SVGTestResult } from '../lib/api'
 import { api, testModelSVG } from '../lib/api'
+import { groupModelsByKind } from '../lib/model-kind'
 import { Card, PageHeader } from './Shell'
 
 // Mirrors proxy.isServiceAccount: search/image accounts are service adapters,
@@ -77,7 +78,11 @@ export function ModelTestView({ models }: { models: string[] }) {
             aria-label="Chọn model"
           >
             {models.length === 0 && <option value="">Chưa có model nào</option>}
-            {models.map((m) => <option key={m} value={m}>{m}</option>)}
+            {groupModelsByKind(models).map((g) => (
+              <optgroup key={g.kind} label={`${g.label} (${g.ids.length})`}>
+                {g.ids.map((m) => <option key={m} value={m}>{m}</option>)}
+              </optgroup>
+            ))}
           </select>
           <button
             onClick={() => void runTest()}
