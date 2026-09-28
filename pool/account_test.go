@@ -910,6 +910,75 @@ func TestChatDialectSSECutIsTransient(t *testing.T) {
 	}
 }
 
+// Cloudflare's own 5xx family, as VSLLM actually serves it. The "HTTP <code>
+// from <account>: " prefix is verbatim from the live hitokiri log (2026/09/28,
+// after the chat-cut fix above shipped); the bodies are the real Cloudflare
+// error pages, whose <title> is what carries the code's meaning.
+//
+// 524 only ever classified as transient by accident: its page title contains
+// the word "timeout", which the network-marker list happened to match. 520/521/
+// 522 titles contain no such word, so they matched nothing at all and fell to
+// handleAccountFailure's default branch — a cooldown charged to a healthy
+// account for an origin blip. They were the only unclassified shapes left in
+// the live log after the chat-cut fix.
+const (
+	liveCF520 = `HTTP 520 from VSLLM: <!DOCTYPE html><html><head><title>520: Web server is returning an unknown error</title></head><body><h1>Attention Required! | Cloudflare</h1></body></html>`
+	liveCF521 = `HTTP 521 from VSLLM: <!DOCTYPE html><html><head><title>521: Web server is down</title></head><body><h1>Error 521</h1></body></html>`
+	liveCF522 = `HTTP 522 from VSLLM: <!DOCTYPE html><html><head><title>522: Connection timed out</title></head><body><h1>Error 522</h1></body></html>`
+	liveCF524 = `HTTP 524 from VSLLM: <!DOCTYPE html><html><head><title>524: A timeout occurred</title></head><body><h1>Error 524</h1></body></html>`
+	// Same family, wrapped the way the external adapters wrap it when the
+	// account name is prefixed by the caller.
+	liveCF520Wrapped = `external call VSLLM: ` + liveCF520
+)
+
+// Every Cloudflare 5xx means "the origin blipped", never "this credential is
+// broken". Waiting can fix all of them, so all of them are transient.
+func TestCloudflareServerErrorsAreTransient(t *testing.T) {
+	for _, msg := range []string{liveCF520, liveCF521, liveCF522, liveCF524, liveCF520Wrapped} {
+		if !IsTransientError(errors.New(msg)) {
+			t.Errorf("IsTransientError(%q) = false, want true: a Cloudflare 5xx is an "+
+				"origin blip, and charging the account a cooldown for it parks the only "+
+				"account that serves the model", msg[:40])
+		}
+		if got := ClassifyCooldown(errors.New(msg)); got != CooldownTransient {
+			t.Errorf("ClassifyCooldown(%q) = %s, want transient", msg[:40], got)
+		}
+	}
+}
+
+// The guard that keeps the 5xx widening honest. AgentRouter answers a keyword
+// hit with HTTP 500 and code sensitive_words_detected; a blanket "any 5xx is
+// transient" would turn that payload refusal into an in-place retry and then a
+// replay across the whole pool — the exact expensive bug the content-blocked
+// classifier exists to prevent.
+func TestContentBlockedHTTP500IsNotTransient(t *testing.T) {
+	msg := `HTTP 500 from AgentRouter (AgentRouter-Opus5): ` +
+		`{"error":{"message":"sensitive words detected","type":"new_api_error",` +
+		`"param":"","code":"sensitive_words_detected"}}`
+	if !IsContentBlockedError(errors.New(msg)) {
+		t.Fatal("precondition: this shape must be recognised as content-blocked")
+	}
+	if IsTransientError(errors.New(msg)) {
+		t.Fatal("a payload refusal must not become a transient retry: the same " +
+			"payload fails identically on every account, so retrying only replays " +
+			"a rejected request across the pool")
+	}
+}
+
+// A 5xx that means "this provider cannot serve this model" must keep its own
+// class rather than being swept into transient by the widened status check.
+func TestModelUnavailable503IsNotTransientDespiteWidened5xx(t *testing.T) {
+	msg := `HTTP 503 from kiro.pix4k.com: {"error":{"code":"upstream_error",` +
+		`"message":"model gpt-5.6-sol is not available on any configured provider right now"}}`
+	if !IsProviderModelUnavailableError(errors.New(msg)) {
+		t.Fatal("precondition: this shape must be recognised as model-unavailable")
+	}
+	if IsTransientError(errors.New(msg)) {
+		t.Fatal("model-unavailable must stay non-transient so it parks the model, " +
+			"not the account, and does not burn retries on a model with no backend")
+	}
+}
+
 // Guard the misclassifications that would make the two additions above costly.
 func TestChatDialectSSECutIsNotCredentialFault(t *testing.T) {
 	err := errors.New(liveChatSSECut)

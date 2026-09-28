@@ -1254,6 +1254,47 @@ func isDigit(b byte) bool {
 	return b >= '0' && b <= '9'
 }
 
+// isCloudflareServerError reports whether err carries a Cloudflare edge status
+// in the 520-527 range: 520 unknown origin error, 521 web server down, 522
+// connection timed out, 523 origin unreachable, 524 origin sent no response in
+// time, 525/526/527 TLS handshake failures.
+//
+// All of them are produced between Cloudflare and the origin, so none of them
+// can say anything about the credential — the request never reached the
+// provider's auth layer. Every one means "the origin blipped", and waiting can
+// fix it, which is the definition of transient.
+//
+// Status codes are read only where they follow an "HTTP " token, which is the
+// shape every external adapter uses (fmt.Errorf("HTTP %d from %s: %s", ...)),
+// optionally wrapped by a caller prefix ("external call VSLLM: HTTP 520 ...").
+// Scanning for bare digits instead would be a false-positive machine: these
+// errors carry Cloudflare's HTML error page as the body, full of numbers such
+// as the Ray ID.
+func isCloudflareServerError(msg string) bool {
+	const token = "http "
+	lower := strings.ToLower(msg)
+	for {
+		idx := strings.Index(lower, token)
+		if idx < 0 {
+			return false
+		}
+		rest := lower[idx+len(token):]
+		// Count the digits that immediately follow the token. A Cloudflare code
+		// is exactly three digits starting with "52"; requiring the boundary
+		// after them keeps "5212" and "52" out.
+		n := 0
+		for n < len(rest) && isDigit(rest[n]) {
+			n++
+		}
+		if n == 3 && rest[0] == '5' && rest[1] == '2' {
+			return true
+		}
+		// Advance past this occurrence so a wrapped message is still checked:
+		// "external call VSLLM: HTTP 520 ..." has its code after the first token.
+		lower = rest
+	}
+}
+
 // IsSuspensionError reports whether the error indicates the account has been
 // temporarily suspended by upstream or has no available Kiro profile.
 // Unlike auth failures (revoked credentials), these may be transient, but
@@ -1398,6 +1439,27 @@ func IsTransientError(err error) bool {
 	// HTTP 5xx status tokens (502/503/504) — bounded by non-digit boundaries
 	// so we don't match arbitrary digits in error bodies.
 	if hasStatusToken(msg, "502") || hasStatusToken(msg, "503") || hasStatusToken(msg, "504") {
+		return true
+	}
+
+	// Cloudflare's own 5xx family (520-527). These sit between the edge and the
+	// origin, so every one of them says "the origin blipped" and none of them
+	// can be a credential fault — the request never reached the provider's auth
+	// layer. Waiting can fix all of them, so all of them are transient.
+	//
+	// They had no coverage, and 524 only ever classified correctly by accident:
+	// its Cloudflare page title contains the word "timeout", which the network
+	// marker list below happened to match. 520/521/522 titles carry no such word,
+	// so they matched nothing and fell to handleAccountFailure's default branch,
+	// charging a healthy account a cooldown for an origin blip. On a pool where
+	// one account serves the model, three of those park it for a minute and every
+	// request in that window aborts with "no account found".
+	//
+	// Deliberately NOT a blanket "any 5xx": HTTP 500 is how new-api style
+	// gateways answer a keyword-scanner hit (sensitive_words_detected), and
+	// treating that payload refusal as transient would replay the identical
+	// rejected request across the whole pool. IsContentBlockedError owns 500.
+	if isCloudflareServerError(msg) {
 		return true
 	}
 
