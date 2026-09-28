@@ -877,3 +877,49 @@ func TestIsExternalSSETruncatedError(t *testing.T) {
 		})
 	}
 }
+
+// The chat dialect's truncation string. Verbatim from the live hitokiri log
+// window (2026/09/27, VSLLM, qwen3.8-max-0902), where it produced 54
+// "unclassified failure" cooldowns and 77 "no account found" aborts in one day.
+//
+// It was the one truncation shape no classifier owned: the function matched
+// "ended before message_stop" (Anthropic dialect) and "ended without assistant
+// output", but the OpenAI chat parser in external_openai.go reports "ended
+// before a terminal finish_reason or [DONE]". So the error skipped the
+// rotate-without-cooldown branch, matched no transient marker, and fell to
+// handleAccountFailure's default branch — a cooldown charged to a healthy
+// account, three strikes, then a minute during which a one-account pool serves
+// nothing at all.
+const liveChatSSECut = `external SSE stream ended before a terminal finish_reason or [DONE]`
+
+func TestChatDialectSSECutIsTruncationNotAccountFault(t *testing.T) {
+	if !IsExternalSSETruncatedError(errors.New(liveChatSSECut)) {
+		t.Fatal("chat-dialect stream cut must classify as upstream truncation so the " +
+			"failover rotates without charging the account a cooldown")
+	}
+}
+
+// Truncation is also worth an in-place retry: the connection dropped, the
+// account is fine, and the same request often succeeds on the next attempt.
+// The streaming call sites already guard this with responseStarted, so a retry
+// only happens when nothing was delivered to the client.
+func TestChatDialectSSECutIsTransient(t *testing.T) {
+	if !IsTransientError(errors.New(liveChatSSECut)) {
+		t.Fatal("a dropped SSE connection is a per-request transport event, not an " +
+			"account fault: without this the retry budget is never spent on it")
+	}
+}
+
+// Guard the misclassifications that would make the two additions above costly.
+func TestChatDialectSSECutIsNotCredentialFault(t *testing.T) {
+	err := errors.New(liveChatSSECut)
+	if IsAuthFailure(err) {
+		t.Fatal("a truncated stream says nothing about the credential")
+	}
+	if IsQuotaExhaustionError(err) {
+		t.Fatal("a truncated stream is not quota exhaustion")
+	}
+	if IsProviderModelUnavailableError(err) {
+		t.Fatal("a truncated stream does not mean the model is gone")
+	}
+}

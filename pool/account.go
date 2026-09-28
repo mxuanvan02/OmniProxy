@@ -1375,6 +1375,21 @@ func IsTransientError(err error) bool {
 		return false
 	}
 
+	// A stream that started and was then cut is the opposite case: the
+	// connection, not the upstream queue, ended early, and the same request
+	// usually succeeds on the next attempt. Retry it in place. The streaming
+	// call sites already gate this on responseStarted, so nothing is replayed to
+	// a client that has seen output.
+	//
+	// Scoped to the chat-dialect cut on purpose. The other truncation shapes —
+	// "ended without assistant output", a well-formed stream that carried
+	// nothing — must fail over to a different account instead, and widening this
+	// to the whole IsExternalSSETruncatedError family re-breaks that
+	// (TestClaudeStreamFailsOverAfterEmptyExternalSSE).
+	if isChatDialectSSECut(lower) {
+		return true
+	}
+
 	// Hard quota/credit exhaustion is NOT transient — don't retry same account.
 	if IsQuotaExhaustionError(err) || IsRateLimitError(err) {
 		return false
@@ -1476,6 +1491,25 @@ func IsKiroTruncatedError(err error) bool {
 		strings.Contains(lower, "truncated")
 }
 
+// isChatDialectSSECut reports whether err uses the OpenAI chat dialect's own
+// wording for a stream that was cut after it started: the connection closed
+// without a terminal finish_reason and without [DONE].
+//
+// One definition, two consumers. The failover classifier treats it as upstream
+// truncation (rotate without charging a cooldown) and the transient test treats
+// it as worth an in-place retry, so the two agree instead of one retrying while
+// the other cools the account down. It carries its own "external" guard so it
+// cannot match a same-wording message from another subsystem.
+//
+// Deliberately narrower than IsExternalSSETruncatedError: the "ended without
+// assistant output" shape means the stream was well-formed and simply carried
+// nothing, and that one is meant to fail over to a different account rather
+// than be retried on the same one.
+func isChatDialectSSECut(lower string) bool {
+	return strings.Contains(lower, "external") &&
+		strings.Contains(lower, "ended before a terminal finish_reason")
+}
+
 // IsExternalSSETruncatedError reports whether err indicates an external dialect
 // SSE stream that ended without its terminal event (e.g. Alibaba Cloud Messages
 // missing message_stop). Like Kiro truncation this is an upstream-side failure,
@@ -1490,7 +1524,14 @@ func IsExternalSSETruncatedError(err error) bool {
 		return false
 	}
 	return strings.Contains(lower, "ended before message_stop") ||
-		strings.Contains(lower, "ended without assistant output")
+		strings.Contains(lower, "ended without assistant output") ||
+		// The chat dialect's own wording was the one truncation shape no
+		// classifier owned, so it fell through to handleAccountFailure's default
+		// cooldown. On the single-account pool that serves a model, three strikes
+		// parked the account for a minute and every request inside that window
+		// aborted with "no account found": 54 cooldowns and 77 aborts in one
+		// live day.
+		isChatDialectSSECut(lower)
 }
 
 func (p *AccountPool) DisableAccount(id, reason string) {
