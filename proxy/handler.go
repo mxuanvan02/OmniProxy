@@ -2471,6 +2471,17 @@ func (h *Handler) refreshModelsCache() {
 			// refreshAllAccounts skips external accounts entirely, so this is the
 			// only periodic pass that can re-read a gateway's price list.
 			refreshAccountPricing(account)
+			// Plan windows come from the gateway's admin API, which needs the
+			// console system token — an account without it has nothing to poll.
+			// A failed refresh keeps the previous snapshot (the fetcher returns
+			// an error and nothing is persisted), so a gateway hiccup degrades
+			// the display to stale rather than blank.
+			if isExternalAccount(account) && strings.TrimSpace(account.ExtAdminToken) != "" && account.ExtAdminUserID != 0 {
+				if err := h.refreshExternalSubscriptions(account); err != nil && err != ErrExternalAdminNotConfigured {
+					logger.Warnf("[ExternalSubs] %s: refresh failed, keeping previous snapshot: %v",
+						account.Email, err)
+				}
+			}
 			continue
 		}
 		if err := h.ensureValidToken(account); err != nil {
@@ -6252,6 +6263,9 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/credits") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/credits")
 		h.apiRefreshAccountCredits(w, r, id)
+	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/subscriptions") && r.Method == "POST":
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/subscriptions")
+		h.apiRefreshAccountSubscriptions(w, r, id)
 	case strings.HasPrefix(path, "/accounts/") && strings.HasSuffix(path, "/restore-refresh-token") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/accounts/"), "/restore-refresh-token")
 		h.apiRestoreCodexRefreshToken(w, r, id)
@@ -8130,6 +8144,15 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"extKeyMasked":              a.ExtKeyMasked,
 			"extLastUsedAt":             a.ExtLastUsedAt,
 			"extCreditsCheckedAt":       a.ExtCreditsCheckedAt,
+			// Plan windows (5-hour / 7-day subscriptions on new-api gateways).
+			// The admin token itself is deliberately NOT serialized: the UI only
+			// needs to know whether the integration is configured, and echoing a
+			// console system token through an API response would put a
+			// dashboard-level credential in browser memory, logs and proxies.
+			"extAdminConfigured":        strings.TrimSpace(a.ExtAdminToken) != "" && a.ExtAdminUserID != 0,
+			"extAdminUserId":            a.ExtAdminUserID,
+			"extSubscriptions":          a.ExtSubscriptions,
+			"extSubsCheckedAt":          a.ExtSubsCheckedAt,
 			"chatgptAccountId":          a.ChatGPTAccountID,
 			"codexPlanType":             a.CodexPlanType,
 			"codexActiveLimit":          a.CodexActiveLimit,
@@ -8301,6 +8324,25 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 	}
 	if v, ok := updates["accessToken"].(string); ok {
 		existing.AccessToken = strings.TrimSpace(v)
+	}
+	// Admin-API credentials for plan windows. Distinct from accessToken: the
+	// inference key cannot read /api/subscription/self, so an account needs both
+	// before plan windows appear. An empty string clears them, which is how an
+	// operator revokes the integration after regenerating the token upstream.
+	if raw, present := updates["extAdminToken"]; present {
+		if v, ok := raw.(string); ok {
+			existing.ExtAdminToken = strings.TrimSpace(v)
+		}
+	}
+	if raw, present := updates["extAdminUserId"]; present {
+		switch v := raw.(type) {
+		case float64: // JSON numbers decode as float64
+			existing.ExtAdminUserID = int(v)
+		case string:
+			if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+				existing.ExtAdminUserID = n
+			}
+		}
 	}
 	if v, ok := updates["codexImageModel"].(string); ok && isCodexAccount(existing) {
 		existing.CodexImageModel = strings.TrimSpace(v)
@@ -8565,6 +8607,15 @@ func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 				h.fetchAndCacheAccountModels(account)
 				h.refreshExternalCredits(account)
 				refreshAccountPricing(account)
+				// Plan windows need the console system token; without it there is
+				// nothing to poll, so the fetcher's NotConfigured error is
+				// expected rather than a failure of this refresh.
+				if strings.TrimSpace(account.ExtAdminToken) != "" && account.ExtAdminUserID != 0 {
+					if err := h.refreshExternalSubscriptions(account); err != nil && err != ErrExternalAdminNotConfigured {
+						logger.Warnf("[ExternalSubs] %s: refresh failed, keeping previous snapshot: %v",
+							account.Email, err)
+					}
+				}
 				successCount++
 				continue
 			}
@@ -11626,6 +11677,51 @@ func (h *Handler) apiRefreshAccountCredits(w http.ResponseWriter, r *http.Reques
 			"lastUsedAt":       account.ExtLastUsedAt,
 			"checkedAt":        account.ExtCreditsCheckedAt,
 		},
+	})
+}
+
+// apiRefreshAccountSubscriptions POST /admin/api/accounts/{id}/subscriptions
+// Re-reads the gateway's plan windows (the 5-hour and 7-day subscriptions a
+// new-api account holds) on demand, so an operator does not have to wait for the
+// 10-minute background cycle.
+//
+// The admin token itself is never echoed back: the response reports the plan
+// rows and whether credentials are configured, not their values.
+func (h *Handler) apiRefreshAccountSubscriptions(w http.ResponseWriter, r *http.Request, id string) {
+	accounts := config.GetAccounts()
+	var account *config.Account
+	for i := range accounts {
+		if accounts[i].ID == id {
+			account = &accounts[i]
+			break
+		}
+	}
+	if account == nil {
+		w.WriteHeader(404)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Account not found"})
+		return
+	}
+	if !isExternalAccount(account) {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Plan windows are only available for external OpenAI-compatible providers"})
+		return
+	}
+	if strings.TrimSpace(account.ExtAdminToken) == "" || account.ExtAdminUserID == 0 {
+		w.WriteHeader(400)
+		json.NewEncoder(w).Encode(map[string]string{
+			"error": "This account has no admin API credentials (system access token + user id)",
+		})
+		return
+	}
+	if err := h.refreshExternalSubscriptions(account); err != nil {
+		w.WriteHeader(502)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Subscription refresh failed: " + err.Error()})
+		return
+	}
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"success":       true,
+		"subscriptions": account.ExtSubscriptions,
+		"checkedAt":     account.ExtSubsCheckedAt,
 	})
 }
 

@@ -70,6 +70,31 @@ type CapabilityProbeResult struct {
 	SkippedReason string `json:"skippedReason,omitempty"`
 }
 
+// ExternalSubscription is one plan window on a new-api style gateway, as read
+// from GET /api/subscription/self. The gateway returns every subscription the
+// account has ever held, including long-expired ones, so the consumer filters
+// on Status and NextResetTime before trusting a row.
+//
+// WindowMinutes is derived, not returned by upstream: it is the gap between
+// LastResetTime and NextResetTime. Deriving it is what lets the UI label a
+// window correctly ("5h" vs "7d") instead of assuming every plan is the 5-hour
+// one — the same account was observed running a 18000s and a 604800s window at
+// once. It is zero when either timestamp is missing, which marks the row as
+// unusable for display rather than silently rendering a wrong label.
+type ExternalSubscription struct {
+	ID            int64   `json:"id"`
+	PlanID        int     `json:"planId,omitempty"`
+	Status        string  `json:"status,omitempty"` // active | expired | ...
+	Source        string  `json:"source,omitempty"` // wallet | redemption | checkin
+	UsedPercent   float64 `json:"usedPercent"`
+	Unlimited     bool    `json:"unlimited,omitempty"`
+	StartTime     int64   `json:"startTime,omitempty"`
+	EndTime       int64   `json:"endTime,omitempty"` // when the plan itself expires
+	LastResetTime int64   `json:"lastResetTime,omitempty"`
+	NextResetTime int64   `json:"nextResetTime,omitempty"`
+	WindowMinutes int     `json:"windowMinutes,omitempty"` // derived: (next-last)/60
+}
+
 // Account represents a Kiro API account with authentication credentials and usage statistics.
 type Account struct {
 	// Basic identification
@@ -384,6 +409,27 @@ type Account struct {
 	// while consumption rises, and settable by an operator who already knows
 	// the dialect. Off by default so one-api semantics stay intact.
 	ExtBillingLimitIsTotal bool `json:"extBillingLimitIsTotal,omitempty"`
+
+	// Admin-API credentials for new-api style gateways (VSLLM among them). The
+	// inference AccessToken (sk-…) cannot read account-level data; the console's
+	// "System Access Token" plus the numeric user id can, via
+	// GET /api/subscription/self and /api/user/rate_limit. Both are required:
+	// new-api rejects a request whose New-Api-User header does not match the
+	// logged-in user. Stored here (config.json is gitignored) so the background
+	// refresh can poll plan windows without a separate credential store.
+	ExtAdminToken  string `json:"extAdminToken,omitempty"`
+	ExtAdminUserID int    `json:"extAdminUserId,omitempty"`
+
+	// ExtSubscriptions caches the plan windows read from /api/subscription/self
+	// so the admin UI can render each active subscription's used% and reset
+	// time. One account legitimately runs several windows in parallel (a 5h
+	// plan and a 7d plan), so this is a list, not a single number. Refreshed by
+	// the background loop; a failed refresh keeps the previous snapshot rather
+	// than blanking it.
+	ExtSubscriptions   []ExternalSubscription `json:"extSubscriptions,omitempty"`
+	ExtSubsCheckedAt   int64                  `json:"extSubsCheckedAt,omitempty"`
+	ExtRateLimitWindow int                    `json:"extRateLimitWindowMinutes,omitempty"` // per-minute frequency cap level
+	ExtRateLimitLevel  string                 `json:"extRateLimitLevel,omitempty"`         // e.g. "lv1"
 
 	// Codex (ChatGPT subscription) usage tracking.
 	// Populated from JWT claims at login/import and from x-codex-*
@@ -1531,6 +1577,45 @@ func UpdateAccountExternalCredits(id string, creditLimit, creditsRemaining, cred
 			if checkedAt > 0 {
 				cfg.Accounts[i].ExtCreditsCheckedAt = checkedAt
 			}
+			return Save()
+		}
+	}
+	return nil
+}
+
+// UpdateAccountExternalSubscriptions persists the plan windows read from the
+// gateway's admin API, plus the time they were read.
+//
+// Only called after a SUCCESSFUL fetch. A failed refresh must not reach here:
+// writing an empty list would erase the last good snapshot, and the admin UI
+// would then show a plan as absent rather than as stale. The caller keeps the
+// old value by simply not calling this.
+func UpdateAccountExternalSubscriptions(id string, subs []ExternalSubscription, checkedAt int64) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			cfg.Accounts[i].ExtSubscriptions = subs
+			if checkedAt > 0 {
+				cfg.Accounts[i].ExtSubsCheckedAt = checkedAt
+			}
+			return Save()
+		}
+	}
+	return nil
+}
+
+// SetAccountExternalAdminCreds records the console "System Access Token" and
+// the numeric user id that the gateway's admin API requires. Both are needed:
+// new-api rejects a request whose New-Api-User header does not match the
+// logged-in user, so a token alone is never enough.
+func SetAccountExternalAdminCreds(id, adminToken string, adminUserID int) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			cfg.Accounts[i].ExtAdminToken = adminToken
+			cfg.Accounts[i].ExtAdminUserID = adminUserID
 			return Save()
 		}
 	}

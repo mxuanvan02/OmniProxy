@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"omniproxy/config"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -261,6 +262,80 @@ func codexPrimaryQuotaName(windowMinutes int) string {
 	return "Primary"
 }
 
+// subscriptionWindowLabel renders a plan window length as a short suffix:
+// "5h", "7d", "45m". It scales rather than hardcoding 5h because one account
+// legitimately runs several window lengths at once (observed: a 300-minute and
+// a 10080-minute plan in parallel), and labelling the weekly one "(5h)" would
+// be a false statement. Returns "" when the window is unknown (0), so the
+// renderer can omit the duration rather than invent one.
+func subscriptionWindowLabel(windowMinutes int) string {
+	if windowMinutes <= 0 {
+		return ""
+	}
+	if windowMinutes%1440 == 0 && windowMinutes >= 1440 {
+		return strconv.Itoa(windowMinutes/1440) + "d"
+	}
+	if windowMinutes%60 == 0 && windowMinutes >= 60 {
+		return strconv.Itoa(windowMinutes/60) + "h"
+	}
+	return strconv.Itoa(windowMinutes) + "m"
+}
+
+// buildSubscriptionRows turns the persisted plan windows into quota rows, one
+// per active subscription. Sorted shortest window first, then most-used, so the
+// nearest binding constraint on capacity is the top row — a 90%-used 5h plan
+// outranks a 100%-used 7d plan for "what runs out next".
+func buildSubscriptionRows(subs []config.ExternalSubscription) []quotaRow {
+	if len(subs) == 0 {
+		return nil
+	}
+	ordered := make([]config.ExternalSubscription, len(subs))
+	copy(ordered, subs)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		wi, wj := ordered[i].WindowMinutes, ordered[j].WindowMinutes
+		// Unknown windows (0) sort last rather than pretending to be shortest.
+		if (wi == 0) != (wj == 0) {
+			return wj == 0
+		}
+		if wi != wj {
+			return wi < wj
+		}
+		return ordered[i].UsedPercent > ordered[j].UsedPercent
+	})
+
+	rows := make([]quotaRow, 0, len(ordered))
+	for _, s := range ordered {
+		used := s.UsedPercent
+		if used > 100 {
+			used = 100
+		} else if used < 0 {
+			used = 0
+		}
+		remaining := int(100 - used)
+		if remaining < 0 {
+			remaining = 0
+		}
+		name := "Sub #" + strconv.FormatInt(s.ID, 10)
+		if lbl := subscriptionWindowLabel(s.WindowMinutes); lbl != "" {
+			name += " (" + lbl + ")"
+		}
+		r := quotaRow{
+			Name:      name,
+			Used:      used,
+			Total:     100,
+			Remaining: remaining,
+			Recurring: true, // a plan window resets by definition
+			Unit:      "%",
+		}
+		if s.NextResetTime > 0 {
+			ts := s.NextResetTime
+			r.ResetAt = &ts
+		}
+		rows = append(rows, r)
+	}
+	return rows
+}
+
 // codexPrimaryWindowStart returns the start of the quota window currently
 // reported by Codex. Both values must come from upstream; without either one
 // there is no defensible boundary for a "This Reset" token total.
@@ -409,6 +484,12 @@ func buildAccountQuotas(a config.Account, tokensThisReset int) []quotaRow {
 	isExternal := a.AuthMethod == "external_openai" ||
 		strings.Contains(strings.ToLower(a.Provider), "external")
 	if isExternal {
+		// Plan windows first: a 5-hour subscription at 90% is the binding
+		// constraint on near-term capacity, so it outranks a lifetime credit
+		// balance. Renders nothing for accounts without admin credentials,
+		// which leaves every other external provider's page unchanged.
+		rows = append(rows, buildSubscriptionRows(a.ExtSubscriptions)...)
+
 		// Credits row — only if a credit limit is tracked
 		if a.ExtCreditLimit > 0 || a.ExtCreditsUsed > 0 || a.ExtStatus != "" {
 			used := a.ExtCreditsUsed
