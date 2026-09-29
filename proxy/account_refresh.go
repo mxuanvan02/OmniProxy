@@ -81,6 +81,20 @@ func (h *Handler) refreshAccountFull(account *config.Account) (accountRefreshRes
 		if creditsErr == ErrExternalCreditsNotSupported {
 			creditsErr = nil
 		}
+		// Plan windows (5-hour / 7-day subscriptions) come from the gateway's
+		// admin API and need the console system token. This is what the admin
+		// UI's "Làm mới" button lands on, so without it the button would refresh
+		// the credit balance while the plan bars stayed stale.
+		//
+		// Not configured is an expected state for every external provider that
+		// is not a new-api gateway, so it is silenced; any other error is
+		// reported as partial and keeps the previous snapshot (the fetcher
+		// persists nothing on failure), so the display degrades to stale rather
+		// than blank.
+		subsErr := h.refreshExternalSubscriptions(account)
+		if subsErr == ErrExternalAdminNotConfigured {
+			subsErr = nil
+		}
 		if modelsErr != nil && creditsErr != nil {
 			return accountRefreshResult{}, fmt.Errorf("external provider refresh failed: %w", modelsErr)
 		}
@@ -89,8 +103,10 @@ func (h *Handler) refreshAccountFull(account *config.Account) (accountRefreshRes
 			msg = "Models refresh failed: " + modelsErr.Error()
 		} else if creditsErr != nil {
 			msg = "Models refreshed; credits unavailable: " + creditsErr.Error()
+		} else if subsErr != nil {
+			msg = "Models and credits refreshed; plan windows unavailable: " + subsErr.Error()
 		}
-		return accountRefreshResult{Message: msg, Partial: modelsErr != nil || creditsErr != nil}, nil
+		return accountRefreshResult{Message: msg, Partial: modelsErr != nil || creditsErr != nil || subsErr != nil}, nil
 	}
 
 	// Antigravity accounts authenticate with Google OAuth and have no Kiro
