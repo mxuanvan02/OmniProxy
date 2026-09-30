@@ -534,11 +534,29 @@ func kiroPayloadToOpenAIRequest(payload *KiroPayload, account *config.Account) (
 			body["top_p"] = payload.InferenceConfig.TopP
 		}
 		// Pass reasoning_effort to OpenAI-compatible upstreams (e.g. gpt-5.6-sol)
-		// when the client requested thinking. This enables the upstream model to
-		// allocate reasoning budget instead of relying only on the system prompt.
+		// when thinking was resolved server-side. This enables the upstream model
+		// to allocate reasoning budget instead of relying only on the system prompt.
+		//
+		// Note this fires only where something set InferenceConfig.ReasoningEffort
+		// (the Claude/Codex paths). A client that sends reasoning_effort on the
+		// chat route arrives via ClientParams below instead — the struct never
+		// declared that field, so it used to be dropped before reaching here.
 		if payload.InferenceConfig.ReasoningEffort != "" {
 			body["reasoning_effort"] = payload.InferenceConfig.ReasoningEffort
 		}
+	}
+
+	// Everything the client asked for that this IR cannot model — stop sequences,
+	// seed, response_format, parallel_tool_calls, penalties, user, and any vendor
+	// extension — is re-attached verbatim. Applied last and only for keys the
+	// builder has not already set, so it can never clobber the resolved model,
+	// the rebuilt messages, or a max_tokens that was already pinned.
+	//
+	// The proxy's own stream/stream_options are set by the caller after this
+	// function returns, and those keys are excluded at capture time
+	// (openAIParamBlocked) precisely so a client value cannot override them.
+	if len(payload.ClientParams) > 0 {
+		applyClientParams(body, payload.ClientParams)
 	}
 
 	return body, nil

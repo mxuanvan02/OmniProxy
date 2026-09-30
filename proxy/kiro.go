@@ -196,6 +196,17 @@ type KiroPayload struct {
 	// Not serialized to the Kiro API request body.
 	ToolNameMap map[string]string `json:"-"`
 
+	// ClientParams carries the request parameters the client sent that this
+	// intermediate representation cannot express — stop sequences, seeds,
+	// response_format, penalties, and any vendor extension. An external
+	// OpenAI-compatible gateway understands all of them, so the adapter
+	// re-attaches them to the outbound body; native Kiro ignores the field.
+	//
+	// Held as raw JSON because an unknown parameter has no known shape, and
+	// round-tripping it through a decoded value would rewrite number formatting
+	// for no benefit.
+	ClientParams map[string]json.RawMessage `json:"-"`
+
 	// OriginalModel preserves the model ID sent to external providers. It may differ
 	// from the client-visible model when a request is routed through an internal alias.
 	OriginalModel string `json:"-"`

@@ -181,10 +181,15 @@ func stripThinkingSuffix(model, thinkingSuffix string) string {
 // ==================== Claude API types ====================
 
 type ClaudeRequest struct {
-	Model       string                `json:"model"`
-	Messages    []ClaudeMessage       `json:"messages"`
-	MaxTokens   int                   `json:"max_tokens"`
-	Temperature float64               `json:"temperature,omitempty"`
+	Model     string          `json:"model"`
+	Messages  []ClaudeMessage `json:"messages"`
+	MaxTokens int             `json:"max_tokens"`
+	// Temperature is a pointer for the same reason as OpenAIRequest's: a client
+	// that pins temperature to 0 (greedy decoding) was previously
+	// indistinguishable from one that sent nothing, because HasTemperature was
+	// derived from "Temperature != 0". The pin was dropped and the upstream
+	// applied its own default instead.
+	Temperature *float64              `json:"temperature,omitempty"`
 	TopP        float64               `json:"top_p,omitempty"`
 	Stream      bool                  `json:"stream,omitempty"`
 	System      interface{}           `json:"system,omitempty"` // string or []SystemBlock
@@ -403,17 +408,23 @@ func ClaudeToKiro(req *ClaudeRequest, thinking bool) *KiroPayload {
 		payload.ConversationState.History = history
 	}
 
-	if req.MaxTokens > 0 || req.Temperature > 0 || req.TopP > 0 || req.Thinking != nil {
-		payload.InferenceConfig = &InferenceConfig{
+	// The pointer itself signals "the client specified a temperature". Deriving
+	// HasTemperature from "Temperature != 0" dropped an explicit greedy-decoding
+	// pin (temperature 0) and let the upstream apply its own default instead.
+	if req.MaxTokens > 0 || req.Temperature != nil || req.TopP > 0 || req.Thinking != nil {
+		cfg := &InferenceConfig{
 			MaxTokens:      req.MaxTokens,
-			Temperature:    req.Temperature,
-			HasTemperature: req.Temperature != 0,
+			HasTemperature: req.Temperature != nil,
 			TopP:           req.TopP,
 		}
-		if effort, ok := claudeReasoningEffort(req.Thinking); ok {
-			payload.InferenceConfig.Thinking = req.Thinking
-			payload.InferenceConfig.ReasoningEffort = effort
+		if req.Temperature != nil {
+			cfg.Temperature = *req.Temperature
 		}
+		if effort, ok := claudeReasoningEffort(req.Thinking); ok {
+			cfg.Thinking = req.Thinking
+			cfg.ReasoningEffort = effort
+		}
+		payload.InferenceConfig = cfg
 	}
 
 	// Last history mutation, so the pairing invariant is checked on the final
@@ -1118,14 +1129,25 @@ func KiroToClaudeResponse(content, thinkingContent string, includeEmptyThinkingB
 // ==================== OpenAI API types ====================
 
 type OpenAIRequest struct {
-	Model       string          `json:"model"`
-	Messages    []OpenAIMessage `json:"messages"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Temperature float64         `json:"temperature,omitempty"`
-	TopP        float64         `json:"top_p,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
-	Tools       []OpenAITool    `json:"tools,omitempty"`
-	ToolChoice  interface{}     `json:"tool_choice,omitempty"`
+	Model     string          `json:"model"`
+	Messages  []OpenAIMessage `json:"messages"`
+	MaxTokens int             `json:"max_tokens,omitempty"`
+	// Temperature is a pointer so that an explicit 0 — a greedy-decoding pin,
+	// the one value most worth honouring exactly — is distinguishable from an
+	// absent temperature. As a plain float64 the two were identical, so the pin
+	// was dropped and the upstream applied its own default temperature.
+	Temperature *float64     `json:"temperature,omitempty"`
+	TopP        float64      `json:"top_p,omitempty"`
+	Stream      bool         `json:"stream,omitempty"`
+	Tools       []OpenAITool `json:"tools,omitempty"`
+	ToolChoice  interface{}  `json:"tool_choice,omitempty"`
+
+	// Extra holds every top-level parameter this struct does not declare, as
+	// verbatim JSON, so it can be forwarded to an OpenAI-compatible upstream
+	// unchanged. See openai_param_passthrough.go. Populated by UnmarshalJSON,
+	// therefore never by direct struct construction; re-emitted by MarshalJSON
+	// for the combo/adaptive paths that re-marshal a decoded request.
+	Extra map[string]json.RawMessage `json:"-"`
 }
 
 type OpenAIMessage struct {
@@ -1416,13 +1438,19 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 		payload.ConversationState.History = history
 	}
 
-	if req.MaxTokens > 0 || req.Temperature > 0 || req.TopP > 0 {
-		payload.InferenceConfig = &InferenceConfig{
+	// The pointer itself is the "client said something" signal: a request may
+	// legitimately pin temperature to 0 for greedy decoding, and a
+	// "Temperature != 0" test reads that pin as "unspecified" and drops it.
+	if req.MaxTokens > 0 || req.Temperature != nil || req.TopP > 0 {
+		cfg := &InferenceConfig{
 			MaxTokens:      req.MaxTokens,
-			Temperature:    req.Temperature,
-			HasTemperature: req.Temperature != 0,
+			HasTemperature: req.Temperature != nil,
 			TopP:           req.TopP,
 		}
+		if req.Temperature != nil {
+			cfg.Temperature = *req.Temperature
+		}
+		payload.InferenceConfig = cfg
 	}
 
 	// Last history mutation, so the pairing invariant is checked on the final
@@ -1430,6 +1458,10 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	payload.ConversationState.History = stripOrphanedToolResults(payload.ConversationState.History)
 
 	payload.ToolNameMap = toolNameMap
+	// Carry the client's undeclared parameters across the IR hop so the
+	// external adapter can re-attach them to the upstream body. Native Kiro
+	// ignores this field; it is an external-provider-only concern.
+	payload.ClientParams = req.forwardedParams()
 
 	return payload
 }

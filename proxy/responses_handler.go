@@ -102,7 +102,7 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		Tools:    req.Tools,
 	}
 	if req.Temperature != nil {
-		openaiReq.Temperature = *req.Temperature
+		openaiReq.SetTemperature(*req.Temperature)
 	}
 	if req.MaxOutputTokens != nil {
 		openaiReq.MaxTokens = *req.MaxOutputTokens

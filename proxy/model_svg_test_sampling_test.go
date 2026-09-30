@@ -100,7 +100,8 @@ func TestAnthropicBuilderForwardsExplicitGreedyPin(t *testing.T) {
 }
 
 func TestOpenAIToKiroMarksExplicitTemperature(t *testing.T) {
-	payload := OpenAIToKiro(&OpenAIRequest{Model: "m", Temperature: 0.7}, false)
+	temp := 0.7
+	payload := OpenAIToKiro(&OpenAIRequest{Model: "m", Temperature: &temp}, false)
 	if payload.InferenceConfig == nil || !payload.InferenceConfig.HasTemperature || payload.InferenceConfig.Temperature != 0.7 {
 		t.Errorf("OpenAIToKiro(temperature=0.7) config = %+v, want HasTemperature with 0.7", payload.InferenceConfig)
 	}
