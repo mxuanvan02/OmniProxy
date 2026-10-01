@@ -1,5 +1,5 @@
 {
-  "version": "0.4.0",
-  "changelog": "Antigravity + Gommo media backends (image/video/TTS/music), capability discovery and endpoint probing, per-account cache_control override, admin media playground",
+  "version": "0.5.0",
+  "changelog": "Plan-window quota for new-api gateways (5h/7d subscription bars), Chat Completions parameter passthrough to external upstreams, validated reasoning_effort forwarding, and error-classifier fixes so truncated streams and Cloudflare 5xx no longer park healthy accounts",
   "download": "https://github.com/mxuanvan02/OmniProxy"
 }
