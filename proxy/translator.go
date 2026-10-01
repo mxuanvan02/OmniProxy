@@ -476,6 +476,24 @@ func claudeReasoningEffort(thinking *ClaudeThinkingConfig) (string, bool) {
 	}
 }
 
+// normalizeReasoningEffort whitelists an OpenAI-protocol reasoning_effort value.
+//
+// External OpenAI-compatible gateways (VSLLM/Qwen among them) allocate a thinking
+// budget only when reasoning_effort is present, so the level must reach them —
+// but each gateway knows its own vocabulary and may answer an unknown level with
+// HTTP 400. Anything outside the accepted set is dropped to "" so the upstream
+// keeps its own default instead of being handed a word it rejects.
+//
+// The set matches claudeReasoningEffort's vocabulary so both protocol paths agree
+// on what a valid level is.
+func normalizeReasoningEffort(raw string) string {
+	switch effort := strings.ToLower(strings.TrimSpace(raw)); effort {
+	case "none", "minimal", "low", "medium", "high", "xhigh", "max":
+		return effort
+	}
+	return ""
+}
+
 func appendPromptGuidance(prompt, guidance string) string {
 	prompt = strings.TrimSpace(prompt)
 	guidance = strings.TrimSpace(guidance)
@@ -1141,6 +1159,12 @@ type OpenAIRequest struct {
 	Stream      bool         `json:"stream,omitempty"`
 	Tools       []OpenAITool `json:"tools,omitempty"`
 	ToolChoice  interface{}  `json:"tool_choice,omitempty"`
+	// ReasoningEffort is declared (rather than left to the generic Extra
+	// passthrough) because it needs validating before it reaches upstream: a
+	// gateway may reject an unknown level with HTTP 400. Declaring it keeps it
+	// out of Extra (see openAIParamDeclared) so it travels the typed path once,
+	// through normalizeReasoningEffort, instead of being forwarded verbatim.
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 
 	// Extra holds every top-level parameter this struct does not declare, as
 	// verbatim JSON, so it can be forwarded to an OpenAI-compatible upstream
@@ -1441,11 +1465,19 @@ func OpenAIToKiro(req *OpenAIRequest, thinking bool) *KiroPayload {
 	// The pointer itself is the "client said something" signal: a request may
 	// legitimately pin temperature to 0 for greedy decoding, and a
 	// "Temperature != 0" test reads that pin as "unspecified" and drops it.
-	if req.MaxTokens > 0 || req.Temperature != nil || req.TopP > 0 {
+	//
+	// reasoning_effort is validated before use: normalizeReasoningEffort drops an
+	// unknown level to "" so a gateway that 400s on a vocabulary it does not
+	// know never sees it. An effort alone (no tokens/temp/top_p) must still build
+	// the config, or the level is lost and the upstream falls back to its default
+	// budget — the bug this whole path exists to fix.
+	effort := normalizeReasoningEffort(req.ReasoningEffort)
+	if req.MaxTokens > 0 || req.Temperature != nil || req.TopP > 0 || effort != "" {
 		cfg := &InferenceConfig{
-			MaxTokens:      req.MaxTokens,
-			HasTemperature: req.Temperature != nil,
-			TopP:           req.TopP,
+			MaxTokens:       req.MaxTokens,
+			HasTemperature:  req.Temperature != nil,
+			TopP:            req.TopP,
+			ReasoningEffort: effort,
 		}
 		if req.Temperature != nil {
 			cfg.Temperature = *req.Temperature

@@ -32,6 +32,10 @@ var openAIParamDeclared = map[string]bool{
 	"stream":      true,
 	"tools":       true,
 	"tool_choice": true,
+	// reasoning_effort is declared AND whitelisted (normalizeReasoningEffort)
+	// before forwarding, so it must not also ride through Extra verbatim — an
+	// unvalidated level could reach a gateway that 400s on it.
+	"reasoning_effort": true,
 }
 
 // openAIParamBlocked covers keys the proxy must own or must not promise.
