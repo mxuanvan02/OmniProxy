@@ -10,11 +10,15 @@
 #   3. Downloads the tarball for this OS/arch plus its .sha256 and VERIFIES the
 #      checksum before touching anything.
 #   4. Backs the current binary up under $OMNIPROXY_HOME/.rollback/.
-#   5. Swaps in the new binary + web/ + version.json.
+#   5. Swaps in the new binary (atomic rename) and web/ (single-rename window;
+#      the previous web/ is kept aside until the health check passes).
 #   6. Restarts the service (systemd --user by default; override with
 #      $OMNIPROXY_RESTART_CMD, e.g. launchctl on macOS).
-#   7. Health-checks /v1/models; on failure it restores the backup, restarts
-#      again and exits non-zero. The previous binary is never deleted.
+#   7. Health-checks /v1/models; only on success writes version.json and prunes
+#      old rollbacks. On ANY failure (restart error or unhealthy) it restores
+#      binary + web, restarts again and exits non-zero. version.json keeps the
+#      OLD version through a rollback, so a retry after fixing the problem
+#      still sees the update as available.
 #
 # Env overrides:
 #   OMNIPROXY_REPO         default mxuanvan02/OmniProxy
@@ -46,7 +50,9 @@ MODE="update"
 case "${1:-}" in
   --check) MODE="check" ;;
   -h|--help)
-    sed -n '2,30p' "$0"; exit 0 ;;
+    # print the leading comment block only (stop at the first non-comment line)
+    awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"
+    exit 0 ;;
   "") ;;
   *) fail "unknown option: $1 (try --check or --help)" ;;
 esac
@@ -78,6 +84,12 @@ case "$(uname -m)" in
   arm64|aarch64) GOARCH="arm64" ;;
   *) fail "unsupported arch: $(uname -m)" ;;
 esac
+if [[ "$GOOS" == "windows" ]]; then
+  # Releases ship windows/amd64 only, and the systemd restart path does not
+  # exist there — require an explicit restart command up front.
+  [[ "$GOARCH" == "amd64" ]] || fail "windows/${GOARCH} is not built by the release workflow (amd64 only)"
+  [[ -n "$RESTART_CMD" ]] || fail "on Windows set OMNIPROXY_RESTART_CMD (no systemd restart path)"
+fi
 
 # ── Versions ──────────────────────────────────────────────────────────
 installed_version() {
@@ -92,7 +104,7 @@ CURRENT="$(installed_version || true)"
 log "installed: ${CURRENT} (${GOOS}/${GOARCH})"
 
 release_json="$(curl -fsSL --max-time 20 "$API" 2>/dev/null)" \
-  || fail "no GitHub Release found for ${REPO} (or the API is unreachable). Publish a v* tag first — see .github/workflows/release.yml"
+  || fail "no GitHub Release found for ${REPO} (or the API is unreachable/rate-limited). Publish a v* tag first — see .github/workflows/release.yml"
 
 LATEST="$(jq -r '.tag_name // empty' <<<"$release_json")"
 [[ -n "$LATEST" ]] || fail "release payload has no tag_name"
@@ -103,20 +115,22 @@ ASSET="omniproxy-${LATEST_V}-${GOOS}-${GOARCH}.tar.gz"
 ASSET_URL="$(jq -r --arg n "$ASSET" '.assets[]? | select(.name==$n) | .browser_download_url' <<<"$release_json" | head -1)"
 SHA_URL="$(jq -r --arg n "${ASSET}.sha256" '.assets[]? | select(.name==$n) | .browser_download_url' <<<"$release_json" | head -1)"
 [[ -n "$ASSET_URL" ]] || fail "release ${LATEST} has no asset ${ASSET}"
+# Gate in BOTH modes: an update that would be refused for a missing checksum
+# must not be announced as available.
+[[ -n "$SHA_URL" ]] || fail "release ${LATEST} has no ${ASSET}.sha256 — refusing to install an unverifiable binary"
 
-if [[ "$CURRENT" == "$LATEST_V" && "$MODE" == "check" ]]; then
-  log "up to date."
-  exit 0
-fi
 if [[ "$MODE" == "check" ]]; then
-  log "update available: ${CURRENT} -> ${LATEST_V}"
+  if [[ "$CURRENT" == "$LATEST_V" ]]; then
+    log "up to date."
+  else
+    log "update available: ${CURRENT} -> ${LATEST_V}"
+  fi
   exit 0
 fi
 if [[ "$CURRENT" == "$LATEST_V" ]]; then
   log "already at ${LATEST_V}; nothing to do (delete ${HOME_DIR}/version.json to force)."
   exit 0
 fi
-[[ -n "$SHA_URL" ]] || fail "release ${LATEST} has no ${ASSET}.sha256 — refusing to install an unverifiable binary"
 
 # ── Download + verify ─────────────────────────────────────────────────
 TMP="$(mktemp -d)"
@@ -146,9 +160,12 @@ mkdir -p "${HOME_DIR}/bin" "$ROLLBACK_DIR"
 BACKUP=""
 if [[ -f "$BIN" ]]; then
   BACKUP="${ROLLBACK_DIR}/omniproxy.$(date +%Y%m%d_%H%M%S)"
-  cp -p "$BIN" "$BACKUP"
+  cp "$BIN" "$BACKUP"
   log "backed up current binary -> ${BACKUP}"
 fi
+
+WEB_PREV="${WEB}.prev-update"
+rm -rf "$WEB_PREV"
 
 install -m 0755 "$NEW_BIN" "${BIN}.new"
 mv "${BIN}.new" "$BIN"
@@ -156,21 +173,23 @@ mv "${BIN}.new" "$BIN"
 if [[ -d "${SRC}/web" ]]; then
   rm -rf "${WEB}.new"
   cp -r "${SRC}/web" "${WEB}.new"
-  rm -rf "${WEB}.old"
-  [[ -d "$WEB" ]] && mv "$WEB" "${WEB}.old"
-  mv "${WEB}.new" "$WEB"
-  rm -rf "${WEB}.old"
-  log "web assets updated"
+  if [[ -d "$WEB" ]]; then
+    mv "$WEB" "$WEB_PREV"      # kept until the health check passes
+  fi
+  mv "${WEB}.new" "$WEB"       # single-rename window
+  log "web assets updated (previous kept at ${WEB_PREV##*/} until health-check)"
 fi
 
-cp "${SRC}/version.json" "${HOME_DIR}/version.json" 2>/dev/null \
-  || printf '{"version": "%s"}\n' "$LATEST_V" > "${HOME_DIR}/version.json"
-log "installed ${LATEST_V}"
+# version.json is NOT written yet — only a healthy new install claims the new
+# version, so a rollback leaves --check/update still seeing the update.
 
-# prune old rollbacks (never removes the one just made if it is the newest)
-ls -1t "${ROLLBACK_DIR}"/omniproxy.* 2>/dev/null | tail -n +"$((KEEP_ROLLBACKS + 1))" | while read -r old; do
+# prune old rollbacks — by NAME (the timestamp is in the filename), never by
+# mtime: `cp` backups can carry an old mtime and an mtime sort would delete
+# the just-made backup. Empty dir must not kill the script under pipefail.
+while IFS= read -r old; do
+  [[ -n "$old" && -f "$old" && "$old" != "$BACKUP" ]] || continue
   rm -f "$old" && log "pruned old rollback ${old##*/}"
-done
+done < <(ls -1 "${ROLLBACK_DIR}"/omniproxy.* 2>/dev/null | sort -r | tail -n +"$((KEEP_ROLLBACKS + 1))" || true)
 
 # ── Restart ───────────────────────────────────────────────────────────
 restart() {
@@ -200,21 +219,43 @@ health_ok() { # health_ok <seconds>
   return 1
 }
 
-restart
+rollback() { # restore binary + web, restart, report
+  log "rolling back..."
+  if [[ -n "$BACKUP" && -f "$BACKUP" ]]; then
+    install -m 0755 "$BACKUP" "${BIN}.rollback"
+    mv "${BIN}.rollback" "$BIN"
+  else
+    log "no previous binary to restore (fresh install); removing the failed binary"
+    rm -f "$BIN"
+  fi
+  if [[ -d "$WEB_PREV" ]]; then
+    rm -rf "$WEB"
+    mv "$WEB_PREV" "$WEB"
+    log "web assets rolled back"
+  fi
+  restart || log "restart after rollback failed — start the service manually"
+  if health_ok 20; then
+    fail "update to ${LATEST_V} rolled back to ${CURRENT}; service is healthy again (version.json unchanged, so re-running the update will retry)"
+  fi
+  fail "update to ${LATEST_V} rolled back but the service is STILL unhealthy — check ${HOME_DIR}/logs and start it manually"
+}
+
+if ! restart; then
+  log "restart command failed"
+  rollback
+fi
+
 if health_ok 30; then
+  # Commit the new version only now.
+  if [[ -f "${SRC}/version.json" ]]; then
+    cp "${SRC}/version.json" "${HOME_DIR}/version.json"
+  else
+    printf '{"version": "%s"}\n' "$LATEST_V" > "${HOME_DIR}/version.json"
+  fi
+  rm -rf "$WEB_PREV" "${WEB}.old" "${WEB}.new"
   log "update complete: ${CURRENT} -> ${LATEST_V}"
   exit 0
 fi
 
-# ── Rollback ──────────────────────────────────────────────────────────
-log "health-check FAILED — rolling back..."
-if [[ -n "$BACKUP" && -f "$BACKUP" ]]; then
-  install -m 0755 "$BACKUP" "${BIN}.rollback"
-  mv "${BIN}.rollback" "$BIN"
-  restart || true
-  if health_ok 20; then
-    fail "update to ${LATEST_V} rolled back to ${CURRENT}; service is healthy again"
-  fi
-  fail "update to ${LATEST_V} rolled back to ${CURRENT} but the service is STILL unhealthy — check $(dirname "$BIN")/../logs and start it manually"
-fi
-fail "health-check failed and no backup exists to roll back to — check the logs under ${HOME_DIR}/logs"
+log "health-check FAILED"
+rollback

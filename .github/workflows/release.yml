@@ -61,7 +61,16 @@ jobs:
           go build -trimpath -ldflags "-s -w" -o "dist/${name}/${exe}" .
           # The legacy dashboard is served from disk next to the binary; ship it.
           cp -r web "dist/${name}/web"
-          cp version.json "dist/${name}/version.json"
+          # Stamp the tag version into the packaged version.json so the artifact
+          # never disagrees with the tag even if the repo bump was forgotten —
+          # scripts/update.sh keys "already installed" off this file, and a
+          # mismatch would make it re-install the same release forever.
+          command -v jq >/dev/null 2>&1 || { echo "jq missing on runner" >&2; exit 1; }
+          jq --arg v "${version}" '.version = $v' version.json > "dist/${name}/version.json"
+          repo_version="$(jq -r '.version // empty' version.json)"
+          if [ "${repo_version}" != "${version}" ]; then
+            echo "::warning::repo version.json says '${repo_version}' but tag is '${version}'; artifact stamped with '${version}'. Bump version.json in a chore(release) commit to keep them in sync."
+          fi
           tar czf "dist/${name}.tar.gz" -C dist "${name}"
           ( cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" )
 
@@ -106,6 +115,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh release create "${GITHUB_REF_NAME}" assets/* \
+          # Idempotent: a deleted-and-repushed tag finds the existing release and
+          # just replaces its assets instead of hard-failing.
+          if gh release create "${GITHUB_REF_NAME}" assets/* \
             --title "${GITHUB_REF_NAME}" \
-            --notes-file notes.md
+            --notes-file notes.md; then
+            echo "release ${GITHUB_REF_NAME} created"
+          else
+            echo "release ${GITHUB_REF_NAME} already exists — replacing assets"
+            gh release upload "${GITHUB_REF_NAME}" assets/* --clobber
+            gh release edit "${GITHUB_REF_NAME}" --notes-file notes.md
+          fi
