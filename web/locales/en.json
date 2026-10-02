@@ -785,7 +785,6 @@
   "usage.noAccountsConnected": "No accounts connected",
   "usage.recentRequests": "Recent Requests",
   "usage.noRequestsYet": "No requests yet.",
-  "usage.inOut": "In / Out",
   "usage.when": "When",
   "usage.tokens": "Tokens",
   "usage.cost": "Cost",
@@ -1113,5 +1112,11 @@
   "tabs.capabilities": "Capabilities",
   "capabilities.title": "Capabilities",
   "capabilities.refresh": "Refresh",
-  "capabilities.hint": "Each API type OmniProxy serves — chat, image, voice, video, music, embedding — with verification status and the endpoint an Agent/CLI can point at."
+  "capabilities.hint": "Each API type OmniProxy serves — chat, image, voice, video, music, embedding — with verification status and the endpoint an Agent/CLI can point at.",
+  "usage.kind": "Kind",
+  "usage.cache": "Cache",
+  "usage.credit": "Credit",
+  "usage.usd": "USD",
+  "usage.apiKey": "Key",
+  "usage.creditHint": "1 credit = $0.01"
 }

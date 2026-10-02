@@ -785,7 +785,6 @@
   "usage.noAccountsConnected": "Chưa có tài khoản nào kết nối",
   "usage.recentRequests": "Yêu cầu gần đây",
   "usage.noRequestsYet": "Chưa có yêu cầu nào.",
-  "usage.inOut": "Vào / Ra",
   "usage.when": "Thời gian",
   "usage.tokens": "Token",
   "usage.cost": "Phí",
@@ -1113,5 +1112,11 @@
   "tabs.capabilities": "Năng lực",
   "capabilities.title": "Năng lực (Capabilities)",
   "capabilities.refresh": "Làm mới",
-  "capabilities.hint": "Từng loại API OmniProxy phục vụ — chat, ảnh, giọng nói, video, nhạc, embedding — kèm trạng thái xác minh và endpoint để Agent/CLI trỏ vào."
+  "capabilities.hint": "Từng loại API OmniProxy phục vụ — chat, ảnh, giọng nói, video, nhạc, embedding — kèm trạng thái xác minh và endpoint để Agent/CLI trỏ vào.",
+  "usage.kind": "Loại",
+  "usage.cache": "Cache",
+  "usage.credit": "Credit",
+  "usage.usd": "USD",
+  "usage.apiKey": "Key",
+  "usage.creditHint": "1 credit = $0.01"
 }

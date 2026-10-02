@@ -327,6 +327,22 @@ func buildSubscriptionRows(subs []config.ExternalSubscription) []quotaRow {
 			Recurring: true, // a plan window resets by definition
 			Unit:      "%",
 		}
+		// When the plan catalog supplied a credit ceiling, express the row in
+		// credits instead of a bare percentage: "780 / 1000 credit" answers
+		// "how much is left" directly, while "78%" does not say whether that is
+		// 20 credits or 2000. Remaining% is unchanged, so the colour thresholds
+		// and the sort order above keep working identically.
+		//
+		// A zero ceiling means the plan was not in the catalog (expired or added
+		// after the cache); keep the percentage row rather than render "0 / 0".
+		if s.CreditCeiling > 0 {
+			r.Used = s.CreditUsed
+			r.Total = s.CreditCeiling
+			r.Unit = "credit"
+			if s.PlanTitle != "" {
+				r.Name = s.PlanTitle + " (" + name + ")"
+			}
+		}
 		if s.NextResetTime > 0 {
 			ts := s.NextResetTime
 			r.ResetAt = &ts
