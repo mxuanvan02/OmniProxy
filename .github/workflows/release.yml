@@ -1,0 +1,128 @@
+name: Release
+
+# Pushing a `v*` tag builds prebuilt binaries for every supported platform and
+# publishes them as a GitHub Release. The release notes are the matching
+# `## [X.Y.Z]` section of CHANGELOG.md.
+#
+# To cut a release:
+#   1. bump version.json + move [Unreleased] into [X.Y.Z] in CHANGELOG.md (chore(release) commit)
+#   2. git tag vX.Y.Z && git push origin vX.Y.Z
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build and package
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          # Injection-safe: GITHUB_REF_NAME is read from env (not inline), and
+          # matrix.goos/goarch are static literals defined in this file — no
+          # untrusted github.event.* value reaches the shell.
+          version="${GITHUB_REF_NAME#v}"
+          name="omniproxy-${version}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          exe="omniproxy"
+          [ "${{ matrix.goos }}" = "windows" ] && exe="omniproxy.exe"
+          mkdir -p "dist/${name}"
+          go build -trimpath -ldflags "-s -w" -o "dist/${name}/${exe}" .
+          # The legacy dashboard is served from disk next to the binary; ship it.
+          cp -r web "dist/${name}/web"
+          # Stamp the tag version into the packaged version.json so the artifact
+          # never disagrees with the tag even if the repo bump was forgotten —
+          # scripts/update.sh keys "already installed" off this file, and a
+          # mismatch would make it re-install the same release forever.
+          command -v jq >/dev/null 2>&1 || { echo "jq missing on runner" >&2; exit 1; }
+          jq --arg v "${version}" '.version = $v' version.json > "dist/${name}/version.json"
+          repo_version="$(jq -r '.version // empty' version.json)"
+          if [ "${repo_version}" != "${version}" ]; then
+            echo "::warning::repo version.json says '${repo_version}' but tag is '${version}'; artifact stamped with '${version}'. Bump version.json in a chore(release) commit to keep them in sync."
+          fi
+          tar czf "dist/${name}.tar.gz" -C dist "${name}"
+          ( cd dist && sha256sum "${name}.tar.gz" > "${name}.tar.gz.sha256" )
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: |
+            dist/*.tar.gz
+            dist/*.tar.gz.sha256
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          awk -v ver="${version}" '
+            $0 ~ "^## \\[" ver "\\]" { grab = 1; next }
+            grab && /^## \[/ { grab = 0 }
+            grab { print }
+          ' CHANGELOG.md > notes.md
+          if [ ! -s notes.md ]; then
+            echo "See [CHANGELOG.md](CHANGELOG.md) for details." > notes.md
+          fi
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Idempotent: a deleted-and-repushed tag finds the existing release and
+          # just replaces its assets instead of hard-failing.
+          if gh release create "${GITHUB_REF_NAME}" assets/* \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file notes.md; then
+            echo "release ${GITHUB_REF_NAME} created"
+          else
+            echo "release ${GITHUB_REF_NAME} already exists — replacing assets"
+            gh release upload "${GITHUB_REF_NAME}" assets/* --clobber
+            gh release edit "${GITHUB_REF_NAME}" --notes-file notes.md
+          fi

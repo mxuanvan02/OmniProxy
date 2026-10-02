@@ -17,7 +17,7 @@ OmniProxy được phát triển từ dự án **SuperKiro**, bổ sung danh m�
   * **OpenAI Codex OAuth** — luồng PKCE qua trình duyệt, tự động làm mới token, theo dõi chu kỳ hạn mức.
   * **Google Antigravity OAuth** — luồng PKCE qua trình duyệt tới Cloud Code Assist, tự khám phá project theo từng tài khoản, và nhập credential mà Antigravity / Gemini CLI đã cài sẵn ghi ra máy. Đọc lưu ý ở [§7](#7-điều-khoản-dịch-vụ-của-google-antigravity) trước khi dùng.
   * **AgentRouter** — chuyển đổi định dạng payload tác vụ, ánh xạ sự kiện stream `agent_thought` sang `reasoning_content`, duy trì `X-Agent-Session-ID` giữa các lượt.
-  * **Cổng tương thích OpenAI** — bất kỳ endpoint bên ngoài, tự khám phá danh mục mô hình từ `/v1/models`.
+  * **Cổng tương thích OpenAI** — bất kỳ endpoint bên ngoài, tự khám phá danh mục mô hình từ `/v1/models`, tùy chọn giao thức Responses-API theo từng tài khoản (`externalApiDialect`), thanh hạn mức plan-window cho cổng new-api (mức dùng subscription 5h/7d), và chuyển tiếp nguyên văn các tham số request chưa khai báo để không âm thầm mất dữ liệu.
   * **AWS IAM SSO / Builder ID** — đăng nhập và làm mới token nền cho CodeWhisperer/Kiro.
   * **Service API key** — tìm kiếm web qua Firecrawl, Tavily, Exa, Jina Reader.
   * **Gommo AutoAI** — token dài hạn cho API media sau `api.gommo.net` (cũng là backend của front end 79AI).
@@ -89,7 +89,18 @@ Dịch vụ lắng nghe tại `http://127.0.0.1:8080` (hoặc cổng khai báo t
 docker compose up -d
 ```
 
-> Bản cài mới bind `127.0.0.1` và sinh mật khẩu admin ngẫu nhiên, in ra stderr đúng một lần khi khởi động đầu tiên — hãy lưu lại. Request từ client mặc định không bị kiểm tra API key: hãy đặt `requireApiKey: true`, và chỉ đặt `host` thành `0.0.0.0` khi thực sự có ý định (admin API để lộ toàn bộ token upstream đã lưu).
+### Cập nhật lên bản phát hành mới
+
+Mỗi [GitHub Release](https://github.com/mxuanvan02/OmniProxy/releases) đính kèm binary dựng sẵn cho Linux/macOS (amd64, arm64) và Windows (amd64). `scripts/update.sh` là đường cập nhật nhanh — kiểm tra release mới nhất, xác minh sha256, backup binary hiện tại vào `.rollback/`, thay binary + web assets mới, khởi động lại service, health-check, và TỰ ĐỘNG rollback nếu bản mới không lên được:
+
+```bash
+./scripts/update.sh --check   # xem sẽ đổi gì; không đụng gì cả
+./scripts/update.sh           # tải → xác minh → backup → thay → restart → health-check
+```
+
+Trỏ vào bản cài của bạn bằng `OMNIPROXY_HOME` (mặc định `~/.omniproxy-user`) và `OMNIPROXY_PORT` (mặc định `8080`). Restart đi qua `systemctl --user restart omniproxy-user.service`; trên macOS hoặc setup riêng thì đặt `OMNIPROXY_RESTART_CMD`. Mọi biến override xem ở đầu script.
+
+> Bản cài mới bind `127.0.0.1` và sinh mật khẩu admin ngẫu nhiên, in ra stderr đúng một lần khi khởi động đầu tiên — hãy lưu lại. Request từ client mặc định không bị kiểm tra API key: hãy đặt `requireApiKey: true` và chỉ đặt `host` thành `0.0.0.0` khi thực sự có ý định (admin API để lộ toàn bộ token upstream đã lưu).
 
 ---
 
