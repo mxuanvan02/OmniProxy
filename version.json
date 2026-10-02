@@ -1,5 +1,5 @@
 {
-  "version": "0.5.0",
-  "changelog": "Plan-window quota for new-api gateways (5h/7d subscription bars), Chat Completions parameter passthrough to external upstreams, validated reasoning_effort forwarding, and error-classifier fixes so truncated streams and Cloudflare 5xx no longer park healthy accounts",
+  "version": "0.5.1",
+  "changelog": "GitHub Release pipeline with prebuilt binaries (linux/darwin amd64+arm64, windows amd64, sha256-verified), scripts/update.sh fast self-update with automatic rollback, and README (EN/VI/CN) update instructions",
   "download": "https://github.com/mxuanvan02/OmniProxy"
 }
