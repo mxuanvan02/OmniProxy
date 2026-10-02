@@ -4,6 +4,10 @@ All notable changes to OmniProxy are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Added
+- **Release binaries + fast self-update.** A `v*` tag now triggers `.github/workflows/release.yml`: prebuilt binaries for linux/darwin (amd64+arm64) and windows (amd64), each packaged with `web/` + `version.json`, sha256-verified, published as a GitHub Release whose notes are the matching CHANGELOG section. `scripts/update.sh` applies a release to a running install — `--check` is read-only; the update path verifies the sha256 before touching anything, backs the current binary up under `.rollback/` (5 kept), swaps binary + web atomically, restarts via systemd-user (or `OMNIPROXY_RESTART_CMD`), health-checks `/v1/models` for 30s, and auto-rolls back + restarts on failure. Sandbox-tested: `scripts/test-update-sandbox.sh` covers check/update/rollback/up-to-date/tampered-tarball paths against a fake release API.
+- README (EN/VI/CN): "Update to a new release" section under Installation; the OpenAI-compatible-gateway bullet now lists the 0.5.0 additions (per-account Responses dialect, plan-window quota bars, verbatim parameter passthrough).
+
 ## [0.5.0] — 2026-10-01
 
 ### Security

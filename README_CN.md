@@ -17,7 +17,7 @@ OmniProxy 派生自 **SuperKiro** 项目，并在其基础上扩展了按模型�
   * **OpenAI Codex OAuth** — 浏览器 PKCE 流程、令牌自动刷新、额度窗口追踪。
   * **Google Antigravity OAuth** — 面向 Cloud Code Assist 的浏览器 PKCE 流程、按账户发现 project，并可导入本机已安装的 Antigravity / Gemini CLI 写入的凭据。启用前请先阅读 [§7](#7-google-antigravity-服务条款) 的说明。
   * **AgentRouter** — 转换 agent 载荷格式，将 `agent_thought` 流事件映射为 `reasoning_content`，并在多轮之间维持 `X-Agent-Session-ID`。
-  * **OpenAI 兼容网关** — 任意外部端点，通过 `/v1/models` 发现模型目录。
+  * **OpenAI 兼容网关** — 任意外部端点，通过 `/v1/models` 发现模型目录；支持按账户选择 Responses-API 协议（`externalApiDialect`）、new-api 网关的 plan-window 配额条（5 小时 / 7 天订阅用量），并将未声明的请求参数原样转发，避免被静默丢弃。
   * **AWS IAM SSO / Builder ID** — CodeWhisperer/Kiro 的登录与后台令牌刷新。
   * **服务 API Key** — 通过 Firecrawl、Tavily、Exa、Jina Reader 进行网页搜索。
   * **Gommo AutoAI** — 用于 `api.gommo.net` 背后媒体 API 的长期令牌（79AI 前端使用的也是同一后端）。
@@ -89,7 +89,18 @@ go build -o omniproxy .
 docker compose up -d
 ```
 
-> 全新安装会绑定 `127.0.0.1`，并在首次启动时生成随机管理员密码，仅向 stderr 打印一次 —— 请及时保存。客户端请求默认不校验 API Key：请设置 `requireApiKey: true`；只有确实需要时才把 `host` 改为 `0.0.0.0`（管理 API 会暴露所有已保存的上游令牌）。
+### 更新到新发行版
+
+每个 [GitHub Release](https://github.com/mxuanvan02/OmniProxy/releases) 都附带 Linux/macOS（amd64、arm64）和 Windows（amd64）的预构建二进制。`scripts/update.sh` 是快速更新通道——检查最新 release、校验 sha256、把当前二进制备份到 `.rollback/`、替换二进制与 web 资源、重启服务、健康检查，并在新版本起不来时自动回滚：
+
+```bash
+./scripts/update.sh --check   # 只看会变更什么，不做任何修改
+./scripts/update.sh           # 下载 → 校验 → 备份 → 替换 → 重启 → 健康检查
+```
+
+用 `OMNIPROXY_HOME`（默认 `~/.omniproxy-user`）和 `OMNIPROXY_PORT`（默认 `8080`）指向你的安装目录。重启默认走 `systemctl --user restart omniproxy-user.service`；macOS 或自定义部署请设置 `OMNIPROXY_RESTART_CMD`。全部可覆盖变量见脚本头部注释。
+
+> 全新安装会绑定 `127.0.0.1`，并在首次启动时生成随机管理员密码，仅向 stderr 打印一次 —— 请及时保存。客户端请求默认不校验 API Key：请设置 `requireApiKey: true`，且只有在确有需要时才把 `host` 改为 `0.0.0.0`（管理 API 会暴露所有已保存的上游令牌）。
 
 ---
 

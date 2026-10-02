@@ -17,7 +17,7 @@ OmniProxy is derived from the **SuperKiro** project, extended with model-family 
   * **OpenAI Codex OAuth** — browser PKCE flow, automatic token refresh, quota-window tracking.
   * **Google Antigravity OAuth** — browser PKCE flow against Cloud Code Assist, per-account project discovery, and import of credentials an installed Antigravity / Gemini CLI already wrote locally. See the note in [§7](#7-google-antigravity-terms-of-service) before enabling it.
   * **AgentRouter** — converts the agent payload format, maps `agent_thought` stream events to `reasoning_content`, and maintains `X-Agent-Session-ID` across turns.
-  * **OpenAI-compatible gateways** — any external endpoint, with model catalog discovery from `/v1/models`.
+  * **OpenAI-compatible gateways** — any external endpoint, with model catalog discovery from `/v1/models`, optional per-account Responses-API dialect (`externalApiDialect`), plan-window quota bars for new-api gateways (5h/7d subscription usage), and undeclared request parameters forwarded verbatim so nothing the IR cannot model is silently dropped.
   * **AWS IAM SSO / Builder ID** — login and background token refresh for CodeWhisperer/Kiro.
   * **Service API keys** — web search via Firecrawl, Tavily, Exa, Jina Reader.
   * **Gommo AutoAI** — long-lived token for the media API behind `api.gommo.net` (also served by the 79AI front end).
@@ -89,7 +89,18 @@ The server listens on `http://127.0.0.1:8080` (or the port in `data/config.json`
 docker compose up -d
 ```
 
-> A fresh install binds `127.0.0.1` and generates a random admin password, printed once to stderr on first start — save it. Client requests are not key-checked by default: set `requireApiKey: true`, and set `host` to `0.0.0.0` only deliberately (the admin API exposes every stored upstream token).
+### Update to a new release
+
+Prebuilt binaries for Linux/macOS (amd64, arm64) and Windows (amd64) are attached to every [GitHub Release](https://github.com/mxuanvan02/OmniProxy/releases). `scripts/update.sh` is the fast path — it checks the latest release, verifies the sha256, backs the current binary up under `.rollback/`, swaps in the new binary + web assets, restarts the service, health-checks it, and rolls back automatically if the new version does not come up:
+
+```bash
+./scripts/update.sh --check   # what would change; nothing is touched
+./scripts/update.sh           # download → verify → backup → swap → restart → health-check
+```
+
+Point it at your installation with `OMNIPROXY_HOME` (default `~/.omniproxy-user`) and `OMNIPROXY_PORT` (default `8080`). Restart goes through `systemctl --user restart omniproxy-user.service`; on macOS or custom setups set `OMNIPROXY_RESTART_CMD` instead. See the header of the script for every override.
+
+> A fresh install binds `127.0.0.1` and generates a random admin password, printed once to stderr on first start — save it. Client requests are not key-checked by default: set `requireApiKey: true` and set `host` to `0.0.0.0` only deliberately (the admin API exposes every stored upstream token).
 
 ---
 
