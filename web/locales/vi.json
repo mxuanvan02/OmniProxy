@@ -1118,5 +1118,11 @@
   "usage.credit": "Credit",
   "usage.usd": "USD",
   "usage.apiKey": "Key",
-  "usage.creditHint": "1 credit = $0.01"
+  "usage.creditHint": "1 credit = $0.01",
+  "usage.httpStatus": "Mã",
+  "usage.httpStatusHint": "Mã trạng thái upstream trả về. Dấu gạch nghĩa là request không nhận được phản hồi HTTP (rớt kết nối, timeout, hoặc stream bị cắt giữa chừng).",
+  "usage.latency": "Thời gian",
+  "usage.latencyHint": "Lượt gọi này mất bao lâu ở phía upstream.",
+  "usage.creditEstHint": "Số ước lượng theo giá niêm yết của hãng. Gateway này không công bố bảng giá nên không biết họ thực sự thu bao nhiêu.",
+  "usage.creditProvHint": "Giá do chính gateway này công bố."
 }

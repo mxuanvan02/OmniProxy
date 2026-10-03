@@ -4145,6 +4145,21 @@ img.brand-icon {
   font-size: 0.72rem;
   color: var(--muted-foreground);
 }
+.usage-recent-account {
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75rem;
+}
+/* Upstream HTTP status. Colour-coded by class so a wall of 5xx is visible
+   without reading each number. usage-http-none (em dash) is deliberately
+   distinct from usage-http-ok: a request that never got a response is not a
+   success, and rendering it green would hide a real outage. */
+.usage-http-ok   { font-family: var(--font-mono, monospace); color: #16a34a; font-weight: 600; }
+.usage-http-warn { font-family: var(--font-mono, monospace); color: #d97706; font-weight: 600; }
+.usage-http-bad  { font-family: var(--font-mono, monospace); color: #dc2626; font-weight: 600; }
+.usage-http-none { color: var(--muted-foreground); }
 /* Kind badge: which endpoint served the request (Chat / Responses / Claude /
    Image / Video / Search / …). Colour-coded so a burst of one kind is visible
    at a glance; the palette mirrors the topology node colours. */

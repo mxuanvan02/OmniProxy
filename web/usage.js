@@ -869,13 +869,68 @@ function requestKind(r) {
 // ("0.2 credit" = $0.002/request) and top-up page ("100 credit" = 500000 quota at
 // quota_per_unit 500000 = $1). realCost is USD, so credit = realCost * 100.
 // Falls back to the legacy `cost` field when realCost is absent.
+//
+// A figure priced from the built-in vendor table (costSource "vendor") is an
+// ESTIMATE of what a reseller charged, so it is prefixed with "~". Without the
+// marker a vendor list price is indistinguishable from a real charge, and its
+// precision makes it look authoritative: the claude-opus-4.8 row that prompted
+// this displayed $9.3331, which is Anthropic's list price for those exact
+// tokens — correct arithmetic, wrong claim, because the gateway that served it
+// (JUSTWOKER) answers 401 on /api/pricing so no real rate was ever known.
 function fmtCredit(r) {
   const usd = (r && (r.realCost != null ? r.realCost : r.cost)) || 0;
   const credit = usd * 100;
   if (credit <= 0) return '—';
   // Sub-cent requests (0.0001) need more precision than cents; cap at 4dp and
   // trim trailing zeros so a $0.002 request reads "0.2" not "0.2000".
-  return String(Math.round(credit * 10000) / 10000);
+  const body = String(Math.round(credit * 10000) / 10000);
+  return isEstimatedCost(r) ? '~' + body : body;
+}
+
+// isEstimatedCost reports whether the cost figure came from the built-in vendor
+// table rather than the serving gateway's own price list.
+function isEstimatedCost(r) {
+  return !!r && r.costSource === 'vendor';
+}
+
+// costSourceTitle explains where a figure came from, for the cell tooltip.
+function costSourceTitle(r) {
+  if (isEstimatedCost(r)) {
+    return typeof t === 'function'
+      ? t('usage.creditEstHint')
+      : 'Estimate from the vendor list price — this gateway publishes no price list, so the real charge is unknown';
+  }
+  if (r && r.costSource === 'provider') {
+    return typeof t === 'function'
+      ? t('usage.creditProvHint')
+      : "This gateway's own published price";
+  }
+  return '';
+}
+
+// fmtHTTPStatus renders the upstream status code with a colour class. Zero means
+// the attempt never got an HTTP response (connection reset, idle timeout, cut
+// stream) — that renders as an em dash, NOT as a success code, because inventing
+// a 200 for a stream that died mid-flight is exactly the kind of wrong-but-clean
+// number that hides a real outage.
+function fmtHTTPStatus(r) {
+  const code = r && r.httpStatus ? Number(r.httpStatus) : 0;
+  if (!code) return '<span class="usage-http-none">—</span>';
+  const cls = code < 300 ? 'usage-http-ok' : code < 500 ? 'usage-http-warn' : 'usage-http-bad';
+  return '<span class="' + cls + '">' + code + '</span>';
+}
+
+// fmtLatency renders the per-attempt upstream duration. 0 means not measured
+// (records written before this field existed, or the legacy service-endpoint
+// path), which renders as an em dash rather than "0ms" — a real 0ms call is
+// implausible and would read as a bug.
+function fmtLatency(r) {
+  const ms = r && r.latencyMs ? Number(r.latencyMs) : 0;
+  if (!ms) return '—';
+  if (ms < 1000) return ms + 'ms';
+  const s = ms / 1000;
+  if (s < 60) return (Math.round(s * 10) / 10) + 's';
+  return Math.floor(s / 60) + 'm' + Math.round(s % 60) + 's';
 }
 
 function renderRecentRequests() {
@@ -904,12 +959,15 @@ function renderRecentRequests() {
       '<thead><tr>' +
       '<th></th>' +
       '<th>' + L('usage.tabModel', 'Model') + '</th>' +
+      '<th>' + L('usage.tabAccount', 'Account') + '</th>' +
       '<th>' + L('usage.kind', 'Kind') + '</th>' +
+      '<th class="text-center" title="' + escAttr(L('usage.httpStatusHint', 'Status returned by the upstream')) + '">' + L('usage.httpStatus', 'Status') + '</th>' +
       '<th class="text-right">' + L('usage.input', 'In') + '</th>' +
       '<th class="text-right">' + L('usage.output', 'Out') + '</th>' +
       '<th class="text-right">' + L('usage.cache', 'Cache') + '</th>' +
       '<th class="text-right" title="' + escAttr(L('usage.creditHint', '1 credit = $0.01')) + '">' + L('usage.credit', 'Credit') + '</th>' +
       '<th class="text-right">' + L('usage.usd', 'USD') + '</th>' +
+      '<th class="text-right">' + L('usage.latency', 'Time') + '</th>' +
       '<th>' + L('usage.apiKey', 'Key') + '</th>' +
       '<th class="text-right">' + L('usage.when', 'When') + '</th>' +
       '</tr></thead><tbody>';
@@ -919,27 +977,31 @@ function renderRecentRequests() {
       const kind = requestKind(r);
       const cached = r.cachedTokens || r.cacheReadTokens || 0;
       const keyShort = r.apiKeyId ? String(r.apiKeyId).slice(0, 8) : '—';
+      const acct = getUsageAccountName(r);
+      const costTitle = costSourceTitle(r);
       html += '<tr' + (isError ? ' class="usage-recent-error-row"' : '') + '>' +
         '<td><span class="usage-status-dot ' + (isError ? 'error' : 'success') + '"></span></td>' +
         '<td class="usage-recent-model" title="' + escAttr(r.model) + '">' + escHtml(r.model || '-') + '</td>' +
+        '<td class="usage-recent-account" title="' + escAttr(acct) + '">' + escHtml(acct) + '</td>' +
         '<td><span class="usage-kind-badge usage-kind-' + escAttr(kind.toLowerCase()) + '">' + escHtml(kind) + '</span></td>' +
+        '<td class="text-center">' + fmtHTTPStatus(r) + '</td>' +
         '<td class="text-right text-primary">' + fmtNum(r.inputTokens) + '</td>' +
         '<td class="text-right text-success">' + fmtNum(r.outputTokens) + '</td>' +
         '<td class="text-right" style="color:#16a34a">' + (cached > 0 ? fmtNum(cached) : '—') + '</td>' +
-        '<td class="text-right usage-recent-credit">' + fmtCredit(r) + '</td>' +
-        '<td class="text-right text-warning">' + (r.realCost != null ? '$' + Number(r.realCost).toFixed(4) : '—') + '</td>' +
+        '<td class="text-right usage-recent-credit" title="' + escAttr(costTitle) + '">' + fmtCredit(r) + '</td>' +
+        '<td class="text-right text-warning" title="' + escAttr(costTitle) + '">' +
+          (r.realCost != null ? (isEstimatedCost(r) ? '~' : '') + '$' + Number(r.realCost).toFixed(4) : '—') + '</td>' +
+        '<td class="text-right text-text-muted">' + fmtLatency(r) + '</td>' +
         '<td class="usage-recent-key font-mono" title="' + escAttr(r.apiKeyId || '') + '">' + escHtml(keyShort) + '</td>' +
         '<td class="text-right text-text-muted whitespace-nowrap">';
       if (isError && r.error) {
         // An error is only actionable when the operator knows WHICH account
-        // produced it. Prefix the account label (nickname/email, falling back
-        // to the account ID) so failures can be traced without opening the
-        // details drawer.
-        const errAccount = getUsageAccountName(r);
-        const errTitle = (errAccount !== '-' ? errAccount + ' — ' : '') + r.error;
+        // produced it — that is now its own column, so the message itself goes
+        // under the model name where there is room, instead of being squeezed
+        // into the trailing time cell.
+        const errTitle = r.error;
         html += '<div class="usage-recent-error" title="' + escAttr(errTitle) + '">' +
-          (errAccount !== '-' ? '<span class="usage-recent-error-account">' + escHtml(errAccount) + '</span> ' : '') +
-          escHtml(r.error) + '</div>';
+          escHtml(errTitle) + '</div>';
       }
       html += '<span class="usage-time-ago" data-ts="' + r.timestamp + '">' + timeAgo(r.timestamp) + '</span>';
       html += '</td></tr>';
@@ -1938,7 +2000,7 @@ function renderRequestDetailsTable() {
     // conversion rather than sent as a second number that could drift.
     html += '<div class="usage-details-table-wrap"><table class="usage-details-table">' +
       '<thead><tr>' +
-      '<th>' + (typeof t === 'function' ? t('usage.tabModel') : 'Model') + '</th><th>' + (typeof t === 'function' ? t('usage.kind') : 'Kind') + '</th><th>' + (typeof t === 'function' ? t('usage.tabAccount') : 'Account') + '</th><th>' + (typeof t === 'function' ? t('usage.status') : 'Status') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.input') : 'Input') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.output') : 'Output') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.cache') : 'Cache') + '</th><th class="text-right" title="' + escAttr(typeof t === 'function' ? t('usage.creditHint') : '1 credit = $0.01') + '">' + (typeof t === 'function' ? t('usage.credit') : 'Credit') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.usd') : 'USD') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.when') : 'When') + '</th><th></th>' +
+      '<th>' + (typeof t === 'function' ? t('usage.tabModel') : 'Model') + '</th><th>' + (typeof t === 'function' ? t('usage.kind') : 'Kind') + '</th><th>' + (typeof t === 'function' ? t('usage.tabAccount') : 'Account') + '</th><th class="text-center" title="' + escAttr(typeof t === 'function' ? t('usage.httpStatusHint') : '') + '">' + (typeof t === 'function' ? t('usage.httpStatus') : 'Status') + '</th><th>' + (typeof t === 'function' ? t('usage.status') : 'Result') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.input') : 'Input') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.output') : 'Output') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.cache') : 'Cache') + '</th><th class="text-right" title="' + escAttr(typeof t === 'function' ? t('usage.creditHint') : '1 credit = $0.01') + '">' + (typeof t === 'function' ? t('usage.credit') : 'Credit') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.usd') : 'USD') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.latency') : 'Time') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.when') : 'When') + '</th><th></th>' +
       '</tr></thead><tbody>';
 
     for (const d of detailsData) {
@@ -1951,12 +2013,14 @@ function renderRequestDetailsTable() {
         '<td class="usage-details-model" title="' + escAttr(d.model) + '">' + escHtml(d.model || '-') + '</td>' +
         '<td><span class="usage-kind-badge usage-kind-' + escAttr(kind.toLowerCase()) + '">' + escHtml(kind) + '</span></td>' +
         '<td class="usage-details-account" title="' + escAttr(getUsageAccountName(d)) + '">' + escHtml(getUsageAccountName(d)) + '</td>' +
+        '<td class="text-center">' + fmtHTTPStatus(d) + '</td>' +
         '<td><span class="usage-status-dot ' + (ok ? 'success' : 'error') + '"></span> ' + escHtml(translateStatus(d.status)) + '</td>' +
         '<td class="text-right">' + fmtNum(inputTokens) + '</td>' +
         '<td class="text-right">' + fmtNum(outputTokens) + '</td>' +
         '<td class="text-right" style="color:#16a34a">' + (d.cachedTokens > 0 ? fmtNum(d.cachedTokens) : '—') + '</td>' +
-        '<td class="text-right usage-recent-credit">' + fmtCredit(d) + '</td>' +
-        '<td class="text-right text-warning">' + (d.realCost != null ? '$' + Number(d.realCost).toFixed(4) : '—') + '</td>' +
+        '<td class="text-right usage-recent-credit" title="' + escAttr(costSourceTitle(d)) + '">' + fmtCredit(d) + '</td>' +
+        '<td class="text-right text-warning" title="' + escAttr(costSourceTitle(d)) + '">' + (d.realCost != null ? (isEstimatedCost(d) ? '~' : '') + '$' + Number(d.realCost).toFixed(4) : '—') + '</td>' +
+        '<td class="text-right text-text-muted">' + fmtLatency(d) + '</td>' +
         '<td class="text-right text-text-muted whitespace-nowrap"><span class="usage-time-ago" data-ts="' + d.timestamp + '">' + timeAgo(d.timestamp) + '</span></td>' +
         '<td class="text-right"><button class="usage-details-view-btn" data-detail-idx="' + detailsData.indexOf(d) + '">' + (typeof t === 'function' ? t('usage.view') : 'View') + '</button></td>' +
         '</tr>';

@@ -4303,7 +4303,11 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 		if isCodexAccount(account) {
 			effectiveCallback = newCodexCoalescer(callback)
 		}
+		// Per-attempt wall time around the upstream call only, so a retry loop
+		// reports what each attempt actually cost rather than the turn total.
+		attemptStart := time.Now()
 		err := dispatchChat(ctx, account, payload, effectiveCallback)
+		attemptMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			lastErr = err
 			if clientGone(ctx, err) {
@@ -4416,12 +4420,12 @@ func (h *Handler) handleClaudeStream(ctx context.Context, w http.ResponseWriter,
 			CacheReadInputTokens:     realCacheRead,
 			CacheCreationInputTokens: realCacheCreate,
 		}
-		charged := h.recordUsageWithCache(apiKeyID, account.ID, model, endpointClaude, inputTokens, outputTokens, credits, cacheUsageTelemetry{
+		charged := h.recordUsageWithMeta(apiKeyID, account.ID, model, endpointClaude, inputTokens, outputTokens, credits, cacheUsageTelemetry{
 			ReadTokens:            realCacheRead,
 			CreateTokens:          realCacheCreate,
 			EstimatedReadTokens:   cacheUsage.CacheReadInputTokens,
 			EstimatedCreateTokens: cacheUsage.CacheCreationInputTokens,
-		})
+		}, requestMeta{LatencyMs: attemptMs})
 		h.pool.RecordSuccess(account.ID, model)
 		if cacheKey != "" {
 			h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
@@ -4768,11 +4772,43 @@ func (h *Handler) recordUsage(apiKeyID, accountID, model, endpoint string, input
 	})
 }
 
+// requestMeta carries the per-attempt facts the usage record wants but that are
+// not derivable from the token counts: what the upstream answered, how long the
+// attempt took, and the upstream's own request id.
+//
+// A struct rather than three more positional parameters because the recording
+// call sites already pass eight arguments, and adding three more of the same
+// type (int, int64, string) makes a mis-ordering invisible at every call site.
+// The zero value means "not observed", which is a real state: a transport failure
+// before any response has no status code, and the service endpoints (image,
+// video, search) go through the legacy recordUsage wrapper that has no meta.
+type requestMeta struct {
+	HTTPStatus int
+	LatencyMs  int64
+}
+
+// orDefaultStatus returns status when set, else def. A success path that did not
+// observe a code still means 200, so the default is applied there rather than
+// leaving the column blank on every successful request.
+func orDefaultStatus(status, def int) int {
+	if status == 0 {
+		return def
+	}
+	return status
+}
+
 // recordUsageWithCache books one successful request and returns the credit
 // figure actually charged, which the caller passes on to pool.UpdateStats so
 // the per-account CREDITS column and the usage record agree. Providers that
 // report no upstream credit get the pricing-derived cost instead of 0.
 func (h *Handler) recordUsageWithCache(apiKeyID, accountID, model, endpoint string, inputTokens, outputTokens int, credits float64, cache cacheUsageTelemetry) float64 {
+	return h.recordUsageWithMeta(apiKeyID, accountID, model, endpoint, inputTokens, outputTokens, credits, cache, requestMeta{})
+}
+
+// recordUsageWithMeta is recordUsageWithCache plus the per-attempt facts. The
+// split keeps the six legacy call sites (service endpoints, image, video,
+// search) unchanged while the four chat handlers pass real metadata.
+func (h *Handler) recordUsageWithMeta(apiKeyID, accountID, model, endpoint string, inputTokens, outputTokens int, credits float64, cache cacheUsageTelemetry, meta requestMeta) float64 {
 	credits = ResolveCredits(accountID, credits, model, inputTokens, maxInt(cache.ReadTokens, cache.CachedTokens), outputTokens)
 	h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, credits)
 	if h.usageTracker == nil {
@@ -4796,7 +4832,13 @@ func (h *Handler) recordUsageWithCache(apiKeyID, accountID, model, endpoint stri
 		CachedTokens:               maxInt(cache.CachedTokens, 0),
 		EstimatedCacheReadTokens:   maxInt(cache.EstimatedReadTokens, 0),
 		EstimatedCacheCreateTokens: maxInt(cache.EstimatedCreateTokens, 0),
+		// A turn that reaches this path got a 200 from the upstream — every
+		// adapter returns early on a non-200 — unless the caller observed a
+		// different status. Zero means the caller had none (legacy wrapper).
+		HTTPStatus: orDefaultStatus(meta.HTTPStatus, successStatus),
+		LatencyMs:  meta.LatencyMs,
 	}
+	// CostSource is filled in by Append, next to the RealCost it describes.
 	if rec.CacheReadTokens > 0 || rec.CacheCreateTokens > 0 || rec.CachedTokens > 0 {
 		rec.CacheSource = "upstream"
 	} else if rec.EstimatedCacheReadTokens > 0 || rec.EstimatedCacheCreateTokens > 0 {
@@ -4879,6 +4921,13 @@ func (h *Handler) recordError(apiKeyID, accountID, model, endpoint, errMsg strin
 		Dialect:     resolveAccountDialect(accountID),
 		APIKeyID:    apiKeyID,
 		Error:       errMsg,
+		// The status is recovered from the error text rather than passed in:
+		// all eight adapters format failures as "HTTP %d from ...", so parsing
+		// here covers every caller at once instead of threading a parameter
+		// through four handlers. Zero when the failure never reached an HTTP
+		// response (connection reset, idle timeout, cut stream), which the UI
+		// renders as "—" rather than inventing a code.
+		HTTPStatus: httpStatusFromError(errMsg),
 	})
 }
 
@@ -4980,7 +5029,9 @@ func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWrit
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointClaude, model)
+		attemptStart := time.Now()
 		err := dispatchChat(ctx, account, payload, callback)
+		attemptMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			lastErr = err
 			if clientGone(ctx, err) {
@@ -5051,12 +5102,12 @@ func (h *Handler) handleClaudeNonStream(ctx context.Context, w http.ResponseWrit
 			CacheReadInputTokens:     realCacheRead,
 			CacheCreationInputTokens: realCacheCreate,
 		}
-		charged := h.recordUsageWithCache(apiKeyID, account.ID, model, endpointClaude, inputTokens, outputTokens, credits, cacheUsageTelemetry{
+		charged := h.recordUsageWithMeta(apiKeyID, account.ID, model, endpointClaude, inputTokens, outputTokens, credits, cacheUsageTelemetry{
 			ReadTokens:            realCacheRead,
 			CreateTokens:          realCacheCreate,
 			EstimatedReadTokens:   cacheUsage.CacheReadInputTokens,
 			EstimatedCreateTokens: cacheUsage.CacheCreationInputTokens,
-		})
+		}, requestMeta{LatencyMs: attemptMs})
 		h.pool.RecordSuccess(account.ID, model)
 		if cacheKey != "" {
 			h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
@@ -5584,7 +5635,11 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 		if isCodexAccount(account) {
 			effectiveCallback = newCodexCoalescer(callback)
 		}
+		// Per-attempt wall time around the upstream call only, so a retry loop
+		// reports what each attempt actually cost rather than the turn total.
+		attemptStart := time.Now()
 		err := dispatchChat(ctx, account, payload, effectiveCallback)
+		attemptMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			lastErr = err
 			if clientGone(ctx, err) {
@@ -5682,10 +5737,10 @@ func (h *Handler) handleOpenAIStream(ctx context.Context, w http.ResponseWriter,
 			}
 		}
 
-		charged := h.recordUsageWithCache(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits, cacheUsageTelemetry{
+		charged := h.recordUsageWithMeta(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits, cacheUsageTelemetry{
 			CreateTokens: realCacheCreate,
 			CachedTokens: realCacheRead,
-		})
+		}, requestMeta{LatencyMs: attemptMs})
 		h.pool.RecordSuccess(account.ID, model)
 		if cacheKey != "" {
 			h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
@@ -5823,7 +5878,9 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 		}
 
 		h.usageTracker.TrackActive(account.ID, endpointOpenAI, model)
+		attemptStart := time.Now()
 		err := dispatchChat(ctx, account, payload, callback)
+		attemptMs := time.Since(attemptStart).Milliseconds()
 		if err != nil {
 			lastErr = err
 			if clientGone(ctx, err) {
@@ -5885,10 +5942,10 @@ func (h *Handler) handleOpenAINonStream(ctx context.Context, w http.ResponseWrit
 			outputTokens = estimateOpenAIOutputTokens(finalContent, reasoningContent, toolUses)
 		}
 
-		charged := h.recordUsageWithCache(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits, cacheUsageTelemetry{
+		charged := h.recordUsageWithMeta(apiKeyID, account.ID, model, endpointOpenAI, inputTokens, outputTokens, credits, cacheUsageTelemetry{
 			CreateTokens: realCacheCreate,
 			CachedTokens: realCacheRead,
-		})
+		}, requestMeta{LatencyMs: attemptMs})
 		h.pool.RecordSuccess(account.ID, model)
 		if cacheKey != "" {
 			h.pool.RecordCacheStickiness(model, cacheKey, account.ID)
@@ -13082,6 +13139,18 @@ func (h *Handler) apiGetUsageRequestDetails(w http.ResponseWriter, r *http.Reque
 		// in two places that could drift.
 		CachedTokens int     `json:"cachedTokens,omitempty"`
 		RealCost     float64 `json:"realCost,omitempty"`
+		// Per-attempt facts, mirrored from RequestRecord so the Details table can
+		// show the same status and latency columns as Overview. HTTPStatus is the
+		// UPSTREAM status, not what the client received; 0 means never observed,
+		// which renders as "—" rather than as success.
+		HTTPStatus int   `json:"httpStatus,omitempty"`
+		LatencyMs  int64 `json:"latencyMs,omitempty"`
+		// CostSource says where RealCost came from: "provider" (the gateway's own
+		// price list) or "vendor" (the built-in table, i.e. an estimate). The UI
+		// marks vendor-derived figures as estimates, because presenting Anthropic's
+		// list price as what a reseller charged is misleading no matter how precise
+		// the number looks.
+		CostSource string `json:"costSource,omitempty"`
 	}
 	details := make([]DetailItem, 0, len(pageData))
 	for _, rec := range pageData {
@@ -13108,6 +13177,9 @@ func (h *Handler) apiGetUsageRequestDetails(w http.ResponseWriter, r *http.Reque
 			Latency:      map[string]int{},
 			CachedTokens: maxInt(rec.CachedTokens, rec.CacheReadTokens),
 			RealCost:     rec.RealCost,
+			HTTPStatus:   rec.HTTPStatus,
+			LatencyMs:    rec.LatencyMs,
+			CostSource:   rec.CostSource,
 		})
 	}
 

@@ -1118,5 +1118,11 @@
   "usage.credit": "Credit",
   "usage.usd": "USD",
   "usage.apiKey": "Key",
-  "usage.creditHint": "1 credit = $0.01"
+  "usage.creditHint": "1 credit = $0.01",
+  "usage.httpStatus": "Status",
+  "usage.httpStatusHint": "Status returned by the upstream. A dash means the attempt never got an HTTP response (connection reset, timeout, or a stream cut mid-flight).",
+  "usage.latency": "Time",
+  "usage.latencyHint": "How long this attempt took against the upstream.",
+  "usage.creditEstHint": "Estimate from the vendor list price. This gateway publishes no price list, so what it actually charged is unknown.",
+  "usage.creditProvHint": "This gateway's own published price."
 }
