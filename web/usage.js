@@ -838,6 +838,46 @@ function renderOverviewCards() {
 }
 
 // ─── Recent Requests Table ───────────────────────────────
+
+// requestKind labels WHICH endpoint served a request, from the usage record's
+// endpoint + dialect. The user asked to see "request qua url nào (response, chat,
+// sinh ảnh, video)". `endpoint` is set per call site (openai/claude/search/video/
+// music/embeddings/image-edit/image-variation) and `dialect` distinguishes chat
+// from responses on the OpenAI wire. Both already ride the wire in recentRequests,
+// so no backend change is needed — this only surfaces what was recorded.
+function requestKind(r) {
+  const dialect = (r.dialect || '').toLowerCase();
+  if (dialect === 'responses') return 'Responses';
+  const ep = (r.endpoint || '').toLowerCase();
+  switch (ep) {
+    case 'openai': return 'Chat';
+    case 'claude': return 'Claude';
+    case 'responses': return 'Responses';
+    case 'search': return 'Search';
+    case 'video': return 'Video';
+    case 'music': return 'Music';
+    case 'embeddings': return 'Embeddings';
+    case 'image-edit':
+    case 'image-variation':
+    case 'image': return 'Image';
+    default: return ep ? ep.charAt(0).toUpperCase() + ep.slice(1) : '—';
+  }
+}
+
+// fmtCredit renders a request's cost in the gateway's display credit. On these
+// gateways 1 credit = 1 US cent, pinned against the live VSLLM marketplace
+// ("0.2 credit" = $0.002/request) and top-up page ("100 credit" = 500000 quota at
+// quota_per_unit 500000 = $1). realCost is USD, so credit = realCost * 100.
+// Falls back to the legacy `cost` field when realCost is absent.
+function fmtCredit(r) {
+  const usd = (r && (r.realCost != null ? r.realCost : r.cost)) || 0;
+  const credit = usd * 100;
+  if (credit <= 0) return '—';
+  // Sub-cent requests (0.0001) need more precision than cents; cap at 4dp and
+  // trim trailing zeros so a $0.002 request reads "0.2" not "0.2000".
+  return String(Math.round(credit * 10000) / 10000);
+}
+
 function renderRecentRequests() {
   const container = document.getElementById('usageRecentRequests');
   if (!container) return;
@@ -855,14 +895,41 @@ function renderRecentRequests() {
   if (requests.length === 0) {
     html += '<div class="usage-empty-state">No requests yet.</div>';
   } else {
-    html += '<div class="usage-recent-table-wrap"><table class="usage-recent-table">' +
-      '<thead><tr><th></th><th>' + (typeof t === 'function' ? t('usage.tabModel') : 'Model') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.inOut') : 'In / Out') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.when') : 'When') + '</th></tr></thead><tbody>';
+    // Full-width table: every column the operator asked for, each on its own
+    // cell rather than the old combined "In / Out". Kind is derived from the
+    // record's endpoint+dialect (already on the wire); Credit is the gateway's
+    // display unit (1 credit = $0.01), USD kept beside it for cross-checking.
+    const L = (k, d) => (typeof t === 'function' ? t(k) : d);
+    html += '<div class="usage-recent-table-wrap"><table class="usage-recent-table usage-recent-table-wide">' +
+      '<thead><tr>' +
+      '<th></th>' +
+      '<th>' + L('usage.tabModel', 'Model') + '</th>' +
+      '<th>' + L('usage.kind', 'Kind') + '</th>' +
+      '<th class="text-right">' + L('usage.input', 'In') + '</th>' +
+      '<th class="text-right">' + L('usage.output', 'Out') + '</th>' +
+      '<th class="text-right">' + L('usage.cache', 'Cache') + '</th>' +
+      '<th class="text-right" title="' + escAttr(L('usage.creditHint', '1 credit = $0.01')) + '">' + L('usage.credit', 'Credit') + '</th>' +
+      '<th class="text-right">' + L('usage.usd', 'USD') + '</th>' +
+      '<th>' + L('usage.apiKey', 'Key') + '</th>' +
+      '<th class="text-right">' + L('usage.when', 'When') + '</th>' +
+      '</tr></thead><tbody>';
 
     for (const r of requests) {
       const isError = r.status === 'error';
+      const kind = requestKind(r);
+      const cached = r.cachedTokens || r.cacheReadTokens || 0;
+      const keyShort = r.apiKeyId ? String(r.apiKeyId).slice(0, 8) : '—';
       html += '<tr' + (isError ? ' class="usage-recent-error-row"' : '') + '>' +
         '<td><span class="usage-status-dot ' + (isError ? 'error' : 'success') + '"></span></td>' +
-        '<td class="usage-recent-model" title="' + escAttr(r.model) + '">' + escHtml(r.model || '-');
+        '<td class="usage-recent-model" title="' + escAttr(r.model) + '">' + escHtml(r.model || '-') + '</td>' +
+        '<td><span class="usage-kind-badge usage-kind-' + escAttr(kind.toLowerCase()) + '">' + escHtml(kind) + '</span></td>' +
+        '<td class="text-right text-primary">' + fmtNum(r.inputTokens) + '</td>' +
+        '<td class="text-right text-success">' + fmtNum(r.outputTokens) + '</td>' +
+        '<td class="text-right" style="color:#16a34a">' + (cached > 0 ? fmtNum(cached) : '—') + '</td>' +
+        '<td class="text-right usage-recent-credit">' + fmtCredit(r) + '</td>' +
+        '<td class="text-right text-warning">' + (r.realCost != null ? '$' + Number(r.realCost).toFixed(4) : '—') + '</td>' +
+        '<td class="usage-recent-key font-mono" title="' + escAttr(r.apiKeyId || '') + '">' + escHtml(keyShort) + '</td>' +
+        '<td class="text-right text-text-muted whitespace-nowrap">';
       if (isError && r.error) {
         // An error is only actionable when the operator knows WHICH account
         // produced it. Prefix the account label (nickname/email, falling back
@@ -874,9 +941,6 @@ function renderRecentRequests() {
           (errAccount !== '-' ? '<span class="usage-recent-error-account">' + escHtml(errAccount) + '</span> ' : '') +
           escHtml(r.error) + '</div>';
       }
-      html += '</td>' +
-        '<td class="text-right whitespace-nowrap"><span class="text-primary">' + fmtNum(r.inputTokens) + '↑</span> <span class="text-success">' + fmtNum(r.outputTokens) + '↓</span></td>' +
-        '<td class="text-right text-text-muted">';
       html += '<span class="usage-time-ago" data-ts="' + r.timestamp + '">' + timeAgo(r.timestamp) + '</span>';
       html += '</td></tr>';
     }
@@ -1867,22 +1931,32 @@ function renderRequestDetailsTable() {
   } else if (detailsData.length === 0) {
     html += '<div class="usage-empty-state">' + (typeof t === 'function' ? t('usage.noDetailsFound') : 'No request details found.') + '</div>';
   } else {
+    // Same column set as the Overview request table, so one request reads the
+    // same way in both places: Kind (which endpoint served it), split IN/OUT,
+    // Cache, Credit and USD. The DetailItem payload carries cachedTokens and
+    // realCost for this; credit is derived here with the single fmtCredit
+    // conversion rather than sent as a second number that could drift.
     html += '<div class="usage-details-table-wrap"><table class="usage-details-table">' +
       '<thead><tr>' +
-      '<th>' + (typeof t === 'function' ? t('usage.tabModel') : 'Model') + '</th><th>' + (typeof t === 'function' ? t('usage.tabAccount') : 'Account') + '</th><th>' + (typeof t === 'function' ? t('usage.status') : 'Status') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.input') : 'Input') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.output') : 'Output') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.when') : 'When') + '</th><th></th>' +
+      '<th>' + (typeof t === 'function' ? t('usage.tabModel') : 'Model') + '</th><th>' + (typeof t === 'function' ? t('usage.kind') : 'Kind') + '</th><th>' + (typeof t === 'function' ? t('usage.tabAccount') : 'Account') + '</th><th>' + (typeof t === 'function' ? t('usage.status') : 'Status') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.input') : 'Input') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.output') : 'Output') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.cache') : 'Cache') + '</th><th class="text-right" title="' + escAttr(typeof t === 'function' ? t('usage.creditHint') : '1 credit = $0.01') + '">' + (typeof t === 'function' ? t('usage.credit') : 'Credit') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.usd') : 'USD') + '</th><th class="text-right">' + (typeof t === 'function' ? t('usage.when') : 'When') + '</th><th></th>' +
       '</tr></thead><tbody>';
 
     for (const d of detailsData) {
       const ok = d.status === 'success' || d.status === 'ok';
       const inputTokens = d.tokens?.prompt_tokens || d.tokens?.input_tokens || 0;
       const outputTokens = d.tokens?.completion_tokens || 0;
+      const kind = requestKind(d);
 
       html += '<tr class="usage-details-row" data-detail-idx="' + detailsData.indexOf(d) + '">' +
         '<td class="usage-details-model" title="' + escAttr(d.model) + '">' + escHtml(d.model || '-') + '</td>' +
+        '<td><span class="usage-kind-badge usage-kind-' + escAttr(kind.toLowerCase()) + '">' + escHtml(kind) + '</span></td>' +
         '<td class="usage-details-account" title="' + escAttr(getUsageAccountName(d)) + '">' + escHtml(getUsageAccountName(d)) + '</td>' +
         '<td><span class="usage-status-dot ' + (ok ? 'success' : 'error') + '"></span> ' + escHtml(translateStatus(d.status)) + '</td>' +
         '<td class="text-right">' + fmtNum(inputTokens) + '</td>' +
         '<td class="text-right">' + fmtNum(outputTokens) + '</td>' +
+        '<td class="text-right" style="color:#16a34a">' + (d.cachedTokens > 0 ? fmtNum(d.cachedTokens) : '—') + '</td>' +
+        '<td class="text-right usage-recent-credit">' + fmtCredit(d) + '</td>' +
+        '<td class="text-right text-warning">' + (d.realCost != null ? '$' + Number(d.realCost).toFixed(4) : '—') + '</td>' +
         '<td class="text-right text-text-muted whitespace-nowrap"><span class="usage-time-ago" data-ts="' + d.timestamp + '">' + timeAgo(d.timestamp) + '</span></td>' +
         '<td class="text-right"><button class="usage-details-view-btn" data-detail-idx="' + detailsData.indexOf(d) + '">' + (typeof t === 'function' ? t('usage.view') : 'View') + '</button></td>' +
         '</tr>';

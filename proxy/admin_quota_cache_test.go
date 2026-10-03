@@ -142,6 +142,75 @@ func TestBuildAccountQuotasRendersOneRowPerSubscriptionShortestWindowFirst(t *te
 	}
 }
 
+// When the plan catalog supplied a credit ceiling, the row switches from a bare
+// percentage to an absolute "used / ceiling credit" figure — "78%" does not say
+// whether 22% left is 20 credits or 2000, and the whole point of fetching the
+// catalog was to answer that. Remaining% and the window label are unchanged so
+// the colour thresholds and sort order keep working.
+func TestBuildAccountQuotasUsesCreditCeilingWhenKnown(t *testing.T) {
+	rows := buildAccountQuotas(externalAccountWithSubs([]config.ExternalSubscription{
+		{ID: 186673, PlanID: 13, Status: "active", UsedPercent: 78,
+			WindowMinutes: 300, LastResetTime: 100, NextResetTime: 100 + 18000,
+			CreditCeiling: 1000, CreditUsed: 780, PlanTitle: "五小时后见", PlanPriceUSD: 80},
+	}), 0)
+
+	var row *quotaRow
+	for i := range rows {
+		if rows[i].Unit == "credit" {
+			row = &rows[i]
+		}
+	}
+	if row == nil {
+		t.Fatalf("no credit-unit row rendered: %+v", rows)
+	}
+	if row.Used != 780 || row.Total != 1000 {
+		t.Errorf("credit row = %.0f/%.0f, want 780/1000", row.Used, row.Total)
+	}
+	// Remaining is still the percentage, so the 30% threshold colours it amber.
+	if row.Remaining != 22 {
+		t.Errorf("Remaining = %d, want 22 (100-78), must stay a percentage", row.Remaining)
+	}
+	if row.Name != "五小时后见 (Sub #186673 (5h))" {
+		t.Errorf("Name = %q, want the plan title wrapping the sub+window label", row.Name)
+	}
+	if row.ResetAt == nil || *row.ResetAt != 18100 {
+		t.Errorf("ResetAt = %v, want 18100 (next_reset_time)", row.ResetAt)
+	}
+}
+
+// A plan the catalog does not list has no ceiling, so the row must stay a
+// percentage rather than render "0 / 0 credit" — which would read as an
+// exhausted plan when really the ceiling is merely unknown.
+//
+// Scoped to the subscription row by name: the helper account also carries token
+// and request totals, which buildAccountQuotas renders as their own rows with
+// unit "tokens"/"reqs". Asserting on every row would fail on those, which say
+// nothing about this behaviour.
+func TestBuildAccountQuotasKeepsPercentWhenCeilingUnknown(t *testing.T) {
+	rows := buildAccountQuotas(externalAccountWithSubs([]config.ExternalSubscription{
+		{ID: 9, PlanID: 999, Status: "active", UsedPercent: 40,
+			WindowMinutes: 300, LastResetTime: 100, NextResetTime: 100 + 18000,
+			CreditCeiling: 0, CreditUsed: 0},
+	}), 0)
+
+	found := false
+	for _, r := range rows {
+		if r.Name != "Sub #9 (5h)" {
+			continue
+		}
+		found = true
+		if r.Unit != "%" {
+			t.Errorf("subscription Unit = %q, want %% when the credit ceiling is unknown", r.Unit)
+		}
+		if r.Used != 40 || r.Total != 100 {
+			t.Errorf("subscription row = %.0f/%.0f, want 40/100 (percentage)", r.Used, r.Total)
+		}
+	}
+	if !found {
+		t.Fatalf("no 'Sub #9 (5h)' row rendered: %+v", rows)
+	}
+}
+
 // A 100%-used plan must render as 0% remaining rather than a negative bar.
 func TestBuildAccountQuotasClampsExhaustedSubscription(t *testing.T) {
 	rows := buildAccountQuotas(externalAccountWithSubs([]config.ExternalSubscription{

@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"omniproxy/config"
 	"omniproxy/logger"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -63,25 +62,17 @@ func fetchExternalSubscriptions(account *config.Account) ([]config.ExternalSubsc
 	if account == nil {
 		return nil, ErrExternalAdminNotConfigured
 	}
-	adminToken := strings.TrimSpace(account.ExtAdminToken)
-	if adminToken == "" || account.ExtAdminUserID == 0 {
-		return nil, ErrExternalAdminNotConfigured
-	}
 
 	root := providerRootURL(strings.TrimRight(strings.TrimSpace(account.BaseURL), "/"))
 	if root == "" {
 		return nil, fmt.Errorf("external subscriptions: no baseUrl")
 	}
-	url := root + externalSubscriptionPath
-
-	req, err := http.NewRequest("GET", url, nil)
+	// Credential shape (raw system token + New-Api-User id) lives in one place,
+	// shared with the plan-catalog fetcher, so the two cannot drift apart.
+	req, err := newExternalAdminRequest(account, root+externalSubscriptionPath)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", adminToken) // raw system token, verified live
-	req.Header.Set("New-Api-User", strconv.Itoa(account.ExtAdminUserID))
-	req.Header.Set("User-Agent", externalOpenAIUserAgent)
 
 	resp, err := doExternalOpenAIRequest(GetRestClientForProxy(ResolveAccountProxyURL(account)), req, account)
 	if err != nil {
@@ -155,8 +146,28 @@ func (h *Handler) refreshExternalSubscriptions(account *config.Account) error {
 	if err != nil {
 		return err
 	}
+
+	// Size each window in credits by joining the plan catalog (total_amount in
+	// quota units) and the quota-per-USD rate. Both come from the gateway, not
+	// hardcoded: the ceiling lives on the plan, keyed by PlanID, and the rate on
+	// /api/status. A catalog failure is non-fatal — the percentage bars still
+	// render, they just lose the absolute "780 / 1000 credit" figure, so we log
+	// and keep the subscriptions we already fetched rather than failing the
+	// whole refresh.
+	if len(subs) > 0 {
+		plans, qpu, cerr := fetchExternalPlanCatalog(account, account.ExtQuotaPerUnit)
+		if cerr != nil {
+			logger.Warnf("[ExternalSubs] %s: plan catalog unavailable, showing percentage only: %v", account.Email, cerr)
+		} else {
+			joinPlanCredits(subs, plans, qpu)
+			if qpu > 0 {
+				account.ExtQuotaPerUnit = qpu
+			}
+		}
+	}
+
 	now := time.Now().Unix()
-	if err := config.UpdateAccountExternalSubscriptions(account.ID, subs, now); err != nil {
+	if err := config.UpdateAccountExternalSubscriptions(account.ID, subs, account.ExtQuotaPerUnit, now); err != nil {
 		return fmt.Errorf("persist subscriptions: %w", err)
 	}
 	account.ExtSubscriptions = subs

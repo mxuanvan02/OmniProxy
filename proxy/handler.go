@@ -13071,6 +13071,17 @@ func (h *Handler) apiGetUsageRequestDetails(w http.ResponseWriter, r *http.Reque
 		Error       string         `json:"error,omitempty"`
 		Tokens      map[string]int `json:"tokens"`
 		Latency     map[string]int `json:"latency"`
+		// Cache and cost figures, added so the Details table can show the same
+		// per-request breakdown the Overview table now does (IN / OUT / Cache /
+		// Credit) instead of only input+output. All three already exist on the
+		// RequestRecord; they were simply never serialized onto this endpoint.
+		//
+		// realCost is USD as recorded. The credit column is derived client-side
+		// (1 credit = 1 US cent on new-api gateways) so the two stay consistent
+		// with the Overview table's single conversion rather than being computed
+		// in two places that could drift.
+		CachedTokens int     `json:"cachedTokens,omitempty"`
+		RealCost     float64 `json:"realCost,omitempty"`
 	}
 	details := make([]DetailItem, 0, len(pageData))
 	for _, rec := range pageData {
@@ -13094,7 +13105,9 @@ func (h *Handler) apiGetUsageRequestDetails(w http.ResponseWriter, r *http.Reque
 				"prompt_tokens":     rec.InputTokens,
 				"completion_tokens": rec.OutputTokens,
 			},
-			Latency: map[string]int{},
+			Latency:      map[string]int{},
+			CachedTokens: maxInt(rec.CachedTokens, rec.CacheReadTokens),
+			RealCost:     rec.RealCost,
 		})
 	}
 
