@@ -238,14 +238,13 @@
               <div class="usage-loading">Loading...</div>
             </div>
 
-            <!-- Topology + Recent Requests -->
-            <div class="usage-topology-grid">
-              <div class="usage-card usage-topology-card" id="usageTopology">
-                <div class="usage-loading">Loading...</div>
-              </div>
-              <div class="usage-recent-card" id="usageRecentRequests">
-                <div class="usage-loading">Loading...</div>
-              </div>
+            <!-- Recent Requests (full width). The topology map was removed as
+                 low-value: it duplicated the Pool tab's account view and crowded
+                 the request table into a third of the page. renderTopology() and
+                 its pan/zoom listeners are guarded on the missing container, so
+                 they no-op; the JS is left dormant pending a decision to delete. -->
+            <div class="usage-recent-card" id="usageRecentRequests">
+              <div class="usage-loading">Loading...</div>
             </div>
 
             <!-- Chart -->
