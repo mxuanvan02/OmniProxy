@@ -811,6 +811,22 @@ const (
 func Init(path string) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
+	// Cancel any coalesced save still queued against the PREVIOUS path before
+	// repointing. saveLoop is a process-global goroutine that sleeps
+	// coalescedSaveDelay between the schedule and the write; without this, an
+	// orphaned save from one test (or one config lifetime) fires after the next
+	// Init and writes into the new directory — in tests, a t.TempDir() being
+	// removed, which fails cleanup with "directory not empty". Removing the
+	// queued token and clearing the flag makes the sleeper's FlushPendingSave a
+	// no-op when it wakes; persist the outstanding counters to the old path
+	// first so a legitimate re-Init does not drop them.
+	select {
+	case <-saveRequests:
+	default:
+	}
+	if pendingSave.Swap(false) && cfgPath != "" {
+		_ = saveLocked()
+	}
 	cfgPath = path
 	return loadLocked()
 }
