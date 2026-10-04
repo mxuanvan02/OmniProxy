@@ -1,5 +1,5 @@
 {
-  "version": "0.5.1",
-  "changelog": "GitHub Release pipeline with prebuilt binaries (linux/darwin amd64+arm64, windows amd64, sha256-verified), scripts/update.sh fast self-update with automatic rollback, and README (EN/VI/CN) update instructions",
+  "version": "0.6.0",
+  "changelog": "Credit-based Usage redesign: per-request credit/kind/status/latency columns, plan-window credit ceilings from the gateway catalog, cost provenance (provider vs vendor estimate), capability tags reconciled with probe evidence, and a per-account opt-out of upstream streaming for blank-SSE gateways",
   "download": "https://github.com/mxuanvan02/OmniProxy"
 }
