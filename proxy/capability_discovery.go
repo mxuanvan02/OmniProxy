@@ -287,10 +287,20 @@ func containsFold(values []string, want string) bool {
 
 // accountSupportsEndpointCapability answers whether an account can serve a
 // capability-specific endpoint. It consults the explicitly configured
-// capabilities first (operator intent wins) and falls back to what discovery
-// observed in the provider catalog.
+// capabilities first (operator intent wins), then what discovery observed in
+// the provider catalog, and finally refuses the request when a probe has
+// proven the endpoint dead.
+//
+// The dead check exists because the first two signals are both guesses about
+// the catalog, while a 404 from /v1/audio/speech is a fact about the gateway.
+// Routing an embeddings request to an account whose embeddings endpoint
+// answers 403 hands the caller an upstream error instead of failing over to
+// an account that can actually serve it.
 func accountSupportsEndpointCapability(account *config.Account, capability string) bool {
 	if account == nil || strings.TrimSpace(capability) == "" {
+		return false
+	}
+	if probeEvidence(account, capability) == probeEvidenceDead && !accountHasCapability(account, capability) {
 		return false
 	}
 	if accountHasCapability(account, capability) {
@@ -299,10 +309,82 @@ func accountSupportsEndpointCapability(account *config.Account, capability strin
 	return containsFold(account.DiscoveredCapabilities, capability)
 }
 
-// effectiveAccountCapabilities merges configured and discovered capabilities
-// for reporting. Configured values come first so the admin UI shows operator
-// intent before inference.
-func effectiveAccountCapabilities(account *config.Account) []string {
+// probeEvidenceClass is what a stored probe result proves about a capability.
+//
+// The three-way split exists because a probe failure is not one thing. A 404 on
+// /v1/audio/speech means the gateway has no such endpoint — that is evidence the
+// capability is absent, and advertising it sends real requests to a dead path. A
+// timeout means the gateway was slow once — that is no evidence at all, and
+// treating it as absence removes a working capability from the matrix because of
+// one congested minute. Collapsing the two is what made a slow VSLLM probe run
+// erase a vision verdict that had answered 200 seconds earlier.
+type probeEvidenceClass int
+
+const (
+	// probeEvidenceNone means no usable verdict is stored: never probed, or the
+	// probe was skipped because no candidate model could be reached.
+	probeEvidenceNone probeEvidenceClass = iota
+	// probeEvidenceLive means the upstream answered 2xx for this capability.
+	probeEvidenceLive
+	// probeEvidenceDead means the upstream answered with a client-error status,
+	// which the probe walk only records after its own model-level refusals
+	// (429, "no access to model", provider model-unavailable) have been
+	// filtered out as skipped.
+	probeEvidenceDead
+)
+
+// probeResultInconclusive reports whether a result carries no evidence about
+// the capability: it never produced an HTTP response (Status 0 — timeout, DNS
+// failure, connection reset) or never left the process (Skipped). Every real
+// status code, including a 5xx, means the gateway answered and is worth
+// recording; whether it proves the capability dead is classifyProbeEvidence's
+// question, not this one's.
+func probeResultInconclusive(result config.CapabilityProbeResult) bool {
+	return result.Skipped || result.Status == 0
+}
+
+// classifyProbeEvidence buckets a stored probe result. Only a 4xx other than
+// 429 is treated as absence: those are the gateway's own answer about the
+// endpoint or the capability, after the probe walk has already filtered
+// model-level refusals out as skipped. A 429 is quota, a 5xx is the gateway
+// being unwell, and Status 0 never reached it — none of them say the
+// capability is missing.
+func classifyProbeEvidence(result config.CapabilityProbeResult, exists bool) probeEvidenceClass {
+	if !exists || probeResultInconclusive(result) {
+		return probeEvidenceNone
+	}
+	if result.OK {
+		return probeEvidenceLive
+	}
+	if result.Status >= 400 && result.Status < 500 && result.Status != 429 {
+		return probeEvidenceDead
+	}
+	return probeEvidenceNone
+}
+
+// probeEvidence looks up the stored verdict for one capability on one account.
+func probeEvidence(account *config.Account, capability string) probeEvidenceClass {
+	if account == nil || len(account.CapabilityProbes) == 0 {
+		return probeEvidenceNone
+	}
+	for name, result := range account.CapabilityProbes {
+		if strings.EqualFold(name, capability) {
+			return classifyProbeEvidence(result, true)
+		}
+	}
+	return probeEvidenceNone
+}
+
+// rawAccountCapabilities is the union of what the operator configured and what
+// catalog-name discovery inferred, before any probe verdict is applied.
+//
+// Kept separate from effectiveAccountCapabilities on purpose: the probe walk
+// decides what to re-probe from this set, so a capability a probe has already
+// ruled dead still gets probed again and can recover. Reading eligibility from
+// the reconciled set instead would freeze the first dead verdict permanently —
+// a gateway whose embeddings endpoint was disabled on Monday could never be
+// re-tagged after the operator fixed it on Tuesday.
+func rawAccountCapabilities(account *config.Account) []string {
 	if account == nil {
 		return nil
 	}
@@ -317,6 +399,58 @@ func effectiveAccountCapabilities(account *config.Account) []string {
 	}
 	for _, value := range account.DiscoveredCapabilities {
 		if normalized := strings.ToLower(strings.TrimSpace(value)); normalized != "" && !containsFold(out, normalized) {
+			out = append(out, normalized)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		return capabilityRank(out[i]) < capabilityRank(out[j])
+	})
+	return out
+}
+
+// effectiveAccountCapabilities is the capability list the admin UI shows and
+// endpoint routing consults: the configured and inferred set, corrected by
+// every probe verdict that actually proves something.
+//
+// Name-based discovery is a guess, and on reseller catalogs it guesses wrong in
+// both directions. VSLLM lists gemini-embedding-001 and
+// mimo-v2.5-tts-voicedesign, so discovery tagged embedding and audio-tts —
+// while the gateway answers 403 on /v1/embeddings and 404 on /v1/audio/speech,
+// because it has neither endpoint. The same catalog contains no model whose ID
+// hints at image input, so vision was missing from the tags even though a probe
+// of claude-opus-4-8 with a 16x16 PNG answered 200 and "Red".
+//
+// A probe verdict therefore adds a capability discovery missed and removes one
+// discovery invented, but only when the verdict is evidence: inconclusive
+// results (never probed, skipped, timed out) leave the inferred tag alone, since
+// absence of evidence is not evidence of absence. Explicitly configured
+// capabilities survive a dead verdict for the same reason operator intent wins
+// elsewhere in this file — an operator who hand-tagged an account knows
+// something the probe cannot.
+func effectiveAccountCapabilities(account *config.Account) []string {
+	if account == nil {
+		return nil
+	}
+	raw := rawAccountCapabilities(account)
+	out := make([]string, 0, len(raw)+1)
+	configured := func(capability string) bool {
+		return accountHasCapability(account, capability)
+	}
+	for _, capability := range raw {
+		if probeEvidence(account, capability) == probeEvidenceDead && !configured(capability) {
+			continue
+		}
+		out = append(out, capability)
+	}
+	// A verified capability that no model ID hinted at still belongs on the
+	// account: vision is the common case, because it is a property of a chat
+	// model rather than a model family of its own.
+	for capability, result := range account.CapabilityProbes {
+		normalized := strings.ToLower(strings.TrimSpace(capability))
+		if normalized == "" || containsFold(out, normalized) {
+			continue
+		}
+		if classifyProbeEvidence(result, true) == probeEvidenceLive {
 			out = append(out, normalized)
 		}
 	}
