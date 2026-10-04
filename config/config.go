@@ -93,6 +93,21 @@ type ExternalSubscription struct {
 	LastResetTime int64   `json:"lastResetTime,omitempty"`
 	NextResetTime int64   `json:"nextResetTime,omitempty"`
 	WindowMinutes int     `json:"windowMinutes,omitempty"` // derived: (next-last)/60
+
+	// Credit figures, joined from the gateway's plan catalog
+	// (/api/subscription/plans) and its quota-per-USD rate (/api/status). The
+	// subscription row itself only carries used_percent; the ceiling lives on the
+	// plan, keyed by PlanID. CreditCeiling is the plan's total credit for one
+	// window and CreditUsed is that ceiling scaled by used_percent, so the UI can
+	// show "780 / 1000 credit" instead of a bare percentage.
+	//
+	// Both are zero when the plan is not in the catalog (an unlisted or expired
+	// plan id), which the renderer reads as "ceiling unknown" and falls back to
+	// the percentage bar rather than printing a fabricated total.
+	CreditCeiling float64 `json:"creditCeiling,omitempty"`
+	CreditUsed    float64 `json:"creditUsed,omitempty"`
+	PlanTitle     string  `json:"planTitle,omitempty"`
+	PlanPriceUSD  float64 `json:"planPriceUsd,omitempty"`
 }
 
 // Account represents a Kiro API account with authentication credentials and usage statistics.
@@ -240,6 +255,29 @@ type Account struct {
 	// override allows enabling one account, measuring real cachedTokens, and
 	// only then widening the rollout.
 	CacheControlPassthrough *bool `json:"cacheControlPassthrough,omitempty"`
+
+	// ExternalUpstreamStream turns off the outbound stream request for one
+	// external account. Empty (the default) keeps asking the upstream for a
+	// stream, exactly as before this field existed; false sends stream:false
+	// with Accept: application/json and lets the existing non-streaming
+	// parsers replay the answer to the client as SSE.
+	//
+	// It exists because some resale gateways advertise a model, accept the
+	// request, and then answer a streamed call with an SSE body that carries
+	// only metadata — role/finish_reason/usage chunks and no text at all —
+	// while the very same body without stream returns the completion
+	// normally. Measured on api.justwoker.icu for claude-opus-4-8
+	// (2026-10-03): stream:true → HTTP 200 with four chunks and an empty
+	// content delta; stream:false → HTTP 200 with the text. Every retry
+	// through the pool hit the same blank stream, so the account looked
+	// unusable rather than merely degraded.
+	//
+	// Per-account rather than global for the same blast-radius reason as
+	// CacheControlPassthrough: the external pool spans many independent
+	// gateways, most of which stream correctly, and forcing all of them
+	// through a buffered non-streaming path would remove incremental output
+	// from accounts that never had the bug.
+	ExternalUpstreamStream *bool `json:"externalUpstreamStream,omitempty"`
 
 	// ChatGPTAccountID is the chatgpt_account_id extracted from the Codex
 	// OAuth access token's JWT payload. Required for AuthMethod == "codex":
@@ -430,6 +468,15 @@ type Account struct {
 	ExtSubsCheckedAt   int64                  `json:"extSubsCheckedAt,omitempty"`
 	ExtRateLimitWindow int                    `json:"extRateLimitWindowMinutes,omitempty"` // per-minute frequency cap level
 	ExtRateLimitLevel  string                 `json:"extRateLimitLevel,omitempty"`         // e.g. "lv1"
+
+	// ExtQuotaPerUnit caches the gateway's quota-per-USD rate from /api/status,
+	// which is what converts a plan's total_amount (quota) into the "credit" the
+	// console shows (1 credit = 1 US cent = quota/quota_per_unit*100). Cached so a
+	// subscription refresh does not have to re-fetch /api/status every cycle, and
+	// so a transient status failure still leaves the last known rate to size the
+	// credit ceilings. Zero means "never read" and the renderer then falls back to
+	// percentage-only bars.
+	ExtQuotaPerUnit float64 `json:"extQuotaPerUnit,omitempty"`
 
 	// Codex (ChatGPT subscription) usage tracking.
 	// Populated from JWT claims at login/import and from x-codex-*
@@ -1590,12 +1637,18 @@ func UpdateAccountExternalCredits(id string, creditLimit, creditsRemaining, cred
 // writing an empty list would erase the last good snapshot, and the admin UI
 // would then show a plan as absent rather than as stale. The caller keeps the
 // old value by simply not calling this.
-func UpdateAccountExternalSubscriptions(id string, subs []ExternalSubscription, checkedAt int64) error {
+func UpdateAccountExternalSubscriptions(id string, subs []ExternalSubscription, quotaPerUnit float64, checkedAt int64) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	for i, a := range cfg.Accounts {
 		if a.ID == id {
 			cfg.Accounts[i].ExtSubscriptions = subs
+			// Only advance the cached rate on a positive reading; a zero means
+			// "could not read this cycle", and keeping the last known rate is
+			// better than blanking the credit ceilings on a transient failure.
+			if quotaPerUnit > 0 {
+				cfg.Accounts[i].ExtQuotaPerUnit = quotaPerUnit
+			}
 			if checkedAt > 0 {
 				cfg.Accounts[i].ExtSubsCheckedAt = checkedAt
 			}

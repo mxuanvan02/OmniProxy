@@ -136,6 +136,55 @@ func TestApplyProbeResultChangeDetection(t *testing.T) {
 	}
 }
 
+// A verified capability that has one slow minute must stay verified. This is
+// the regression that a costly probe run exposed on VSLLM: vision had answered
+// 200, the gateway then took longer than probeTimeout on the next run, and the
+// timeout was recorded as the current verdict — dropping a working capability
+// off the account on the strength of congestion rather than evidence.
+func TestApplyProbeResultKeepsVerifiedVerdictOnInconclusiveRetry(t *testing.T) {
+	account := &config.Account{ID: "acct-1"}
+	verified := config.CapabilityProbeResult{OK: true, Status: 200, Model: "claude-opus-4-8", CheckedAt: 100}
+	if !applyProbeResult(account, capabilityVision, verified) {
+		t.Fatal("first verified probe should register as a change")
+	}
+
+	// A transport failure carries no status, so it is not evidence.
+	timeout := config.CapabilityProbeResult{
+		OK: false, Status: 0, Model: "claude-opus-4-8",
+		Detail: `Post "https://example/v1/chat/completions": context deadline exceeded`,
+		LatencyMs: 20001, CheckedAt: 200,
+	}
+	if applyProbeResult(account, capabilityVision, timeout) {
+		t.Error("an inconclusive retry must not be reported as a verdict change")
+	}
+	stored := account.CapabilityProbes[capabilityVision]
+	if !stored.OK || stored.Status != 200 {
+		t.Errorf("timeout overwrote the verified verdict: %+v", stored)
+	}
+	if stored.CheckedAt != 200 {
+		t.Errorf("CheckedAt should still show the capability was re-tested, got %d", stored.CheckedAt)
+	}
+
+	// A skipped probe is likewise no evidence.
+	skipped := config.CapabilityProbeResult{Skipped: true, SkippedReason: "no vision model", CheckedAt: 300}
+	if applyProbeResult(account, capabilityVision, skipped) {
+		t.Error("a skipped probe must not be reported as a verdict change")
+	}
+	if !account.CapabilityProbes[capabilityVision].OK {
+		t.Error("skipped probe overwrote the verified verdict")
+	}
+
+	// But a genuine 4xx from the gateway is real evidence and must land: the
+	// endpoint really did go away.
+	gone := config.CapabilityProbeResult{OK: false, Status: 404, Model: "claude-opus-4-8", CheckedAt: 400}
+	if !applyProbeResult(account, capabilityVision, gone) {
+		t.Error("a 404 must overwrite the earlier verified verdict")
+	}
+	if account.CapabilityProbes[capabilityVision].OK {
+		t.Error("404 verdict was not stored")
+	}
+}
+
 func TestProbeAccountCapabilityDistinguishesOutcomes(t *testing.T) {
 	config.Init("")
 

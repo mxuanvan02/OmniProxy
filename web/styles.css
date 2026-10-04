@@ -4004,9 +4004,13 @@ img.brand-icon {
   grid-template-columns: 1fr;
   gap: 0.75rem;
 }
+/* Recent Requests sits full-width BELOW the topology, not beside it: the
+   per-request table now carries kind / in / out / cache / credit / key columns
+   and needs the full row width to stay readable. A 2fr-1fr split squeezed it
+   into a third of the page. */
 @media (min-width: 768px) {
   .usage-topology-grid {
-    grid-template-columns: 2fr 1fr;
+    grid-template-columns: 1fr;
   }
 }
 
@@ -4119,6 +4123,65 @@ img.brand-icon {
   white-space: nowrap;
   font-family: var(--font-mono, monospace);
 }
+/* The full-width request table carries seven data columns (kind, in, out,
+   cache, credit, usd, key) instead of the old combined "In / Out", so it needs
+   a wider minimum before the wrapper starts scrolling horizontally. */
+.usage-recent-table-wide {
+  min-width: 720px;
+}
+.usage-recent-table-wide .usage-recent-model {
+  max-width: 180px;
+}
+.usage-recent-credit {
+  font-family: var(--font-mono, monospace);
+  font-variant-numeric: tabular-nums;
+  color: #d97706;
+}
+.usage-recent-key {
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.72rem;
+  color: var(--muted-foreground);
+}
+.usage-recent-account {
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.75rem;
+}
+/* Upstream HTTP status. Colour-coded by class so a wall of 5xx is visible
+   without reading each number. usage-http-none (em dash) is deliberately
+   distinct from usage-http-ok: a request that never got a response is not a
+   success, and rendering it green would hide a real outage. */
+.usage-http-ok   { font-family: var(--font-mono, monospace); color: #16a34a; font-weight: 600; }
+.usage-http-warn { font-family: var(--font-mono, monospace); color: #d97706; font-weight: 600; }
+.usage-http-bad  { font-family: var(--font-mono, monospace); color: #dc2626; font-weight: 600; }
+.usage-http-none { color: var(--muted-foreground); }
+/* Kind badge: which endpoint served the request (Chat / Responses / Claude /
+   Image / Video / Search / …). Colour-coded so a burst of one kind is visible
+   at a glance; the palette mirrors the topology node colours. */
+.usage-kind-badge {
+  display: inline-block;
+  padding: 0.05rem 0.4rem;
+  border-radius: 9999px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+  background: rgba(128,128,128,0.14);
+  color: var(--muted-foreground);
+}
+.usage-kind-chat      { background: rgba(59,130,246,0.14); color: #2563eb; }
+.usage-kind-claude    { background: rgba(217,119,6,0.14);  color: #b45309; }
+.usage-kind-responses { background: rgba(139,92,246,0.16); color: #7c3aed; }
+.usage-kind-image     { background: rgba(236,72,153,0.14); color: #db2777; }
+.usage-kind-video     { background: rgba(220,38,38,0.14);  color: #dc2626; }
+.usage-kind-music     { background: rgba(13,148,136,0.14); color: #0d9488; }
+.usage-kind-search    { background: rgba(22,163,74,0.14);  color: #16a34a; }
+.usage-kind-embeddings{ background: rgba(100,116,139,0.16);color: #475569; }
 .usage-status-dot {
   display: inline-block;
   width: 6px;

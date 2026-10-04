@@ -320,12 +320,21 @@ func CallExternalOpenAI(ctx context.Context, account *config.Account, payload *K
 	if err != nil {
 		return fmt.Errorf("external call build request: %w", err)
 	}
-	// Always request a stream from the upstream; the handler's non-stream path
-	// already buffers via the callback. We still tolerate a non-SSE response
-	// (some providers ignore stream=true) by sniffing the Content-Type.
-	body["stream"] = true
-	// Request usage in the terminal chunk when the provider supports it.
-	body["stream_options"] = map[string]bool{"include_usage": true}
+	// Request a stream from the upstream by default; the handler's non-stream
+	// path already buffers via the callback. We still tolerate a non-SSE
+	// response (some providers ignore stream=true) by sniffing the
+	// Content-Type, which is also what makes the opt-out below safe: the JSON
+	// parser below is the same one those providers already land in.
+	streaming := externalUpstreamStreaming(account)
+	body["stream"] = streaming
+	if streaming {
+		// Request usage in the terminal chunk when the provider supports it.
+		body["stream_options"] = map[string]bool{"include_usage": true}
+	} else {
+		// stream_options is meaningless without a stream, and a strict
+		// gateway may reject the unknown pairing.
+		delete(body, "stream_options")
+	}
 
 	reqBody, err := json.Marshal(body)
 	if err != nil {
@@ -337,7 +346,7 @@ func CallExternalOpenAI(ctx context.Context, account *config.Account, payload *K
 	if err != nil {
 		return fmt.Errorf("external call new request: %w", err)
 	}
-	setExternalOpenAIHeaders(req, account, apiKey, "text/event-stream")
+	setExternalOpenAIHeaders(req, account, apiKey, externalAcceptForStreaming(streaming))
 
 	client := GetClientForProxy(ResolveAccountProxyURL(account))
 	resp, err := doExternalOpenAIRequest(client, req, account)
@@ -726,6 +735,42 @@ func cacheControlPassthroughEnabled(account *config.Account) bool {
 		return *account.CacheControlPassthrough
 	}
 	return config.GetCacheControlPassthrough()
+}
+
+// externalUpstreamStreaming reports whether the outbound request to this
+// external account should ask for an SSE stream.
+//
+// Streaming stays the default because it is what every external account did
+// before Account.ExternalUpstreamStream existed, and incremental output is
+// worth keeping wherever the gateway produces it. Only an explicit false
+// opts out: that is the case where the gateway answers a streamed call with
+// an SSE body holding nothing but metadata (role, finish_reason, usage) while
+// returning the same completion in full when not asked to stream. Blank
+// output is fatal to the turn — the parsers report "ended without assistant
+// output" — so for such a gateway a buffered answer is strictly better than a
+// streamed one, and the handler still replays it to the client as SSE.
+//
+// The pointer distinguishes "unset" from "false" so that an operator can turn
+// the behaviour off for one account without the zero value silently turning
+// it off for every account whose JSON omits the field.
+func externalUpstreamStreaming(account *config.Account) bool {
+	if account != nil && account.ExternalUpstreamStream != nil {
+		return *account.ExternalUpstreamStream
+	}
+	return true
+}
+
+// externalAcceptForStreaming returns the Accept header matching an outbound
+// request mode. Asking for JSON while sending stream:false keeps a strict
+// gateway from replying with a stream anyway; asking for text/event-stream
+// while sending stream:true keeps the usual negotiation. Both paths stay
+// tolerant of the other shape because the callers sniff Content-Type before
+// choosing a parser.
+func externalAcceptForStreaming(streaming bool) string {
+	if streaming {
+		return "text/event-stream"
+	}
+	return "application/json"
 }
 
 // applyExternalCacheControl attaches Anthropic-style cache_control breakpoints

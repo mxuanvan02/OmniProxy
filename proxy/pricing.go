@@ -176,6 +176,26 @@ func prefixFallbackPricing(model string) (ModelPricing, bool) {
 	return ModelPricing{}, false
 }
 
+// Cost sources, in descending order of trustworthiness. The UI renders these
+// differently because they are not equally true: a gateway price list is what
+// that gateway says it charges, while the vendor table is a guess about what a
+// reseller charged.
+//
+// There is deliberately no "upstream" source yet. No path produces a per-request
+// charge reported by the upstream — the gateways answer with token counts only,
+// and their billing ledgers (/api/log/self) need a console system token that only
+// VSLLM among the configured accounts has. Adding the constant now would mean a
+// value no code can ever emit, which reads as supported when it is not.
+const (
+	// CostSourceProvider means the account's own gateway published a price for
+	// this model via /api/pricing.
+	CostSourceProvider = "provider"
+	// CostSourceVendor means no gateway price matched, so the built-in vendor
+	// list price was used. For a reseller this is an ESTIMATE, not the charge:
+	// the reseller's own rate is unknown and may differ by a wide margin.
+	CostSourceVendor = "vendor"
+)
+
 // CostBreakdown holds the per-component USD cost of a request, computed from
 // the model pricing. CachedCost is billed at the cache-read rate, InputCost at
 // the base input rate (for the uncached portion), OutputCost at the output
@@ -185,6 +205,20 @@ type CostBreakdown struct {
 	CachedCost float64 `json:"cachedCost"` // cached * CachedPerM / 1M
 	OutputCost float64 `json:"outputCost"` // output * OutputPerM / 1M
 	Total      float64 `json:"total"`      // sum of the three
+
+	// Source names which price list produced Total. The fallback chain already
+	// knew this and threw it away, which is how a reseller turn came to be
+	// displayed at the vendor's list price with nothing marking it as an
+	// estimate: a claude-opus-4.8 request through a gateway that publishes no
+	// price list showed $9.3331, exactly Anthropic's list price for its tokens,
+	// while the gateway charged something else entirely.
+	//
+	//   "provider" — the account's own gateway price list (/api/pricing)
+	//   "vendor"   — the built-in vendor table, i.e. an ESTIMATE of what the
+	//                reseller charged, not what it charged
+	//   "upstream" — credits the upstream reported for this request
+	//   ""         — no price list matched at all, Total is 0 and means nothing
+	Source string `json:"source,omitempty"`
 }
 
 // ComputeCostBreakdown returns the per-component USD cost of a request against
@@ -203,15 +237,19 @@ func ComputeCostBreakdown(model string, input, cached, output int) CostBreakdown
 // that gateway publishes no price list.
 func ComputeCostBreakdownForAccount(accountID, model string, input, cached, output int) CostBreakdown {
 	p, ok := lookupAccountPricing(accountID, model)
+	source := CostSourceProvider
 	if !ok {
 		if p, ok = LookupPricing(model); !ok {
 			return CostBreakdown{}
 		}
+		// The gateway publishes no price for this model, so this is the vendor's
+		// list price — an estimate of the reseller's charge, not the charge.
+		source = CostSourceVendor
 	}
 	// A flat per-request charge ignores token counts, so it has no per-component
 	// breakdown to report.
 	if p.PerCallUSD > 0 {
-		return CostBreakdown{Total: p.PerCallUSD}
+		return CostBreakdown{Total: p.PerCallUSD, Source: source}
 	}
 	if cached > input {
 		cached = input
@@ -221,6 +259,7 @@ func ComputeCostBreakdownForAccount(accountID, model string, input, cached, outp
 		InputCost:  float64(uncached) * p.InputPerM / 1_000_000.0,
 		CachedCost: float64(cached) * p.CachedPerM / 1_000_000.0,
 		OutputCost: float64(output) * p.OutputPerM / 1_000_000.0,
+		Source:     source,
 	}
 	bd.Total = bd.InputCost + bd.CachedCost + bd.OutputCost
 	return bd

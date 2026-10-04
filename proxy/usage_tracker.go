@@ -71,6 +71,19 @@ type RequestRecord struct {
 	CacheSource                string  `json:"cacheSource,omitempty"`  // upstream, estimated, or none
 	EstimatedCacheReadTokens   int     `json:"estimatedCacheReadTokens,omitempty"`
 	EstimatedCacheCreateTokens int     `json:"estimatedCacheCreateTokens,omitempty"`
+
+	// HTTPStatus is the status the UPSTREAM returned for this attempt, not what
+	// OmniProxy sent the client. Zero means it was never observed (a transport
+	// failure before any response, or a record written by a path that does not
+	// carry it), which the UI renders as "—" rather than as success. A 200 here
+	// with Status=="error" is a real shape: the stream opened then was cut.
+	HTTPStatus int `json:"httpStatus,omitempty"`
+	// LatencyMs is dispatch-to-recorded for the attempt that produced this row.
+	LatencyMs int64 `json:"latencyMs,omitempty"`
+	// CostSource is the provenance of RealCost: "upstream", "provider" (the
+	// gateway's own price list) or "vendor" (the built-in table, i.e. an
+	// estimate). Empty when nothing priced the request.
+	CostSource string `json:"costSource,omitempty"`
 }
 
 // PeriodSummary holds aggregated stats for a single time bucket.
@@ -428,6 +441,19 @@ func (t *UsageTracker) Append(r RequestRecord) {
 		r.InputCost = bd.InputCost
 		r.CachedCost = bd.CachedCost
 		r.OutputCost = bd.OutputCost
+		// CostSource is set HERE, next to the value it describes, because this is
+		// the only place RealCost is computed. Labeling it upstream at the
+		// recording call site instead would be wrong whenever that site's credit
+		// figure came from somewhere else: the credits booked to the account
+		// (RequestRecord.Cost) and RealCost are different quantities computed in
+		// different places, so a label derived from one would describe the other.
+		//
+		// A caller that already set RealCost also sets CostSource and is left
+		// alone — that is the path a gateway-ledger reconciliation would use to
+		// record what was actually charged.
+		if r.CostSource == "" {
+			r.CostSource = bd.Source
+		}
 	}
 	t.pushToRing(r)
 	t.dirty = true

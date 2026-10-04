@@ -190,3 +190,103 @@ func TestCapabilityEndpointPathsAreV1Prefixed(t *testing.T) {
 		}
 	}
 }
+
+// vsllmShapedAccount reproduces the real account the reconciliation was built
+// for: a reseller catalog whose model IDs imply embedding and audio-tts, whose
+// gateway answers 403 and 404 on those endpoints, and whose chat models accept
+// images that no model ID hints at.
+func vsllmShapedAccount() *config.Account {
+	return &config.Account{
+		ID:                     "vsllm",
+		ProviderKind:           "external",
+		DiscoveredCapabilities: []string{capabilityChat, capabilityEmbedding, capabilityAudioTTS},
+		CapabilityProbes: map[string]config.CapabilityProbeResult{
+			capabilityVision:    {OK: true, Status: 200, Model: "auto", CheckedAt: 100},
+			capabilityEmbedding: {OK: false, Status: 403, Model: "gemini-embedding-001", CheckedAt: 100},
+			capabilityAudioTTS:  {OK: false, Status: 404, Model: "mimo-v2.5-tts-voicedesign", CheckedAt: 100},
+		},
+	}
+}
+
+func TestEffectiveAccountCapabilitiesReconcilesProbeVerdicts(t *testing.T) {
+	got := effectiveAccountCapabilities(vsllmShapedAccount())
+
+	// Vision was verified live but no model ID hinted at it, so discovery
+	// never tagged it; reconciliation must add it back.
+	if !containsFold(got, capabilityVision) {
+		t.Errorf("verified vision missing from effective set: %v", got)
+	}
+	// Embedding and audio-tts were inferred from model names but the endpoints
+	// answered 403 and 404; a dead verdict must remove the invented tag.
+	if containsFold(got, capabilityEmbedding) {
+		t.Errorf("embedding survived a 403 verdict: %v", got)
+	}
+	if containsFold(got, capabilityAudioTTS) {
+		t.Errorf("audio-tts survived a 404 verdict: %v", got)
+	}
+	// Chat was never probed, so the inferred tag stands.
+	if !containsFold(got, capabilityChat) {
+		t.Errorf("unprobed chat was wrongly removed: %v", got)
+	}
+}
+
+func TestEffectiveAccountCapabilitiesIgnoresInconclusiveVerdicts(t *testing.T) {
+	account := &config.Account{
+		ID:                     "slow-gateway",
+		DiscoveredCapabilities: []string{capabilityChat, capabilityEmbedding},
+		CapabilityProbes: map[string]config.CapabilityProbeResult{
+			// Status 0 is a transport failure — no evidence either way.
+			capabilityEmbedding: {OK: false, Status: 0, Detail: "context deadline exceeded", CheckedAt: 100},
+			// A skipped probe never left the process.
+			capabilityVision: {Skipped: true, SkippedReason: "no vision model", CheckedAt: 100},
+		},
+	}
+	got := effectiveAccountCapabilities(account)
+
+	// A timeout must not strip an inferred tag: absence of evidence is not
+	// evidence of absence.
+	if !containsFold(got, capabilityEmbedding) {
+		t.Errorf("inconclusive timeout removed the embedding tag: %v", got)
+	}
+	// A skipped vision probe adds nothing.
+	if containsFold(got, capabilityVision) {
+		t.Errorf("skipped vision probe wrongly added a tag: %v", got)
+	}
+}
+
+func TestEffectiveAccountCapabilitiesRespectsOperatorOverride(t *testing.T) {
+	account := vsllmShapedAccount()
+	// Operator hand-tags embedding despite the 403: explicit intent wins, and
+	// the tag survives so the operator can point at a specific working model.
+	account.Capabilities = []string{capabilityEmbedding}
+	got := effectiveAccountCapabilities(account)
+	if !containsFold(got, capabilityEmbedding) {
+		t.Errorf("explicitly configured embedding was stripped by a probe verdict: %v", got)
+	}
+}
+
+func TestAccountSupportsEndpointCapabilityRefusesDeadEndpoint(t *testing.T) {
+	account := vsllmShapedAccount()
+	if accountSupportsEndpointCapability(account, capabilityEmbedding) {
+		t.Error("routing must skip an account whose embeddings endpoint answered 403")
+	}
+	if !accountSupportsEndpointCapability(account, capabilityChat) {
+		t.Error("chat must still be supported")
+	}
+	// An explicitly configured capability is operator intent and survives the
+	// dead verdict, matching effectiveAccountCapabilities.
+	account.Capabilities = []string{capabilityEmbedding}
+	if !accountSupportsEndpointCapability(account, capabilityEmbedding) {
+		t.Error("explicitly configured embedding must route even after a 403 probe")
+	}
+}
+
+func TestRawAccountCapabilitiesKeepsDeadTagsProbeable(t *testing.T) {
+	// The probe walk reads eligibility from the raw set, so a capability a
+	// previous run ruled dead still gets re-probed and can recover once the
+	// operator fixes the gateway.
+	raw := rawAccountCapabilities(vsllmShapedAccount())
+	if !containsFold(raw, capabilityEmbedding) || !containsFold(raw, capabilityAudioTTS) {
+		t.Errorf("raw set dropped dead-but-inferred capabilities, freezing their verdict: %v", raw)
+	}
+}

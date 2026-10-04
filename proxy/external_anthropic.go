@@ -102,10 +102,19 @@ func CallExternalAnthropic(ctx context.Context, account *config.Account, payload
 	if err != nil {
 		return fmt.Errorf("external anthropic call build request: %w", err)
 	}
-	// Always request a stream from the upstream; the handler's non-stream path
-	// already buffers through the callback. Usage arrives on message_start and
-	// message_delta, so no stream_options equivalent is needed.
-	body["stream"] = true
+	// Request a stream from the upstream by default; the handler's non-stream
+	// path already buffers through the callback. Usage arrives on message_start
+	// and message_delta, so no stream_options equivalent is needed.
+	//
+	// The per-account opt-out exists because some gateways answer a streamed
+	// Messages call with an SSE body that carries only message_start /
+	// message_delta usage and an empty content array, while the identical body
+	// without stream returns the text normally (measured on api.justwoker.icu
+	// for claude-opus-4-8, 2026-10-03). The parser selection below already
+	// sniffs Content-Type, so a JSON answer replays through
+	// parseExternalAnthropicJSON with the same callback events.
+	streaming := externalUpstreamStreaming(account)
+	body["stream"] = streaming
 
 	reqBody, err := json.Marshal(body)
 	if err != nil {
@@ -117,7 +126,7 @@ func CallExternalAnthropic(ctx context.Context, account *config.Account, payload
 	if err != nil {
 		return fmt.Errorf("external anthropic call new request: %w", err)
 	}
-	setExternalAnthropicHeaders(req, account, apiKey, "text/event-stream")
+	setExternalAnthropicHeaders(req, account, apiKey, externalAcceptForStreaming(streaming))
 
 	client := GetClientForProxy(ResolveAccountProxyURL(account))
 	resp, err := doExternalOpenAIRequest(client, req, account)

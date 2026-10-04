@@ -785,7 +785,6 @@
   "usage.noAccountsConnected": "暂无账号连接",
   "usage.recentRequests": "最近请求",
   "usage.noRequestsYet": "暂无请求",
-  "usage.inOut": "输入 / 输出",
   "usage.when": "时间",
   "usage.tokens": "Token",
   "usage.cost": "费用",
@@ -1113,5 +1112,17 @@
   "tabs.capabilities": "能力",
   "capabilities.title": "能力 (Capabilities)",
   "capabilities.refresh": "刷新",
-  "capabilities.hint": "OmniProxy 提供的每类 API — 聊天、图像、语音、视频、音乐、嵌入 — 附带验证状态和供 Agent/CLI 使用的端点。"
+  "capabilities.hint": "OmniProxy 提供的每类 API — 聊天、图像、语音、视频、音乐、嵌入 — 附带验证状态和供 Agent/CLI 使用的端点。",
+  "usage.kind": "类型",
+  "usage.cache": "缓存",
+  "usage.credit": "额度",
+  "usage.usd": "美元",
+  "usage.apiKey": "密钥",
+  "usage.creditHint": "1 credit = $0.01",
+  "usage.httpStatus": "状态码",
+  "usage.httpStatusHint": "上游返回的状态码。破折号表示该次请求从未收到 HTTP 响应（连接重置、超时或流被中途切断）。",
+  "usage.latency": "耗时",
+  "usage.latencyHint": "本次请求在上游花费的时间。",
+  "usage.creditEstHint": "按厂商标价估算。该网关未公布价目表，因此实际扣费未知。",
+  "usage.creditProvHint": "该网关自己公布的价格。"
 }
