@@ -256,6 +256,29 @@ type Account struct {
 	// only then widening the rollout.
 	CacheControlPassthrough *bool `json:"cacheControlPassthrough,omitempty"`
 
+	// ExternalUpstreamStream turns off the outbound stream request for one
+	// external account. Empty (the default) keeps asking the upstream for a
+	// stream, exactly as before this field existed; false sends stream:false
+	// with Accept: application/json and lets the existing non-streaming
+	// parsers replay the answer to the client as SSE.
+	//
+	// It exists because some resale gateways advertise a model, accept the
+	// request, and then answer a streamed call with an SSE body that carries
+	// only metadata — role/finish_reason/usage chunks and no text at all —
+	// while the very same body without stream returns the completion
+	// normally. Measured on api.justwoker.icu for claude-opus-4-8
+	// (2026-10-03): stream:true → HTTP 200 with four chunks and an empty
+	// content delta; stream:false → HTTP 200 with the text. Every retry
+	// through the pool hit the same blank stream, so the account looked
+	// unusable rather than merely degraded.
+	//
+	// Per-account rather than global for the same blast-radius reason as
+	// CacheControlPassthrough: the external pool spans many independent
+	// gateways, most of which stream correctly, and forcing all of them
+	// through a buffered non-streaming path would remove incremental output
+	// from accounts that never had the bug.
+	ExternalUpstreamStream *bool `json:"externalUpstreamStream,omitempty"`
+
 	// ChatGPTAccountID is the chatgpt_account_id extracted from the Codex
 	// OAuth access token's JWT payload. Required for AuthMethod == "codex":
 	// OpenAI's /v1/responses endpoint routes by this header

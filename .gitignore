@@ -1,6 +1,9 @@
 # Runtime data (config with secrets, usage history, pid)
 /data/
 
+# Runtime admin session tokens (written by proxy/admin_session.go)
+admin_sessions.json
+
 # Compiled binary
 /omniproxy
 /superkiro
