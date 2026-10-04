@@ -4,6 +4,12 @@ All notable changes to OmniProxy are documented here. The format follows [Keep a
 
 ## [Unreleased]
 
+### Changed
+- **The Usage page names API keys instead of printing their IDs.** Recent Requests showed a bare 8-character ID prefix and the "Usage by API Key" aggregate showed a raw UUID — unreadable when several keys are in play. Both now resolve the ID to the key's human name through a new `apiKeyNames` map the backend builds in `GetStats` from config, the same way `accountNames` already works: one source of truth, sent down with the stats rather than fetched a second time by the frontend, so renaming a key in Settings retro-applies to every historical row without rewriting records. An unnamed key falls back to its masked value (what the API Keys settings page shows, so both surfaces agree), a key since deleted falls back to a short ID prefix, and the full ID stays in the cell's `title` for tracing. The raw key value is never a label.
+
+### Fixed
+- **The Recent Requests table no longer scrolls sideways.** The table carried `min-width: 720px` and its wrapper only set `overflow-y: auto` — which makes the browser compute `overflow-x: auto` too — so on any card narrower than 720px the operator had to drag the table left and right to read the last columns. The table is now pinned inside its card at every width: `table-layout: fixed` with explicit per-column widths, `overflow-x: hidden` on the wrapper, and every cell ellipsizing with its full value in `title`. Measured in a real browser at 375/640/900/1280/1600px card widths: `scrollWidth == clientWidth` at all five, so there is no horizontal overflow to scroll. The inline error message under the timestamp keeps real wrapping (`white-space: normal`) since the cell-level `nowrap` would have collapsed its two-line clamp to one clipped line.
+
 ## [0.6.0] — 2026-10-04
 
 ### Added
