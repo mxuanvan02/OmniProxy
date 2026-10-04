@@ -3,7 +3,7 @@
 // OmniProxy Quota Tracker Page — 9router-style block-per-account layout.
 // Each account is a card ("block") with one or more quota rows inside.
 // Each quota row has: name, progress bar (color-coded), used/total, remaining %,
-// reset countdown ("in 5h 30m"), and emoji indicator (🟢🟡🔴).
+// reset countdown ("in 5h 30m"), and a tone-colored dot indicator (good/warn/bad).
 
 // ─── State ───────────────────────────────────────────────
 let quotaState = {
@@ -76,10 +76,14 @@ function fmtUnixDate(ts) {
 }
 
 // Color + emoji by remaining % (9router convention: >70 green, 30-70 yellow, <30 red)
+// Tone names map to CSS custom properties (--quota-good/warn/bad) defined in
+// styles.css for BOTH light and dark themes. Returning a tone instead of raw
+// hex keeps dark mode correct — hardcoded greens/reds stayed light-theme-only
+// and went low-contrast on black.
 function quotaStyle(remaining) {
-  if (remaining > 70) return { text: '#16a34a', bg: '#22c55e', bgLight: 'rgba(34,197,94,0.18)', emoji: '🟢' };
-  if (remaining >= 30) return { text: '#d97706', bg: '#f59e0b', bgLight: 'rgba(245,158,11,0.18)', emoji: '🟡' };
-  return { text: '#dc2626', bg: '#ef4444', bgLight: 'rgba(239,68,68,0.18)', emoji: '🔴' };
+  if (remaining > 70) return { tone: 'good' };
+  if (remaining >= 30) return { tone: 'warn' };
+  return { tone: 'bad' };
 }
 
 // escapeHtml lives in escape.js (loaded first in index.html).
@@ -141,10 +145,10 @@ function renderProviderPills() {
     const style = quotaStyle(remaining);
     return `
       <span class="quota-pill" data-provider="${p.provider}" title="${escapeHtml(p.label)}: ${p.activeAccounts}/${p.accounts} active, ${fmtPct(pct)} used">
-        <span class="quota-pill-dot" style="background:${style.bg}"></span>
+        <span class="quota-pill-dot quota-tone-${style.tone}"></span>
         <span class="quota-pill-label">${escapeHtml(p.label)}</span>
         <span class="quota-pill-meta">${p.activeAccounts}/${p.accounts}</span>
-        <span class="quota-pill-pct" style="color:${style.text}">${fmtPct(pct)}</span>
+        <span class="quota-pill-pct quota-tone-${style.tone}">${fmtPct(pct)}</span>
       </span>`;
   }).join('');
 }
@@ -163,22 +167,22 @@ function renderCachePills() {
 
   container.innerHTML = `
     <span class="quota-cache-pill" title="Cache hit ratio (24h)">
-      <i class="fa-solid fa-bullseye" style="color:#16a34a"></i>
+      <i class="fa-solid fa-bullseye quota-cache-hit"></i>
       <span class="quota-cache-pill-label">Hit</span>
-      <span class="quota-cache-pill-value" style="color:#16a34a">${fmtPct(hitRatio)}</span>
+      <span class="quota-cache-pill-value quota-cache-hit">${fmtPct(hitRatio)}</span>
     </span>
     <span class="quota-cache-pill" title="Tokens saved via cache (24h)">
-      <i class="fa-solid fa-piggy-bank" style="color:#2563eb"></i>
+      <i class="fa-solid fa-piggy-bank quota-cache-saved"></i>
       <span class="quota-cache-pill-label">Saved</span>
       <span class="quota-cache-pill-value">${fmtTokens(tokensSaved)}</span>
     </span>
     <span class="quota-cache-pill" title="Claude cache read tokens (24h)">
       <span class="quota-cache-pill-label">Read</span>
-      <span class="quota-cache-pill-value" style="color:#16a34a">${fmtTokens(cacheRead)}</span>
+      <span class="quota-cache-pill-value quota-cache-hit">${fmtTokens(cacheRead)}</span>
     </span>
     <span class="quota-cache-pill" title="OpenAI cached tokens (24h)">
       <span class="quota-cache-pill-label">Cached</span>
-      <span class="quota-cache-pill-value" style="color:#16a34a">${fmtTokens(cachedTokens)}</span>
+      <span class="quota-cache-pill-value quota-cache-hit">${fmtTokens(cachedTokens)}</span>
     </span>`;
 }
 
@@ -268,7 +272,7 @@ function renderProviderGroup(g) {
   return `
     <div class="quota-group" data-provider="${g.key}">
       <div class="quota-group-header">
-        <span class="quota-group-dot" style="background:${style.bg}"></span>
+        <span class="quota-group-dot quota-tone-${style.tone}"></span>
         <span class="quota-group-title">${escapeHtml(g.label)}</span>
         <span class="quota-group-count">${active}/${total} active</span>
       </div>
@@ -410,11 +414,10 @@ function renderQuotaRow(q) {
   const countdown = fmtCountdown(q.resetAt);
   const absolute = fmtResetAbsolute(q.resetAt);
   if (countdown || absolute) {
-    const prefix = q.recurring ? 'in ' : 'expires in ';
     if (countdown && countdown !== 'expired') {
-      resetHtml = `<div class="quota-row-reset">${escapeHtml(prefix + countdown)}</div>`;
+      resetHtml = `<div class="quota-row-reset">in <span class="quota-row-countdown">${escapeHtml(countdown)}</span></div>`;
     } else if (countdown === 'expired') {
-      resetHtml = `<div class="quota-row-reset" style="color:#dc2626">expired</div>`;
+      resetHtml = `<div class="quota-row-reset quota-row-expired">expired</div>`;
     }
     if (absolute) {
       resetHtml += `<div class="quota-row-reset-abs">${escapeHtml(absolute)}</div>`;
@@ -427,19 +430,19 @@ function renderQuotaRow(q) {
   const usedDisplay = `${usedLabel} / ${totalLabel}${unitSuffix}`;
 
   return `
-    <div class="quota-row">
+    <div class="quota-row quota-row-${style.tone}">
       <div class="quota-row-header">
         <span class="quota-row-name">
-          <span class="quota-row-emoji">${style.emoji}</span>
+          <span class="quota-row-dot" aria-hidden="true"></span>
           ${escapeHtml(q.name)}
         </span>
         <span class="quota-row-value">
           <span class="quota-row-used${isOverdraft ? ' quota-row-overdraft' : ''}">${usedDisplay}</span>
-          <span class="quota-row-remaining" style="color:${style.text}">${remaining}%</span>
+          <span class="quota-row-remaining">${remaining}%</span>
         </span>
       </div>
-      <div class="quota-row-bar" style="background:${style.bgLight};border-color:${remaining === 0 ? 'var(--border)' : 'transparent'}">
-        <div class="quota-row-bar-fill" style="width:${barWidth}%;background:${style.bg}"></div>
+      <div class="quota-row-bar">
+        <div class="quota-row-bar-fill" style="width:${barWidth}%"></div>
       </div>
       ${resetHtml}
     </div>`;
