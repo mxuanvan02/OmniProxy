@@ -976,7 +976,7 @@ function renderRecentRequests() {
       const isError = r.status === 'error';
       const kind = requestKind(r);
       const cached = r.cachedTokens || r.cacheReadTokens || 0;
-      const keyShort = r.apiKeyId ? String(r.apiKeyId).slice(0, 8) : '—';
+      const keyLabel = getUsageApiKeyName(r);
       const acct = getUsageAccountName(r);
       const costTitle = costSourceTitle(r);
       html += '<tr' + (isError ? ' class="usage-recent-error-row"' : '') + '>' +
@@ -992,7 +992,7 @@ function renderRecentRequests() {
         '<td class="text-right text-warning" title="' + escAttr(costTitle) + '">' +
           (r.realCost != null ? (isEstimatedCost(r) ? '~' : '') + '$' + Number(r.realCost).toFixed(4) : '—') + '</td>' +
         '<td class="text-right text-text-muted">' + fmtLatency(r) + '</td>' +
-        '<td class="usage-recent-key font-mono" title="' + escAttr(r.apiKeyId || '') + '">' + escHtml(keyShort) + '</td>' +
+        '<td class="usage-recent-key" title="' + escAttr(r.apiKeyId || '') + '">' + escHtml(keyLabel) + '</td>' +
         '<td class="text-right text-text-muted whitespace-nowrap">';
       if (isError && r.error) {
         // An error is only actionable when the operator knows WHICH account
@@ -1261,7 +1261,12 @@ function renderUsageTable() {
 
   for (const row of rows) {
     html += '<tr>';
-    html += '<td class="usage-row-key" title="' + escAttr(row.key) + '">' + escHtml(row.key) + '</td>';
+    // API-key rows are keyed by UUID, which is unreadable in a table. Show the
+    // human label and keep the raw ID in the title so an operator can still
+    // trace the exact key. Other views (model/account/endpoint/dialect) are
+    // already human-readable and pass through unchanged.
+    const rowLabel = tableView === 'apiKey' ? apiKeyNameFromId(row.key) : row.key;
+    html += '<td class="usage-row-key" title="' + escAttr(row.key) + '">' + escHtml(rowLabel) + '</td>';
     html += '<td class="text-right">' + fmtNum(row.requests) + '</td>';
 
     if (viewMode === 'tokens') {
@@ -1834,6 +1839,28 @@ function getUsageAccountName(record) {
   if (!record) return '-';
   const nameMap = (usageState.stats || {}).accountNames || {};
   return record.accountName || nameMap[record.accountId] || record.accountId || '-';
+}
+
+// apiKeyNameFromId resolves an API key ID to a human label using the
+// apiKeyNames map the backend sends down with the stats payload (same pattern
+// as accountNames). Shared by the Recent Requests table and the "Usage by API
+// Key" aggregate so both surfaces name the same key the same way. A rename in
+// Settings therefore retro-applies to every historical row without rewriting
+// records. Falls back to a short ID prefix for a key since deleted from
+// config — the honest answer, not a blank cell.
+function apiKeyNameFromId(id) {
+  if (!id) return '—';
+  const nameMap = (usageState.stats || {}).apiKeyNames || {};
+  if (nameMap[id]) return nameMap[id];
+  const s = String(id);
+  return s.length >= 8 ? s.slice(0, 8) : s;
+}
+
+// getUsageApiKeyName is the record-shaped wrapper: em dash when the record
+// never carried a key at all (internal traffic), else the resolved label.
+function getUsageApiKeyName(record) {
+  if (!record || !record.apiKeyId) return '—';
+  return apiKeyNameFromId(record.apiKeyId);
 }
 
 // Keep the deduplication window bounded so a long-lived dashboard does not

@@ -155,6 +155,11 @@ type UsageStats struct {
 	ByDialect                       map[string]*PeriodSummary `json:"byDialect"`
 	ErrorProvider                   string                    `json:"errorProvider"`
 	AccountNames                    map[string]string         `json:"accountNames"`
+	// ApiKeyNames maps an API key ID to a human-readable label so the UI can
+	// show "hermes-mac" instead of a bare UUID prefix. Built in GetStats the
+	// same way AccountNames is: one source of truth from config, sent down with
+	// the stats instead of being fetched a second time by the frontend.
+	ApiKeyNames map[string]string `json:"apiKeyNames"`
 }
 
 // cacheHitTokens returns the number of prompt tokens served from cache. When
@@ -631,7 +636,37 @@ func (t *UsageTracker) GetStats(period string) *UsageStats {
 		}
 	}
 
+	// Build the API-key name map. Keys carry no name on the usage record (the
+	// record only stores the ID, and a rename must retro-apply to every row),
+	// so the label is resolved here from config on every stats read.
+	stats.ApiKeyNames = make(map[string]string)
+	for _, k := range config.ListApiKeys() {
+		if k.ID == "" {
+			continue
+		}
+		switch {
+		case k.Name != "":
+			stats.ApiKeyNames[k.ID] = k.Name
+		case k.Key != "":
+			// An unnamed key is still identifiable by its masked value — this
+			// is what the API Keys settings page shows, so both surfaces agree.
+			stats.ApiKeyNames[k.ID] = config.MaskApiKey(k.Key)
+		default:
+			stats.ApiKeyNames[k.ID] = apiKeyIdFallback(k.ID)
+		}
+	}
+
 	return stats
+}
+
+// apiKeyIdFallback labels a key entry that has neither a name nor a key value
+// (only possible for a hand-edited or partially migrated config). Short prefix
+// of the ID, matching how account names fall back to their own ID.
+func apiKeyIdFallback(id string) string {
+	if len(id) >= 8 {
+		return id[:8]
+	}
+	return id
 }
 
 // TokensForAccountSince returns the persisted input plus output token total for
