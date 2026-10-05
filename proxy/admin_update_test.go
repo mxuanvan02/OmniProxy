@@ -329,6 +329,44 @@ func TestUpdateStartPassesRunningVersionToScript(t *testing.T) {
 	}
 }
 
+// The service manager's PATH is not the developer's shell PATH. The macOS
+// launchd job runs with /opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin
+// — no /bin, which is where macOS keeps bash, date and launchctl. Resolving
+// "bash" through that PATH made every one-click update answer 500
+// (`exec: "bash": executable file not found in $PATH`) and swap nothing, while
+// the stubbed tests above stayed green because `go test` inherits a normal PATH.
+// update.sh also shells out to date and launchctl, so the child needs a usable
+// PATH, not just a resolvable shell.
+func TestUpdateStartWorksWithServiceManagerPath(t *testing.T) {
+	// Stub runs `date`, which lives in /bin on macOS: proves the child PATH was
+	// repaired, not merely that bash was found.
+	chdirToTempUpdateTree(t, "#!/usr/bin/env bash\necho STUB_RAN_WITH_RESTRICTED_PATH\ndate -u +STUB_DATE_%Y\n")
+	initConfigForTests(t)
+	t.Setenv("PATH", "/usr/bin:/usr/sbin:/sbin") // the launchd PATH shape, minus /bin
+
+	h := &Handler{}
+	rec := httptest.NewRecorder()
+	h.apiStartUpdate(rec, httptest.NewRequest(http.MethodPost, "/admin/api/update/start", nil))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("start with a /bin-less PATH = %d, want 202: %s", rec.Code, rec.Body.String())
+	}
+	st := waitForUpdateSettled(t, h)
+	if st.ExitCode == nil || *st.ExitCode != 0 {
+		t.Fatalf("exitCode = %v, want 0; log:\n%s", st.ExitCode, readUpdateLog())
+	}
+
+	logText := readUpdateLog()
+	if !strings.Contains(logText, "STUB_RAN_WITH_RESTRICTED_PATH") {
+		t.Errorf("stub script did not run; log:\n%s", logText)
+	}
+	if !strings.Contains(logText, "STUB_DATE_") {
+		t.Errorf("child PATH cannot reach date(1); log:\n%s", logText)
+	}
+	if strings.Contains(logText, "command not found") {
+		t.Errorf("child PATH is missing a tool the updater needs; log:\n%s", logText)
+	}
+}
+
 // A runaway script must not make the admin response unbounded.
 func TestUpdateStatusTrimsOversizedLog(t *testing.T) {
 	chdirToTempUpdateTree(t, "")

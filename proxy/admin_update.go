@@ -158,6 +158,89 @@ func (h *Handler) apiGetUpdateStatus(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+// systemDirs are the directories a POSIX system keeps bash, date and launchctl
+// in. A service manager is free to hand the job a PATH without them: the macOS
+// launchd job for OmniProxy runs with
+// /opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin — no /bin, which is
+// where macOS keeps all three. exec.Command("bash") resolves through the PARENT
+// PATH, so every one-click update answered 500 with `exec: "bash": executable
+// file not found in $PATH` and swapped nothing. The stubbed tests stayed green
+// because `go test` inherits an ordinary shell PATH, which is exactly the blind
+// spot this list closes. update.sh also shells out to date and launchctl, so the
+// child needs a PATH that reaches them, not merely a resolvable shell.
+var systemDirs = []string{"/bin", "/usr/bin", "/usr/sbin", "/sbin"}
+
+// withSystemPath returns env with every systemDirs entry that PATH is missing
+// appended to it. Existing entries keep their order, so an operator's PATH still
+// wins; the suffix only fills in what a trimmed service-manager PATH dropped.
+func withSystemPath(env []string) []string {
+	path, found := "", false
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "PATH=") {
+			path, found = strings.TrimPrefix(kv, "PATH="), true
+			break
+		}
+	}
+	have := make(map[string]bool)
+	for _, d := range filepath.SplitList(path) {
+		have[d] = true
+	}
+	missing := make([]string, 0, len(systemDirs))
+	for _, d := range systemDirs {
+		if !have[d] {
+			missing = append(missing, d)
+		}
+	}
+	if len(missing) == 0 {
+		return env
+	}
+	joined := strings.Join(missing, string(os.PathListSeparator))
+	if found {
+		path += string(os.PathListSeparator) + joined
+	} else {
+		path = joined
+	}
+
+	out := make([]string, 0, len(env)+1)
+	replaced := false
+	for _, kv := range env {
+		if !replaced && strings.HasPrefix(kv, "PATH=") {
+			out = append(out, "PATH="+path)
+			replaced = true
+			continue
+		}
+		out = append(out, kv)
+	}
+	if !replaced {
+		out = append(out, "PATH="+path)
+	}
+	return out
+}
+
+// resolveBash returns an absolute path to bash, or "" if none is found.
+//
+// This cannot be left to exec.Command("bash", ...): Go resolves that name through
+// the PARENT process's PATH at Start time, and cmd.Env does not influence it. The
+// launchd job's PATH has no /bin (where macOS keeps bash), so the spawn failed
+// with `exec: "bash": executable file not found in $PATH` no matter what the
+// child environment said. Searching explicitly — the operator's PATH first, then
+// the POSIX system directories — makes the lookup independent of whatever PATH
+// the service manager happened to pass.
+func resolveBash() string {
+	dirs := filepath.SplitList(os.Getenv("PATH"))
+	dirs = append(dirs, systemDirs...)
+	for _, d := range dirs {
+		if d == "" {
+			continue
+		}
+		p := filepath.Join(d, "bash")
+		if info, err := os.Stat(p); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return p
+		}
+	}
+	return ""
+}
+
 // apiStartUpdate POST /admin/api/update/start
 // Spawns scripts/update.sh detached from this process's session, with all state
 // on disk. Takes no input from the request: the script path is derived from the
@@ -207,30 +290,47 @@ func (h *Handler) apiStartUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolved before the state is committed as running: if there is no shell to
+	// spawn, this must fail as a plain refusal rather than leave a "running" flag
+	// behind for the next status poll to misread.
+	bashPath := resolveBash()
+	if bashPath == "" {
+		_ = writeUpdateState(updateState{Running: false})
+		fmt.Fprintf(logFile, "[update] ERROR: no bash found in PATH or %s\n", strings.Join(systemDirs, ", "))
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "no bash found; cannot run the update script"})
+		return
+	}
+
 	statePath := updateAbsPath(updateStateFile)
 	wd, _ := os.Getwd()
 
-	// Fixed wrapper — $1/$2 are passed as arguments, never interpolated into the
-	// program text, so no path can break out into the shell. It records the exit
-	// status itself because this proxy process will be killed by the restart
-	// before it could: the wrapper is the only witness that outlives the swap.
+	// Fixed wrapper — paths are passed as arguments ($1/$2/$3), never interpolated
+	// into the program text, so none of them can break out into the shell. It
+	// records the exit status itself because this proxy process will be killed by
+	// the restart before it could: the wrapper is the only witness that outlives
+	// the swap. It invokes the shell by absolute path ($3) rather than the name
+	// "bash", which would be looked up in a PATH the service manager may have
+	// trimmed of /bin.
 	const wrapper = `set +e
-bash "$1"
+"$3" "$1"
 code=$?
 printf '{"running":false,"exitCode":%d,"finishedAt":"%s"}\n' "$code" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$2"
 printf '\n[update] script exited with code %d\n' "$code"
 `
-	cmd := exec.Command("bash", "-c", wrapper, "omniproxy-update", script, statePath)
+	cmd := exec.Command(bashPath, "-c", wrapper, "omniproxy-update", script, statePath, bashPath)
 	cmd.Dir = wd
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.Env = append(os.Environ(),
+	// Repair the PATH first: a service manager can hand the job a PATH without
+	// /bin, and bash itself lives there on macOS (see systemDirs).
+	cmd.Env = withSystemPath(append(os.Environ(),
 		// Repo layout: binary and web/ live beside the script, and the service is
 		// a launchd job — not the ~/.omniproxy-user + systemd layout the script
 		// assumes by default.
 		"OMNIPROXY_LAYOUT=repo",
 		fmt.Sprintf("OMNIPROXY_HOME=%s", wd),
-	)
+	))
 	// The running binary's own version, so update.sh compares against what is
 	// actually executing rather than the git-tracked version.json. In repo layout
 	// that file describes the CHECKOUT, not the process: after a release bump

@@ -2,6 +2,11 @@
 
 All notable changes to OmniProxy are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **The one-click update no longer fails with `exec: "bash": executable file not found in $PATH`.** The launchd job runs with `PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin` — no `/bin`, which is where macOS keeps `bash`, `date` and `launchctl`. Go resolves `exec.Command("bash", …)` through the PARENT process's PATH, and `cmd.Env` does not influence that lookup, so the spawn died before the script ever ran and the endpoint answered `500` having swapped nothing. The shell is now resolved explicitly (the operator's PATH first, then the POSIX system directories) and invoked by absolute path, and the child's `PATH` gets the missing system directories appended so `update.sh` can reach `date` and `launchctl` too. Caught by a real end-to-end run — the stubbed tests had stayed green because `go test` inherits an ordinary shell PATH — and the regression test reproduces it by running with the launchd PATH shape minus `/bin`.
+
 ## [0.6.2] — 2026-10-05
 
 ### Fixed
