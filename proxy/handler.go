@@ -6687,10 +6687,17 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 			env["ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"] = "Claude Sonnet 5"
 			env["ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION"] = "Claude Sonnet 5 via the local gateway"
 		}
-		// fallbackModel is the operator's choice of what to degrade to. Only seed
-		// it when unset; overwriting would silently retarget a deliberate pick.
+		// fallbackModel decides what Claude Code switches to when the primary
+		// model errors or is overloaded. Seeding it with a cheaper model here
+		// used to mean a transient opus failure silently downgraded the whole
+		// session to sonnet. Operator intent on this install is retry-in-place:
+		// seed the fallback with the primary model itself so an error retries
+		// the same model. Only seed when unset — never retarget a deliberate
+		// pick.
 		if !hasClaudeFallbackModel(current["fallbackModel"]) {
-			current["fallbackModel"] = []string{"claude-sonnet-5"}
+			if primary, _ := current["model"].(string); strings.TrimSpace(primary) != "" {
+				current["fallbackModel"] = []string{strings.TrimSpace(primary)}
+			}
 		}
 		// `fallbackModels` was an older, non-standard key that caused the
 		// advisor fallback to be confused with the primary model fallback.

@@ -652,6 +652,29 @@ func TestApplyClaudeCliSettingsPreservesCustomSotaCapabilities(t *testing.T) {
 	}
 }
 
+// An unset fallbackModel must be seeded with the PRIMARY model, not a cheaper
+// one. Seeding "claude-sonnet-5" used to mean that a transient opus error
+// silently downgraded the whole session — operator intent is retry-in-place.
+func TestApplyClaudeCliSettingsSeedsFallbackWithPrimaryModel(t *testing.T) {
+	got := claudeSettingsAfterApply(t,
+		`{"model":"claude-opus-4.8"}`,
+		`{"env":{"ANTHROPIC_BASE_URL":"http://proxy/v1","ANTHROPIC_API_KEY":"key"}}`)
+	fallback, ok := got["fallbackModel"].([]interface{})
+	if !ok || len(fallback) != 1 || fallback[0] != "claude-opus-4.8" {
+		t.Fatalf("fallbackModel = %#v, want [claude-opus-4.8] (retry same model, no downgrade)", got["fallbackModel"])
+	}
+}
+
+// No primary configured → no fallback seeded at all (never invent a model).
+func TestApplyClaudeCliSettingsSkipsFallbackSeedWithoutPrimary(t *testing.T) {
+	got := claudeSettingsAfterApply(t,
+		`{}`,
+		`{"env":{"ANTHROPIC_BASE_URL":"http://proxy/v1","ANTHROPIC_API_KEY":"key"}}`)
+	if fb, found := got["fallbackModel"]; found && fb != nil {
+		t.Fatalf("fallbackModel seeded without a primary model: %#v", fb)
+	}
+}
+
 // Apply without a reasoningEffort field must leave the configured level alone.
 // Clamping a blank value resolved to medium, silently downgrading an operator's
 // high/xhigh/max on every unrelated Apply.
