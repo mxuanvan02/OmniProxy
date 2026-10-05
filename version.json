@@ -1,5 +1,5 @@
 {
-  "version": "0.6.2",
-  "changelog": "Fixes the dashboard's one-click update: it compared against the checkout's version.json instead of the running binary, so on a clone it reported a successful update having swapped nothing and left the operator in a \"new version available / update complete\" loop. The endpoint now passes the running process's version and update.sh prefers it, with mutation-verified regression tests on both sides",
+  "version": "0.6.3",
+  "changelog": "Fixes the one-click update on macOS: the launchd job's PATH has no /bin, and Go resolves exec.Command(\"bash\") through the parent's PATH regardless of cmd.Env, so every update answered 500 without running anything. The shell is now resolved to an absolute path and the child PATH repaired so the updater can reach date and launchctl. Also carries the earlier fix comparing against the running binary rather than the checkout's version.json",
   "download": "https://github.com/mxuanvan02/OmniProxy"
 }
