@@ -284,6 +284,51 @@ func TestUpdateStartRejectsGET(t *testing.T) {
 	}
 }
 
+// The spawned script must be told which version is ACTUALLY running, not left
+// to read the git-tracked version.json. In repo layout that file describes the
+// checkout: a release commit bumps it to the new tag while the service still
+// runs the previous binary, so a script trusting the file decides "already up
+// to date", exits 0, and the dashboard reports success without swapping
+// anything — the operator sees "update complete" and stays on the old version.
+func TestUpdateStartPassesRunningVersionToScript(t *testing.T) {
+	// The stub echoes the variable it was handed, so the assertion is about what
+	// the child process actually received, not about how we built the env slice.
+	chdirToTempUpdateTree(t, "#!/usr/bin/env bash\necho \"SEEN=${OMNIPROXY_INSTALLED_VERSION:-<unset>}\"\n")
+	initConfigForTests(t)
+
+	prev := config.Version
+	config.Version = "1.2.3"
+	defer func() { config.Version = prev }()
+
+	h := &Handler{}
+	rec := httptest.NewRecorder()
+	h.apiStartUpdate(rec, httptest.NewRequest(http.MethodPost, "/admin/api/update/start", nil))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("start = %d, want 202: %s", rec.Code, rec.Body.String())
+	}
+	if st := waitForUpdateSettled(t, h); st.ExitCode == nil || *st.ExitCode != 0 {
+		t.Fatalf("exitCode = %v, want 0", st.ExitCode)
+	}
+	if logText := readUpdateLog(); !strings.Contains(logText, "SEEN=1.2.3") {
+		t.Errorf("script did not receive the running version; log:\n%s", logText)
+	}
+
+	// And the detail the whole fix turns on: the repo layout is set too, so the
+	// script resolves binary/web beside the clone rather than in ~/.omniproxy-user.
+	chdirToTempUpdateTree(t, "#!/usr/bin/env bash\necho \"LAYOUT=${OMNIPROXY_LAYOUT:-<unset>}\"\n")
+	rec = httptest.NewRecorder()
+	h.apiStartUpdate(rec, httptest.NewRequest(http.MethodPost, "/admin/api/update/start", nil))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("second start = %d, want 202", rec.Code)
+	}
+	if st := waitForUpdateSettled(t, h); st.ExitCode == nil || *st.ExitCode != 0 {
+		t.Fatalf("second exitCode = %v, want 0", st.ExitCode)
+	}
+	if logText := readUpdateLog(); !strings.Contains(logText, "LAYOUT=repo") {
+		t.Errorf("repo layout not passed to the script; log:\n%s", logText)
+	}
+}
+
 // A runaway script must not make the admin response unbounded.
 func TestUpdateStatusTrimsOversizedLog(t *testing.T) {
 	chdirToTempUpdateTree(t, "")

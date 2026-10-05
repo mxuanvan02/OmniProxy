@@ -32,6 +32,10 @@
 #   OMNIPROXY_PORT         default 8080                (health-check port)
 #   OMNIPROXY_HEALTH_URL   default http://127.0.0.1:$OMNIPROXY_PORT/v1/models
 #   OMNIPROXY_RESTART_CMD  custom restart command (skips systemd entirely)
+#   OMNIPROXY_INSTALLED_VERSION  the running binary's version, when the caller
+#                          knows it (the dashboard endpoint does). Overrides
+#                          version.json, which in repo layout only describes the
+#                          checkout and can be ahead of the live process.
 #   OMNIPROXY_KEEP_ROLLBACKS  default 5 (older .rollback binaries are pruned)
 #   OMNIPROXY_API_URL      override the release-API URL (testing/mirrors)
 
@@ -120,7 +124,18 @@ if [[ "$GOOS" == "windows" ]]; then
 fi
 
 # ── Versions ──────────────────────────────────────────────────────────
+# OMNIPROXY_INSTALLED_VERSION is the version of the process that invoked us,
+# set by the dashboard's update endpoint. It wins over version.json because in
+# repo layout that file describes the CHECKOUT, not the running process: right
+# after a release commit bumps it, version.json already reads the new tag while
+# the service is still the older binary it started as. Trusting the file there
+# makes this script report "already up to date", exit 0, and tell the dashboard
+# the update succeeded without swapping anything.
 installed_version() {
+  if [[ -n "${OMNIPROXY_INSTALLED_VERSION:-}" ]]; then
+    printf '%s\n' "$OMNIPROXY_INSTALLED_VERSION"
+    return
+  fi
   if [[ -f "${HOME_DIR}/version.json" ]]; then
     jq -r '.version // empty' "${HOME_DIR}/version.json" 2>/dev/null
   fi

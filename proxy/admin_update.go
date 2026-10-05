@@ -231,6 +231,18 @@ printf '\n[update] script exited with code %d\n' "$code"
 		"OMNIPROXY_LAYOUT=repo",
 		fmt.Sprintf("OMNIPROXY_HOME=%s", wd),
 	)
+	// The running binary's own version, so update.sh compares against what is
+	// actually executing rather than the git-tracked version.json. In repo layout
+	// that file describes the CHECKOUT, not the process: after a release bump
+	// commits 0.6.1 the file already says 0.6.1 while this process still runs the
+	// 0.6.0 it started as, so the script would decide "already up to date", exit 0,
+	// and the dashboard would report a successful update that swapped nothing —
+	// leaving the operator in a "new version available / update complete" loop.
+	// config.Version is read once at startup, which is exactly the fact needed.
+	// Omitted when empty so the script's own version.json fallback still applies.
+	if config.Version != "" {
+		cmd.Env = append(cmd.Env, "OMNIPROXY_INSTALLED_VERSION="+config.Version)
+	}
 	// Detach into its own session and process group. Without this the restart
 	// (launchctl kickstart -k) takes the script down with the job's process
 	// group — killing the updater halfway through swapping binaries.

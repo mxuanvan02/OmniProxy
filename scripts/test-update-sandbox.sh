@@ -241,4 +241,25 @@ grep -q git-tracked-updater "$R/scripts/update.sh" || { echo "FAIL t10: repo scr
 [[ ! -e "$R/bin" ]] || { echo "FAIL t10: stray ${R}/bin created in repo layout"; exit 1; }
 echo PASS t10
 
-echo "ALL TESTS PASSED (10/10)"
+# The bug this guards: version.json describes the CHECKOUT in repo layout, and a
+# release commit bumps it ahead of the running binary. A script trusting the file
+# then says "already up to date", exits 0, and the dashboard reports a successful
+# update that swapped nothing — "update complete" forever, version never moves.
+# The endpoint passes the PROCESS's version instead; when both are present, env wins.
+echo "== TEST 11: OMNIPROXY_INSTALLED_VERSION overrides version.json =="
+reset_state
+printf '{"version":"0.5.0"}\n' > "$T/home/version.json"   # file claims the latest...
+OUT=$(OMNIPROXY_INSTALLED_VERSION=0.4.0 "$UPDATE" 2>&1) || { echo "$OUT"; echo "FAIL t11: env override did not install"; exit 1; }
+echo "$OUT"
+echo "$OUT" | grep -q "installed: 0.4.0" || { echo "$OUT"; echo "FAIL t11: env version not taken as installed"; exit 1; }
+"$T/home/bin/omniproxy" | grep -q new-0.5.0 || { echo "FAIL t11: no swap despite stale version.json"; exit 1; }
+echo PASS t11
+
+# Converse: an already-current process is left alone even when version.json lags.
+reset_state
+OUT=$(OMNIPROXY_INSTALLED_VERSION=0.5.0 "$UPDATE" 2>&1) || { echo "$OUT"; echo "FAIL t11b"; exit 1; }
+echo "$OUT" | grep -q "already at 0.5.0" || { echo "$OUT"; echo "FAIL t11b: env version ignored"; exit 1; }
+"$T/home/bin/omniproxy" | grep -q old-0.4.0 || { echo "FAIL t11b: binary swapped when already current"; exit 1; }
+echo PASS t11b
+
+echo "ALL TESTS PASSED (11/11)"
