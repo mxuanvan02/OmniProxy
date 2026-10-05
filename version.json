@@ -1,5 +1,5 @@
 {
-  "version": "0.6.0",
-  "changelog": "Credit-based Usage redesign: per-request credit/kind/status/latency columns, plan-window credit ceilings from the gateway catalog, cost provenance (provider vs vendor estimate), capability tags reconciled with probe evidence, and a per-account opt-out of upstream streaming for blank-SSE gateways",
+  "version": "0.6.1",
+  "changelog": "One-click self-update from /admin (disk-backed state so the log survives the restart, detached spawn, 409 on double-click), release tarballs ship scripts/, a repo layout for update.sh so an install in a git checkout restarts via launchd instead of silently updating a binary nobody runs, plus fixes: Claude fallbackModel no longer downgrades a session, coalesced config saves no longer race a torn-down directory, Usage names API keys, Recent Requests no longer scrolls sideways",
   "download": "https://github.com/mxuanvan02/OmniProxy"
 }
