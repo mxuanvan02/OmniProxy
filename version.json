@@ -1,5 +1,5 @@
 {
-  "version": "0.6.1",
-  "changelog": "One-click self-update from /admin (disk-backed state so the log survives the restart, detached spawn, 409 on double-click), release tarballs ship scripts/, a repo layout for update.sh so an install in a git checkout restarts via launchd instead of silently updating a binary nobody runs, plus fixes: Claude fallbackModel no longer downgrades a session, coalesced config saves no longer race a torn-down directory, Usage names API keys, Recent Requests no longer scrolls sideways",
+  "version": "0.6.2",
+  "changelog": "Fixes the dashboard's one-click update: it compared against the checkout's version.json instead of the running binary, so on a clone it reported a successful update having swapped nothing and left the operator in a \"new version available / update complete\" loop. The endpoint now passes the running process's version and update.sh prefers it, with mutation-verified regression tests on both sides",
   "download": "https://github.com/mxuanvan02/OmniProxy"
 }

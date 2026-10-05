@@ -2,6 +2,11 @@
 
 All notable changes to OmniProxy are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.2] — 2026-10-05
+
+### Fixed
+- **The dashboard's one-click update compares against the running binary, not `version.json`.** In repo layout `version.json` is git-tracked, so a `chore(release)` commit bumps it to the new tag while the service is still running the binary it started as — `config.Version` is read once at startup and never re-read. `update.sh` keyed "already installed" off that file, so it concluded `already at 0.6.1`, exited 0, and the dashboard reported a successful update having swapped nothing: the operator saw "new version available" → "update complete" → reload → still the old version, forever. Invisible on a tarball install, where only the script writes the file; fatal on the layout the dashboard actually runs from a clone. The endpoint now passes the version of the process serving the request (`OMNIPROXY_INSTALLED_VERSION`, taken from `config.Version` — not from the request, so the no-injection property is unchanged) and `update.sh` prefers it over the file, falling back to it only when unset. Both sides carry a regression test, each verified by mutation: neutering the env pass fails the Go test with `SEEN=<unset>`, neutering the shell preference fails sandbox T11. T11 also covers the converse — a process already at the latest is left alone even when the file lags — so the fix cannot cause needless swaps either.
+
 ## [0.6.1] — 2026-10-05
 
 ### Added
