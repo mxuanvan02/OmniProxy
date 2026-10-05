@@ -845,9 +845,115 @@ let customSelectRefreshQueued = false;
       '<div class="update-version-card update-version-card-latest"><p class="update-version-label">' + escapeHtml(t('update.latest')) + '</p><p class="update-version-value update-version-value-success">' + escapeHtml(version) + '</p></div>' +
       '</div>' +
       (changelog ? '<div class="update-notes"><p class="update-notes-title">' + escapeHtml(t('update.changelog')) + '</p><p class="update-notes-body">' + escapeHtml(changelog) + '</p></div>' : '') +
-      '<div class="update-actions"><a href="' + escapeAttr(url) + '" target="_blank" rel="noopener" class="btn btn-primary">' + escapeHtml(t('update.goDownload')) + '</a></div>' +
+      '<div class="update-actions">' +
+      '<button type="button" class="btn btn-primary" id="updateNowBtn"><i class="fa-solid fa-cloud-arrow-down"></i> ' + escapeHtml(t('update.installNow')) + '</button>' +
+      '<a href="' + escapeAttr(url) + '" target="_blank" rel="noopener" class="btn">' + escapeHtml(t('update.goDownload')) + '</a>' +
+      '</div>' +
       '</div>';
     openDialog('updateModal');
+    const btn = $('updateNowBtn');
+    if (btn) btn.addEventListener('click', function () { runUpdate(version); });
+  }
+
+  // Drives the one-click update. The proxy restarts mid-flight, so this polls
+  // the status endpoint instead of holding a stream open: a poll that fails is
+  // simply the restart happening, and the next one lands on the new process,
+  // which reads the same on-disk log and keeps answering. State lives on disk
+  // for exactly this reason — nothing here can outlive the restart.
+  let updatePoller = null;
+  function renderUpdateProgress(logText, statusText, state) {
+    const log = $('updateLogArea');
+    if (log) {
+      log.textContent = logText || '';
+      log.scrollTop = log.scrollHeight;
+    }
+    const status = $('updateStatusLine');
+    if (status) {
+      status.textContent = statusText || '';
+      status.className = 'update-progress-status' + (state ? ' update-progress-' + state : '');
+    }
+  }
+  function runUpdate(latestVersion) {
+    $('updateBody').innerHTML =
+      '<div class="update-shell">' +
+      '<div class="update-hero">' +
+      '<div class="update-result-icon update-result-info"><i class="fa-solid fa-cloud-arrow-down"></i></div>' +
+      '<div>' +
+      '<h3 class="update-hero-title">' + escapeHtml(t('update.installing')) + '</h3>' +
+      '<p class="update-hero-copy">' + escapeHtml(t('update.installingHint')) + '</p>' +
+      '</div>' +
+      '</div>' +
+      '<pre class="update-progress-log" id="updateLogArea" aria-live="polite"></pre>' +
+      '<p class="update-progress-status" id="updateStatusLine"></p>' +
+      '</div>';
+    renderUpdateProgress('', t('update.starting'), null);
+
+    fetch('/admin/api/update/start', {
+      method: 'POST',
+      headers: { 'X-Admin-Token': adminToken },
+    }).then(function (res) {
+      // 409 = another run is already in flight (a second tab, a double click).
+      // Attaching to it and watching is what the operator wanted anyway.
+      if (res.status === 409) return { attached: true };
+      if (!res.ok) {
+        return res.json().catch(function () { return {}; }).then(function (b) {
+          throw new Error(b.error || ('HTTP ' + res.status));
+        });
+      }
+      return res.json();
+    }).then(function () {
+      pollUpdateStatus(latestVersion);
+    }).catch(function (err) {
+      renderUpdateProgress('', t('update.startFailed') + ': ' + err.message, 'error');
+    });
+  }
+  function pollUpdateStatus(latestVersion) {
+    if (updatePoller) clearInterval(updatePoller);
+    // `misses` lives here, in the closure the interval callback owns — not as a
+    // parameter, which would pass a copy and reset on every tick.
+    let misses = 0;
+    updatePoller = setInterval(function () {
+      fetch('/admin/api/update/status', { headers: { 'X-Admin-Token': adminToken } })
+        .then(function (res) { return res.ok ? res.json() : null; })
+        .then(function (st) {
+          if (!st) { misses = noteUpdateUnreachable(misses); return; }
+          misses = 0;
+          if (st.running) {
+            renderUpdateProgress(st.log, t('update.running'), null);
+            return;
+          }
+          stopUpdatePolling();
+          renderUpdateProgress(st.log, '', null);
+          finishUpdate(st);
+        })
+        .catch(function () { misses = noteUpdateUnreachable(misses); });
+    }, 1500);
+  }
+  function stopUpdatePolling() {
+    if (updatePoller) { clearInterval(updatePoller); updatePoller = null; }
+  }
+  // A poll that fails means the proxy is restarting, not that the update broke:
+  // keep waiting, and only call it a failure once the service stays silent well
+  // past any plausible restart. Returns the updated miss count for the caller to
+  // keep, since a parameter would not survive the next tick.
+  function noteUpdateUnreachable(misses) {
+    misses += 1;
+    const logText = $('updateLogArea') ? $('updateLogArea').textContent : '';
+    if (misses > 40) { // ~60s of silence
+      stopUpdatePolling();
+      renderUpdateProgress(logText, t('update.unreachable'), 'error');
+      return misses;
+    }
+    renderUpdateProgress(logText, t('update.restarting'), null);
+    return misses;
+  }
+  function finishUpdate(st) {
+    if (st.exitCode === 0) {
+      renderUpdateProgress(st.log, t('update.reloadHint'), 'ok');
+      setTimeout(function () { location.reload(); }, 1500);
+      return;
+    }
+    renderUpdateProgress(st.log, t('update.failedHint'), 'error');
   }
   function showUpdateStatusModal(status, title, message, latest) {
     const current = currentVersion.replace(/^v/i, '');

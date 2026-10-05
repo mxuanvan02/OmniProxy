@@ -6275,6 +6275,12 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch {
+	// Self-update. Status reads only from disk, so the proxy that comes up
+	// mid-update answers it correctly; start takes no request input at all.
+	case path == "/update/status" && r.Method == "GET":
+		h.apiGetUpdateStatus(w, r)
+	case path == "/update/start" && r.Method == "POST":
+		h.apiStartUpdate(w, r)
 	case path == "/accounts" && r.Method == "GET":
 		// Polled every ~5s by the dashboard (~76 KiB). Revalidate so unchanged
 		// pool state costs a header exchange instead of a full payload.

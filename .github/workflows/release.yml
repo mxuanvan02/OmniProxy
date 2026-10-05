@@ -61,6 +61,10 @@ jobs:
           go build -trimpath -ldflags "-s -w" -o "dist/${name}/${exe}" .
           # The legacy dashboard is served from disk next to the binary; ship it.
           cp -r web "dist/${name}/web"
+          # Ship the updater too: the dashboard's one-click update runs
+          # scripts/update.sh, so a release without it can see a new version but
+          # not install one (the endpoint reports "cannot self-update").
+          cp -r scripts "dist/${name}/scripts"
           # Stamp the tag version into the packaged version.json so the artifact
           # never disagrees with the tag even if the repo bump was forgotten —
           # scripts/update.sh keys "already installed" off this file, and a

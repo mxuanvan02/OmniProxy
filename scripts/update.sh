@@ -21,9 +21,14 @@
 #      still sees the update as available.
 #
 # Env overrides:
+#   OMNIPROXY_LAYOUT       prefix (default) | repo — where the binary and web/ live.
+#                          prefix: $OMNIPROXY_HOME/bin/{omniproxy,web}  (installer layout)
+#                          repo:   <clone>/{omniproxy,web}             (running from a git clone)
+#                          `--layout repo` sets it too.
 #   OMNIPROXY_REPO         default mxuanvan02/OmniProxy
-#   OMNIPROXY_HOME         default ~/.omniproxy-user   (bin/omniproxy, bin/web, version.json)
+#   OMNIPROXY_HOME         default ~/.omniproxy-user (prefix) / the clone root (repo)
 #   OMNIPROXY_SERVICE      default omniproxy-user.service (systemd --user)
+#   OMNIPROXY_LAUNCHD_LABEL  default com.van.omniproxy (repo layout restart)
 #   OMNIPROXY_PORT         default 8080                (health-check port)
 #   OMNIPROXY_HEALTH_URL   default http://127.0.0.1:$OMNIPROXY_PORT/v1/models
 #   OMNIPROXY_RESTART_CMD  custom restart command (skips systemd entirely)
@@ -32,30 +37,53 @@
 
 set -euo pipefail
 
+log()  { echo "[update] $*"; }
+fail() { echo "[update] ERROR: $*" >&2; exit 1; }
+
+# ── Options ───────────────────────────────────────────────────────────
+MODE="update"
+LAYOUT_ARG=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --check) MODE="check"; shift ;;
+    --layout) LAYOUT_ARG="${2:-}"; [[ -n "$LAYOUT_ARG" ]] || fail "--layout needs a value"; shift 2 ;;
+    --layout=*) LAYOUT_ARG="${1#--layout=}"; shift ;;
+    -h|--help)
+      # print the leading comment block only (stop at the first non-comment line)
+      awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"
+      exit 0 ;;
+    *) fail "unknown option: $1 (try --check, --layout, or --help)" ;;
+  esac
+done
+
+# ── Layout ────────────────────────────────────────────────────────────
+# Where the binary, web/ and version.json actually live. Getting this wrong is
+# silent: the update "succeeds", writes a binary nobody executes, and the
+# service keeps running the old one. So it is explicit, never guessed.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LAYOUT="${LAYOUT_ARG:-${OMNIPROXY_LAYOUT:-prefix}}"
+case "$LAYOUT" in
+  prefix|repo) ;;
+  *) fail "unknown layout: ${LAYOUT} (expected prefix or repo)" ;;
+esac
+
 REPO="${OMNIPROXY_REPO:-mxuanvan02/OmniProxy}"
-HOME_DIR="${OMNIPROXY_HOME:-$HOME/.omniproxy-user}"
-BIN="${HOME_DIR}/bin/omniproxy"
-WEB="${HOME_DIR}/bin/web"
+if [[ "$LAYOUT" == "repo" ]]; then
+  HOME_DIR="${OMNIPROXY_HOME:-$(dirname "$SCRIPT_DIR")}"
+  BIN="${HOME_DIR}/omniproxy"
+  WEB="${HOME_DIR}/web"
+else
+  HOME_DIR="${OMNIPROXY_HOME:-$HOME/.omniproxy-user}"
+  BIN="${HOME_DIR}/bin/omniproxy"
+  WEB="${HOME_DIR}/bin/web"
+fi
 SERVICE="${OMNIPROXY_SERVICE:-omniproxy-user.service}"
+LAUNCHD_LABEL="${OMNIPROXY_LAUNCHD_LABEL:-com.van.omniproxy}"
 PORT="${OMNIPROXY_PORT:-8080}"
 HEALTH_URL="${OMNIPROXY_HEALTH_URL:-http://127.0.0.1:${PORT}/v1/models}"
 RESTART_CMD="${OMNIPROXY_RESTART_CMD:-}"
 KEEP_ROLLBACKS="${OMNIPROXY_KEEP_ROLLBACKS:-5}"
 API="${OMNIPROXY_API_URL:-https://api.github.com/repos/${REPO}/releases/latest}"
-
-log()  { echo "[update] $*"; }
-fail() { echo "[update] ERROR: $*" >&2; exit 1; }
-
-MODE="update"
-case "${1:-}" in
-  --check) MODE="check" ;;
-  -h|--help)
-    # print the leading comment block only (stop at the first non-comment line)
-    awk 'NR>1 && /^#/ {sub(/^# ?/, ""); print; next} NR>1 {exit}' "$0"
-    exit 0 ;;
-  "") ;;
-  *) fail "unknown option: $1 (try --check or --help)" ;;
-esac
 
 command -v curl >/dev/null 2>&1 || fail "curl is required"
 command -v jq   >/dev/null 2>&1 || fail "jq is required"
@@ -155,7 +183,10 @@ NEW_BIN="${SRC}/omniproxy"
 
 # ── Backup + swap ─────────────────────────────────────────────────────
 ROLLBACK_DIR="${HOME_DIR}/.rollback"
-mkdir -p "${HOME_DIR}/bin" "$ROLLBACK_DIR"
+# Derive the binary's own directory instead of assuming ${HOME_DIR}/bin: in
+# repo layout the binary sits directly in the repo dir, and an unconditional
+# mkdir would leave an empty bin/ inside the git working tree.
+mkdir -p "$(dirname "$BIN")" "$ROLLBACK_DIR"
 
 BACKUP=""
 if [[ -f "$BIN" ]]; then
@@ -166,6 +197,14 @@ fi
 
 WEB_PREV="${WEB}.prev-update"
 rm -rf "$WEB_PREV"
+
+# The updater has to install itself: the dashboard's one-click update runs
+# scripts/update.sh beside the binary, so a tarball install that never copies it
+# can see a new release but never install one. Repo layout is skipped — there
+# scripts/ is the git-tracked tree that is already running.
+SCRIPTS="$(dirname "$WEB")/scripts"
+SCRIPTS_PREV="${SCRIPTS}.prev-update"
+rm -rf "$SCRIPTS_PREV"
 
 install -m 0755 "$NEW_BIN" "${BIN}.new"
 mv "${BIN}.new" "$BIN"
@@ -178,6 +217,16 @@ if [[ -d "${SRC}/web" ]]; then
   fi
   mv "${WEB}.new" "$WEB"       # single-rename window
   log "web assets updated (previous kept at ${WEB_PREV##*/} until health-check)"
+fi
+
+if [[ "$LAYOUT" == "prefix" && -d "${SRC}/scripts" ]]; then
+  rm -rf "${SCRIPTS}.new"
+  cp -r "${SRC}/scripts" "${SCRIPTS}.new"
+  if [[ -d "$SCRIPTS" ]]; then
+    mv "$SCRIPTS" "$SCRIPTS_PREV"
+  fi
+  mv "${SCRIPTS}.new" "$SCRIPTS"
+  log "updater scripts installed at ${SCRIPTS}"
 fi
 
 # version.json is NOT written yet — only a healthy new install claims the new
@@ -196,11 +245,17 @@ restart() {
   if [[ -n "$RESTART_CMD" ]]; then
     log "restarting via OMNIPROXY_RESTART_CMD..."
     bash -c "$RESTART_CMD"
+  elif [[ "$LAYOUT" == "repo" ]] && command -v launchctl >/dev/null 2>&1; then
+    # -k kills the running instance and starts it again, so the swapped binary
+    # is what comes up. A plain `launchctl start` would be a no-op on a job that
+    # is already running — the old process would keep serving the old binary.
+    log "restarting via launchd (${LAUNCHD_LABEL})..."
+    launchctl kickstart -k "gui/$(id -u)/${LAUNCHD_LABEL}"
   elif command -v systemctl >/dev/null 2>&1 && systemctl --user cat "$SERVICE" >/dev/null 2>&1; then
     log "restarting ${SERVICE} (systemd --user)..."
     systemctl --user restart "$SERVICE"
   else
-    fail "no restart mechanism found: set OMNIPROXY_RESTART_CMD or install the systemd user unit (${SERVICE}). The new binary is in place; start it manually."
+    fail "no restart mechanism found: set OMNIPROXY_RESTART_CMD, install the systemd user unit (${SERVICE}), or use --layout repo with the launchd job ${LAUNCHD_LABEL} loaded. The new binary is in place; start it manually."
   fi
 }
 

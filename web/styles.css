@@ -2408,6 +2408,31 @@ img.brand-icon {
   flex-wrap: wrap;
   padding-top: 0.25rem;
 }
+/* One-click update progress: the script's own output, verbatim. */
+.update-progress-log {
+  margin: 0;
+  padding: 0.75rem;
+  max-height: 22rem;
+  overflow: auto;
+  background: var(--muted);
+  color: var(--foreground);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  text-align: left;
+}
+.update-progress-status {
+  margin: 0.75rem 0 0;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: var(--muted-foreground);
+}
+.update-progress-status.update-progress-ok { color: var(--success); }
+.update-progress-status.update-progress-error { color: var(--destructive, #dc2626); }
 
 /* Add-account method picker */
 .method-list {

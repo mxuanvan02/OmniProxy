@@ -34,6 +34,10 @@ scripts/sync-*.sh
 # Local rollback snapshots (contain data/config.json with live credentials)
 .rollback/
 
+# Transient web/ copies made by scripts/update.sh in repo layout
+web.prev-update/
+web.old/
+
 # Pre-sync snapshots pulled from a remote host (full account credentials)
 .sync-backups/
 

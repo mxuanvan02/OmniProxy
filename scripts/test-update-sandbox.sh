@@ -15,6 +15,11 @@
 #   T8  prune keeps the just-made backup even when older backups have
 #       NEWER mtimes (name-sort, not mtime-sort), KEEP_ROLLBACKS honored
 #   T9  after a rollback, --check still reports the update (retry path alive)
+#   T10 repo layout: binary/web swap at ${HOME}/omniproxy (no bin/), --layout repo
+#
+# The suite derives the release asset name from uname, matching how update.sh
+# resolves it, so it runs on darwin/arm64 as well as linux/amd64. Hardcoding
+# linux-amd64 made every case fail on macOS at the asset lookup.
 #
 # Note: exercises the sha256sum branch only; the macOS shasum branch shares
 # the same `awk '{print $1}'` shape but is not covered here.
@@ -36,6 +41,21 @@ APORT="$(pick_port)"
 HPORT="$(pick_port)"
 HEALTH_FLAG="$T/health-ok"   # test-private, not world-writable /tmp
 
+# Same platform resolution update.sh uses, so the fake release ships the asset
+# this machine will actually ask for.
+case "$(uname -s)" in
+  Linux)  GOOS="linux" ;;
+  Darwin) GOOS="darwin" ;;
+  *) echo "unsupported OS for this test: $(uname -s)"; exit 1 ;;
+esac
+case "$(uname -m)" in
+  x86_64|amd64) GOARCH="amd64" ;;
+  arm64|aarch64) GOARCH="arm64" ;;
+  *) echo "unsupported arch for this test: $(uname -m)"; exit 1 ;;
+esac
+ASSET="omniproxy-0.5.0-${GOOS}-${GOARCH}.tar.gz"
+PKGNAME="omniproxy-0.5.0-${GOOS}-${GOARCH}"
+
 echo "== setup fake release =="
 mkdir -p "$T/assets" "$T/home/bin"
 # fake "binary" 0.4.0 (current) and 0.5.0 (new)
@@ -45,13 +65,15 @@ printf '{"version":"0.4.0"}\n' > "$T/home/version.json"
 mkdir -p "$T/home/bin/web"; echo old > "$T/home/bin/web/index.html"
 
 # build fake tarball like the workflow does
-PKG="$T/pkg/omniproxy-0.5.0-linux-amd64"
+PKG="$T/pkg/${PKGNAME}"
 mkdir -p "$PKG/web"
 printf '#!/bin/sh\necho new-0.5.0\n' > "$PKG/omniproxy"; chmod +x "$PKG/omniproxy"
 echo new > "$PKG/web/index.html"
 printf '{"version":"0.5.0"}\n' > "$PKG/version.json"
-tar czf "$T/assets/omniproxy-0.5.0-linux-amd64.tar.gz" -C "$T/pkg" omniproxy-0.5.0-linux-amd64
-( cd "$T/assets" && sha256sum omniproxy-0.5.0-linux-amd64.tar.gz > omniproxy-0.5.0-linux-amd64.tar.gz.sha256 )
+mkdir -p "$PKG/scripts"
+printf '#!/bin/sh\necho fake-updater\n' > "$PKG/scripts/update.sh"; chmod +x "$PKG/scripts/update.sh"
+tar czf "$T/assets/${ASSET}" -C "$T/pkg" "${PKGNAME}"
+( cd "$T/assets" && sha256sum "${ASSET}" > "${ASSET}.sha256" )
 # keep a pristine copy: T5 corrupts the served tarball
 mkdir -p "$T/pristine" && cp "$T/assets"/* "$T/pristine/"
 
@@ -167,15 +189,16 @@ echo "== TEST 8: prune keeps the just-made backup (name-sort beats mtime) =="
 reset_state
 mkdir -p "$T/home/.rollback"
 # 3 pre-existing backups whose mtimes are NEWER than the running binary's
-# backup will be (cp without -p gives "now"; make these even newer via touch)
+# backup will be (cp without -p gives "now"; make these even newer via touch).
+# -t, not -d: GNU date strings are rejected by BSD touch on macOS.
 for d in 20250101 20250102 20250103; do
   printf 'stale\n' > "$T/home/.rollback/omniproxy.${d}_120000"
-  touch -d '2030-01-01' "$T/home/.rollback/omniproxy.${d}_120000"   # mtime in the FUTURE
+  touch -t 203001010000 "$T/home/.rollback/omniproxy.${d}_120000"   # mtime in the FUTURE
 done
-touch -d '2020-01-01' "$T/home/bin/omniproxy"   # running binary ancient by mtime
+touch -t 202001010000 "$T/home/bin/omniproxy"   # running binary ancient by mtime
 OUT=$(OMNIPROXY_KEEP_ROLLBACKS=3 "$UPDATE" 2>&1) || { echo "$OUT"; echo "FAIL t8 run"; exit 1; }
 echo "$OUT"
-NEWEST="$(ls -1 "$T/home/.rollback"/omniproxy.2026* 2>/dev/null || true)"
+NEWEST="$(ls -1 "$T/home/.rollback"/omniproxy.$(date +%Y)* 2>/dev/null || true)"
 [[ -n "$NEWEST" ]] || { echo "FAIL t8: just-made backup was pruned (mtime-sort regression)"; exit 1; }
 COUNT="$(ls -1 "$T/home/.rollback"/omniproxy.* | wc -l)"
 [[ "$COUNT" -le 3 ]] || { echo "FAIL t8: KEEP_ROLLBACKS not honored (have $COUNT)"; exit 1; }
@@ -184,7 +207,7 @@ echo PASS t8
 
 echo "== TEST 5: tampered tarball refused (sha mismatch) =="
 reset_state
-python3 - "$T/assets/omniproxy-0.5.0-linux-amd64.tar.gz" <<'EOF'
+python3 - "$T/assets/${ASSET}" <<'EOF'
 import sys
 with open(sys.argv[1], "r+b") as f:
     f.seek(-10, 2); f.write(b"0123456789")  # corrupt tail
@@ -197,4 +220,25 @@ echo "$OUT" | grep -q "sha256 mismatch" || { echo "$OUT"; echo "FAIL t5 msg"; ex
 cp "$T/pristine"/* "$T/assets/"   # restore for any later runs
 echo PASS t5
 
-echo "ALL TESTS PASSED (9/9)"
+# The layout this machine actually runs: binary + web/ directly in the repo
+# dir, no bin/, restarted by launchd. Getting it wrong is the silent-failure
+# mode this whole suite exists to catch — update.sh would install to
+# $HOME/.omniproxy-user/bin/ while launchd keeps running the old binary.
+R="$T/repo"
+echo "== TEST 10: repo layout swaps ${R}/omniproxy, leaves repo scripts alone =="
+rm -rf "$R"; mkdir -p "$R/web" "$R/scripts"
+printf '#!/bin/sh\necho old-0.4.0\n' > "$R/omniproxy"; chmod +x "$R/omniproxy"
+printf '{"version":"0.4.0"}\n' > "$R/version.json"
+echo old > "$R/web/index.html"
+printf '#!/bin/sh\necho git-tracked-updater\n' > "$R/scripts/update.sh"
+OUT=$(OMNIPROXY_HOME="$R" OMNIPROXY_RESTART_CMD=true "$UPDATE" --layout repo 2>&1) || { echo "$OUT"; echo "FAIL t10: repo update failed"; exit 1; }
+echo "$OUT"
+"$R/omniproxy" | grep -q new-0.5.0 || { echo "FAIL t10: binary not swapped at ${R}/omniproxy"; exit 1; }
+jq -r .version "$R/version.json" | grep -q '^0.5.0$' || { echo "FAIL t10: version.json not updated"; exit 1; }
+grep -q new "$R/web/index.html" || { echo "FAIL t10: web not updated"; exit 1; }
+# repo layout must NOT clobber the git-tracked updater with the tarball's copy
+grep -q git-tracked-updater "$R/scripts/update.sh" || { echo "FAIL t10: repo scripts/ was overwritten"; exit 1; }
+[[ ! -e "$R/bin" ]] || { echo "FAIL t10: stray ${R}/bin created in repo layout"; exit 1; }
+echo PASS t10
+
+echo "ALL TESTS PASSED (10/10)"
