@@ -3,14 +3,19 @@
 // Google Antigravity (Cloud Code Assist) OAuth 2.0 + PKCE login flow.
 //
 // Antigravity ships a public desktop OAuth client. Its ID and secret are not
-// secrets in the OAuth sense (a desktop client cannot keep one) and PKCE is
-// what actually protects the exchange, but they are not committed here either:
-// supply them through ANTIGRAVITY_CLIENT_ID / ANTIGRAVITY_CLIENT_SECRET or the
-// matching config settings, using the values the installed IDE already holds.
+// secrets in the OAuth sense (a desktop client cannot keep one) and the client
+// secret authenticates the token exchange, but they are not committed here
+// either: supply them through ANTIGRAVITY_CLIENT_ID / ANTIGRAVITY_CLIENT_SECRET
+// or the matching config settings, using the values the installed IDE holds.
 //
-//   - Authorize: https://accounts.google.com/o/oauth2/auth
+//   - Authorize: https://accounts.google.com/o/oauth2/v2/auth
 //   - Token:     https://oauth2.googleapis.com/token
 //   - Redirect:  http://localhost:51121/oauth-callback (loopback, any port)
+//
+// The request shape mirrors the installed desktop clients exactly: v2
+// authorize endpoint, no PKCE challenge. Deviating from it (v1 endpoint, or a
+// code challenge) makes Google's consent screen insert a phone-verification
+// step for this client.
 //
 // Google's Antigravity Terms of Service prohibit third-party clients. Accounts
 // used through this path can be disabled by Google; that is an expected
@@ -38,7 +43,11 @@ import (
 )
 
 const (
-	antigravityAuthorizeURL = "https://accounts.google.com/o/oauth2/auth"
+	// v2 authorize endpoint and no PKCE challenge: the exact request shape the
+	// Cloud Code Assist desktop clients send. The previous shape (v1 endpoint
+	// plus a code challenge) made Google's consent screen insert a
+	// phone-verification step for this client; this one does not.
+	antigravityAuthorizeURL = "https://accounts.google.com/o/oauth2/v2/auth"
 	antigravityTokenURL     = "https://oauth2.googleapis.com/token"
 	antigravityCallbackPath = "/oauth-callback"
 
@@ -86,10 +95,9 @@ type AntigravityTokens struct {
 	Subject      string // Google account "sub" claim, stable per account
 }
 
-// AntigravityLoginSession holds in-flight PKCE login state. Only one login can
+// AntigravityLoginSession holds in-flight login state. Only one login can
 // be active at a time because the callback binds a fixed local port first.
 type AntigravityLoginSession struct {
-	Verifier    string
 	State       string
 	AuthURL     string
 	RedirectURI string
@@ -127,9 +135,7 @@ func StartAntigravityLogin() (*AntigravityLoginSession, error) {
 	}
 	port := listener.Addr().(*net.TCPAddr).Port
 
-	verifier := generateCodeVerifier()
 	session := &AntigravityLoginSession{
-		Verifier:    verifier,
 		State:       generateAntigravityState(),
 		RedirectURI: fmt.Sprintf("http://localhost:%d%s", port, antigravityCallbackPath),
 		ExpiresAt:   time.Now().Add(10 * time.Minute),
@@ -142,8 +148,6 @@ func StartAntigravityLogin() (*AntigravityLoginSession, error) {
 	q.Set("client_id", clientID)
 	q.Set("redirect_uri", session.RedirectURI)
 	q.Set("scope", strings.Join(antigravityScopes, " "))
-	q.Set("code_challenge", generateCodeChallenge(verifier))
-	q.Set("code_challenge_method", "S256")
 	q.Set("state", session.State)
 	// offline + consent are required to receive a refresh_token every time;
 	// without them Google omits it for an account that already granted access.
@@ -153,8 +157,12 @@ func StartAntigravityLogin() (*AntigravityLoginSession, error) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc(antigravityCallbackPath, session.handleCallback)
-	session.server = &http.Server{Handler: mux, IdleTimeout: 30 * time.Second}
-	go func() { _ = session.server.Serve(listener) }()
+	// Capture the server in a local before spawning: abort() nils the session
+	// field on cancel, and a goroutine that read it at run time could then
+	// Serve a nil *http.Server and panic the process.
+	srv := &http.Server{Handler: mux, IdleTimeout: 30 * time.Second}
+	session.server = srv
+	go func() { _ = srv.Serve(listener) }()
 
 	antigravityLoginCurrent = session
 	return session, nil
@@ -232,7 +240,7 @@ func PollAntigravityLogin() (*AntigravityTokens, error) {
 
 	select {
 	case code := <-session.codeChan:
-		tokens, err := exchangeAntigravityCode(code, session.Verifier, session.RedirectURI)
+		tokens, err := exchangeAntigravityCode(code, session.RedirectURI)
 		CancelAntigravityLogin()
 		if err != nil {
 			return nil, err
@@ -272,7 +280,7 @@ func generateAntigravityState() string {
 	return fmt.Sprintf("%x", b)
 }
 
-func exchangeAntigravityCode(code, verifier, redirectURI string) (*AntigravityTokens, error) {
+func exchangeAntigravityCode(code, redirectURI string) (*AntigravityTokens, error) {
 	clientID, clientSecret, err := antigravityClientCreds()
 	if err != nil {
 		return nil, err
@@ -282,7 +290,6 @@ func exchangeAntigravityCode(code, verifier, redirectURI string) (*AntigravityTo
 		"client_id":     {clientID},
 		"client_secret": {clientSecret},
 		"code":          {code},
-		"code_verifier": {verifier},
 		"redirect_uri":  {redirectURI},
 	})
 }
