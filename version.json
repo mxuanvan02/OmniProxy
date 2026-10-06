@@ -1,5 +1,5 @@
 {
-  "version": "0.6.5",
-  "changelog": "Antigravity login no longer triggers Google's phone-verification step: the authorize request now matches the installed desktop clients exactly (v2 endpoint, no PKCE challenge). Also fixes a latent crash where cancelling a login right after starting it could panic the process.",
+  "version": "0.6.6",
+  "changelog": "Self-update on prefix installs (systemd, ~/.omniproxy-user) no longer writes the new binary one level above the tree the service executes. The update endpoint now derives the layout from where the running binary lives instead of hardcoding the repo layout.",
   "download": "https://github.com/mxuanvan02/OmniProxy"
 }

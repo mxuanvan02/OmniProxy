@@ -2,6 +2,11 @@
 
 All notable changes to OmniProxy are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.6] — 2026-10-07
+
+### Fixed
+- **One-click update on a prefix install wrote the new binary where nothing executes it.** The update endpoint hardcoded `OMNIPROXY_LAYOUT=repo`, the layout of the launchd dev box. On a prefix install (systemd user unit, `~/.omniproxy-user`) `update.sh` therefore placed the new binary at `~/.omniproxy-user/omniproxy` and the new `web/` at `~/.omniproxy-user/web` — one level above the `bin/` subtree the service actually runs — then restarted the service, which came up on the untouched old binary. Nothing announced the failure: the dashboard reported success, `/health` kept the old version, and `update.state` stayed `running:true` because the wrapper that records the exit code died with the old process. The endpoint now derives the layout from where the running binary lives (installed `web/` or `scripts/` beside it with `version.json` one level up → prefix; `version.json` beside it → repo), and unit tests pin all three shapes.
+
 ## [0.6.5] — 2026-10-06
 
 ### Fixed
