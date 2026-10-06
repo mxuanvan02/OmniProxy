@@ -143,6 +143,24 @@ func resolveUpdateScript() (string, bool) {
 	return "", false
 }
 
+// detectUpdateLayout reports which scripts/update.sh layout matches where this
+// binary actually lives, so the updater installs into the tree the service
+// executes. A prefix install (systemd, ~/.omniproxy-user) keeps the binary in
+// HOME/bin beside the installed web/ or scripts/, with version.json one level
+// up in HOME; a repo install (launchd, git clone) keeps version.json beside the
+// binary itself. Getting this wrong is silent and costly: the script writes the
+// new binary where nothing executes it and the restarted service keeps serving
+// the old one.
+func detectUpdateLayout(wd, exeDir string) (layout, home string) {
+	_, webHere := os.Stat(filepath.Join(exeDir, "web"))
+	_, scriptsHere := os.Stat(filepath.Join(exeDir, "scripts"))
+	_, versionHere := os.Stat(filepath.Join(exeDir, "version.json"))
+	if (webHere == nil || scriptsHere == nil) && versionHere != nil {
+		return "prefix", filepath.Clean(filepath.Join(exeDir, ".."))
+	}
+	return "repo", wd
+}
+
 // apiGetUpdateStatus GET /admin/api/update/status
 // Reports the persisted state of the last/current update. Reads only from disk,
 // so it answers correctly from the proxy process that came up mid-update.
@@ -324,12 +342,16 @@ printf '\n[update] script exited with code %d\n' "$code"
 	cmd.Stderr = logFile
 	// Repair the PATH first: a service manager can hand the job a PATH without
 	// /bin, and bash itself lives there on macOS (see systemDirs).
+	exe, _ := os.Executable()
+	layout, home := detectUpdateLayout(wd, filepath.Dir(exe))
 	cmd.Env = withSystemPath(append(os.Environ(),
-		// Repo layout: binary and web/ live beside the script, and the service is
-		// a launchd job — not the ~/.omniproxy-user + systemd layout the script
-		// assumes by default.
-		"OMNIPROXY_LAYOUT=repo",
-		fmt.Sprintf("OMNIPROXY_HOME=%s", wd),
+		// The layout follows where this binary actually lives, never a fixed
+		// guess: hardcoding one made the installer write the new binary and
+		// web/ one level above a prefix-layout install (~/.omniproxy-user/
+		// omniproxy instead of .../bin/omniproxy), and the restarted service
+		// kept serving the untouched old binary.
+		"OMNIPROXY_LAYOUT="+layout,
+		fmt.Sprintf("OMNIPROXY_HOME=%s", home),
 	))
 	// The running binary's own version, so update.sh compares against what is
 	// actually executing rather than the git-tracked version.json. In repo layout
