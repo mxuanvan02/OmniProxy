@@ -145,7 +145,7 @@ func TestExchangeAntigravityCodeRequiresRefreshToken(t *testing.T) {
 	defer srv.Close()
 	installTestAuthClient(t, srv)
 
-	_, err := exchangeAntigravityCode("auth-code", "verifier", "http://localhost:51121/oauth-callback")
+	_, err := exchangeAntigravityCode("auth-code", "http://localhost:51121/oauth-callback")
 	if err == nil || !strings.Contains(err.Error(), "missing refresh_token") {
 		t.Fatalf("error = %v, want missing refresh_token", err)
 	}
@@ -165,7 +165,7 @@ func TestExchangeAntigravityCodeSendsPKCEAndReturnsTokens(t *testing.T) {
 	defer srv.Close()
 	installTestAuthClient(t, srv)
 
-	tokens, err := exchangeAntigravityCode("auth-code", "pkce-verifier", redirect)
+	tokens, err := exchangeAntigravityCode("auth-code", redirect)
 	if err != nil {
 		t.Fatalf("exchangeAntigravityCode: %v", err)
 	}
@@ -178,13 +178,17 @@ func TestExchangeAntigravityCodeSendsPKCEAndReturnsTokens(t *testing.T) {
 		t.Fatalf("expiresAt is %ds away, want the 3600s default", delta)
 	}
 	for key, want := range map[string]string{
-		"code":          "auth-code",
-		"code_verifier": "pkce-verifier",
-		"redirect_uri":  redirect,
+		"code":         "auth-code",
+		"redirect_uri": redirect,
 	} {
 		if got := form.Get(key); got != want {
 			t.Errorf("form[%q] = %q, want %q", key, got, want)
 		}
+	}
+	// The desktop-client shape sends no PKCE verifier; the client secret
+	// authenticates the exchange instead.
+	if got := form.Get("code_verifier"); got != "" {
+		t.Errorf("form[code_verifier] = %q, want it absent", got)
 	}
 }
 
@@ -369,5 +373,45 @@ func TestRefreshAntigravityTokenFailureModes(t *testing.T) {
 				t.Fatalf("error = %v, want it tagged as an antigravity refresh failure", err)
 			}
 		})
+	}
+}
+
+// TestAntigravityAuthorizeURLMatchesDesktopClientShape pins the authorize
+// request to the shape the Cloud Code Assist desktop clients send: the v2
+// endpoint and no PKCE challenge. The previous shape (v1 endpoint plus a code
+// challenge) made Google's consent screen insert a phone-verification step;
+// a regression here would silently bring it back.
+func TestAntigravityAuthorizeURLMatchesDesktopClientShape(t *testing.T) {
+	setAntigravityCreds(t)
+
+	session, err := StartAntigravityLogin()
+	if err != nil {
+		t.Fatalf("StartAntigravityLogin: %v", err)
+	}
+	defer CancelAntigravityLogin()
+
+	u, err := url.Parse(session.AuthURL)
+	if err != nil {
+		t.Fatalf("parse AuthURL: %v", err)
+	}
+	if got := u.Scheme + "://" + u.Host + u.Path; got != antigravityAuthorizeURL {
+		t.Fatalf("authorize endpoint = %q, want %q", got, antigravityAuthorizeURL)
+	}
+	if !strings.HasSuffix(antigravityAuthorizeURL, "/o/oauth2/v2/auth") {
+		t.Fatalf("authorize endpoint %q is not the v2 endpoint", antigravityAuthorizeURL)
+	}
+	q := u.Query()
+	for _, forbidden := range []string{"code_challenge", "code_challenge_method"} {
+		if q.Get(forbidden) != "" {
+			t.Fatalf("authorize URL carries %s; the desktop-client shape sends no PKCE challenge", forbidden)
+		}
+	}
+	for _, required := range []string{"client_id", "redirect_uri", "scope", "state", "access_type", "prompt"} {
+		if q.Get(required) == "" {
+			t.Fatalf("authorize URL is missing %s", required)
+		}
+	}
+	if got := q.Get("access_type") + "/" + q.Get("prompt"); got != "offline/consent" {
+		t.Fatalf("access_type/prompt = %q, want offline/consent", got)
 	}
 }
