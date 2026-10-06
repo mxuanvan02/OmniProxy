@@ -579,6 +579,14 @@ func yamlQuoteIfNeeded(v string) string {
 		(strings.HasPrefix(v, `'`) && strings.HasSuffix(v, `'`)) {
 		return v
 	}
+	// A leading YAML indicator cannot begin a plain scalar: reseller upstreams
+	// hand back IDs like "[opencode]deepseek-v4-flash", and an unquoted "[" is
+	// read as a flow sequence, breaking the whole document below it. Quote any
+	// string that starts with one (over-quoting is always safe — the parser
+	// strips it back to the same value).
+	if strings.IndexByte("-?:,[]{}#&*!|>%@`", v[0]) >= 0 {
+		return `"` + v + `"`
+	}
 	// Quote if it contains special chars or looks like a URL/path.
 	if strings.ContainsAny(v, ":#@/?&=") || strings.Contains(v, " ") {
 		return `"` + v + `"`
