@@ -2,6 +2,17 @@
 
 All notable changes to OmniProxy are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.4] — 2026-10-06
+
+### Fixed
+- **Applying the Hermes CLI-tool settings no longer writes an unparseable `config.yaml`.** The generated provider block quotes model IDs through `yamlQuoteIfNeeded`, which only quoted on `:#@/?&=` and spaces. A model ID beginning with `[` fell through bare — and reseller upstreams hand back exactly that shape, so `[opencode]deepseek-v4-flash` was discovered from a live account and emitted as an unquoted mapping key. In YAML a leading `[` opens a flow sequence, so the parser read `[opencode]` as an array, choked on the trailing `deepseek-v4-flash:`, and reported the error against the enclosing `models:` block — pointing the operator several screens away from the line that was actually broken:
+  ```
+  cannot parse config.yaml: while parsing a block mapping, line 16, column 1:
+    models:
+  did not find expected key
+  ```
+  The failure was silent rather than loud, which is what made it costly: Hermes catches the parse error, logs a warning, and falls back to its last known-good config, so the gateway stayed up while serving a **stale** `base_url` and model list. Pressing Apply again regenerated the same broken file, so the operator's fix never took hold and nothing pointed at the proxy as the writer. Any leading YAML indicator (`-?:,[]{}#&*!|>%@\``) is now quoted. The rule is deliberately broad rather than a list of observed prefixes — over-quoting a scalar is always safe, because the parser strips the quotes and yields the identical value.
+
 ## [0.6.3] — 2026-10-06
 
 ### Fixed

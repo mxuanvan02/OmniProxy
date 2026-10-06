@@ -1,5 +1,5 @@
 {
-  "version": "0.6.3",
-  "changelog": "Fixes the one-click update on macOS: the launchd job's PATH has no /bin, and Go resolves exec.Command(\"bash\") through the parent's PATH regardless of cmd.Env, so every update answered 500 without running anything. The shell is now resolved to an absolute path and the child PATH repaired so the updater can reach date and launchctl. Also carries the earlier fix comparing against the running binary rather than the checkout's version.json",
+  "version": "0.6.4",
+  "changelog": "Fixes the Hermes CLI-tool integration: applying those settings generated a config.yaml whose model keys were unquoted, so an upstream model ID starting with \"[\" (e.g. [opencode]deepseek-v4-flash) broke the whole file. Hermes silently fell back to a stale config instead of erroring, so the gateway kept running with the wrong base_url and model list. Leading YAML indicators are now quoted.",
   "download": "https://github.com/mxuanvan02/OmniProxy"
 }
