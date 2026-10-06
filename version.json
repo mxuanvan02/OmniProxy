@@ -1,5 +1,5 @@
 {
-  "version": "0.6.4",
-  "changelog": "Fixes the Hermes CLI-tool integration: applying those settings generated a config.yaml whose model keys were unquoted, so an upstream model ID starting with \"[\" (e.g. [opencode]deepseek-v4-flash) broke the whole file. Hermes silently fell back to a stale config instead of erroring, so the gateway kept running with the wrong base_url and model list. Leading YAML indicators are now quoted.",
+  "version": "0.6.5",
+  "changelog": "Antigravity login no longer triggers Google's phone-verification step: the authorize request now matches the installed desktop clients exactly (v2 endpoint, no PKCE challenge). Also fixes a latent crash where cancelling a login right after starting it could panic the process.",
   "download": "https://github.com/mxuanvan02/OmniProxy"
 }
