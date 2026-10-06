@@ -2,6 +2,12 @@
 
 All notable changes to OmniProxy are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.7] — 2026-10-07
+
+### Fixed
+- **Self-update on systemd never claimed its new version.** The dashboard's update wrapper is a child of the very process the restart kills, so the updater died mid-restart and never reached the post-restart `version.json` commit: the restarted service served the new binary while `/health` reported the old version, `--check` kept offering the same update, and `update.state` stayed `running:true`. The version claim is now committed before the restart, the previous claim is kept beside it, and a rollback restores it. Sandbox test T12 kills the script at its own restart step and asserts the new claim survived.
+- **The update health check probed the wrong port.** The spawn never passed `OMNIPROXY_PORT`, so `update.sh` defaulted to 8080 while a prefix install listens elsewhere (20131 on hitokiri): a perfectly good swap would fail the check and roll itself back. The endpoint now passes the configured listen port.
+
 ## [0.6.6] — 2026-10-07
 
 ### Fixed
