@@ -404,3 +404,49 @@ func TestUpdateStatusTrimsOversizedLog(t *testing.T) {
 		t.Error("the oldest output survived; trimming must drop the head")
 	}
 }
+
+// TestDetectUpdateLayout locks the layout the updater installs into to the
+// tree the running binary actually lives in. A fixed guess wrote the new
+// binary and web/ one level above a prefix install, and the restarted service
+// kept serving the untouched old binary.
+func TestDetectUpdateLayout(t *testing.T) {
+	t.Run("prefix install", func(t *testing.T) {
+		home := t.TempDir()
+		exeDir := filepath.Join(home, "bin")
+		for _, d := range []string{exeDir, filepath.Join(exeDir, "web")} {
+			if err := os.MkdirAll(d, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		// A prefix install claims its version in HOME, one level above bin/.
+		if err := os.WriteFile(filepath.Join(home, "version.json"), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		layout, got := detectUpdateLayout("/unrelated/cwd", exeDir)
+		if layout != "prefix" || got != home {
+			t.Fatalf("layout, home = %q, %q; want prefix, %q", layout, got, home)
+		}
+	})
+	t.Run("repo install", func(t *testing.T) {
+		repo := t.TempDir()
+		// A git clone keeps version.json beside the binary in the repo root.
+		if err := os.WriteFile(filepath.Join(repo, "version.json"), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		layout, got := detectUpdateLayout(repo, repo)
+		if layout != "repo" || got != repo {
+			t.Fatalf("layout, home = %q, %q; want repo, %q", layout, got, repo)
+		}
+	})
+	t.Run("fresh prefix install without version.json", func(t *testing.T) {
+		home := t.TempDir()
+		exeDir := filepath.Join(home, "bin")
+		if err := os.MkdirAll(filepath.Join(exeDir, "scripts"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		layout, got := detectUpdateLayout("/unrelated/cwd", exeDir)
+		if layout != "prefix" || got != home {
+			t.Fatalf("layout, home = %q, %q; want prefix, %q", layout, got, home)
+		}
+	})
+}
