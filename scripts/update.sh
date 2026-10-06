@@ -244,8 +244,22 @@ if [[ "$LAYOUT" == "prefix" && -d "${SRC}/scripts" ]]; then
   log "updater scripts installed at ${SCRIPTS}"
 fi
 
-# version.json is NOT written yet — only a healthy new install claims the new
-# version, so a rollback leaves --check/update still seeing the update.
+# Commit the version claim now, before the restart: the dashboard's update
+# wrapper is a child of the very process the restart kills, so under systemd
+# the updater can never survive to commit afterwards. VERSION_PREV lets
+# rollback() put the old claim back; a run killed mid-restart then reports
+# the version the process now serving actually runs.
+VERSION_FILE="${HOME_DIR}/version.json"
+VERSION_PREV=""
+if [[ -f "$VERSION_FILE" ]]; then
+  VERSION_PREV="${VERSION_FILE}.prev-update"
+  cp "$VERSION_FILE" "$VERSION_PREV"
+fi
+if [[ -f "${SRC}/version.json" ]]; then
+  cp "${SRC}/version.json" "$VERSION_FILE"
+else
+  printf '{"version": "%s"}\n' "$LATEST_V" > "$VERSION_FILE"
+fi
 
 # prune old rollbacks — by NAME (the timestamp is in the filename), never by
 # mtime: `cp` backups can carry an old mtime and an mtime sort would delete
@@ -303,9 +317,13 @@ rollback() { # restore binary + web, restart, report
     mv "$WEB_PREV" "$WEB"
     log "web assets rolled back"
   fi
+  if [[ -n "$VERSION_PREV" && -f "$VERSION_PREV" ]]; then
+    mv "$VERSION_PREV" "$VERSION_FILE"
+    log "version.json rolled back"
+  fi
   restart || log "restart after rollback failed — start the service manually"
   if health_ok 20; then
-    fail "update to ${LATEST_V} rolled back to ${CURRENT}; service is healthy again (version.json unchanged, so re-running the update will retry)"
+    fail "update to ${LATEST_V} rolled back to ${CURRENT}; service is healthy again (version.json restored, so re-running the update will retry)"
   fi
   fail "update to ${LATEST_V} rolled back but the service is STILL unhealthy — check ${HOME_DIR}/logs and start it manually"
 }
@@ -316,13 +334,7 @@ if ! restart; then
 fi
 
 if health_ok 30; then
-  # Commit the new version only now.
-  if [[ -f "${SRC}/version.json" ]]; then
-    cp "${SRC}/version.json" "${HOME_DIR}/version.json"
-  else
-    printf '{"version": "%s"}\n' "$LATEST_V" > "${HOME_DIR}/version.json"
-  fi
-  rm -rf "$WEB_PREV" "${WEB}.old" "${WEB}.new"
+  rm -rf "$WEB_PREV" "$VERSION_PREV" "${WEB}.old" "${WEB}.new"
   log "update complete: ${CURRENT} -> ${LATEST_V}"
   exit 0
 fi

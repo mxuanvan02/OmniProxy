@@ -262,4 +262,15 @@ echo "$OUT" | grep -q "already at 0.5.0" || { echo "$OUT"; echo "FAIL t11b: env 
 "$T/home/bin/omniproxy" | grep -q old-0.4.0 || { echo "FAIL t11b: binary swapped when already current"; exit 1; }
 echo PASS t11b
 
-echo "ALL TESTS PASSED (11/11)"
+# The dashboard's wrapper is a child of the process the restart kills, so on
+# systemd the updater dies mid-restart and never reaches a post-restart
+# commit. The version claim must therefore land BEFORE the restart: a run
+# killed at the restart step has to leave the new claim in place.
+echo "== TEST 12: version.json committed before restart, survives a mid-restart kill =="
+reset_state
+OUT=$(OMNIPROXY_RESTART_CMD='kill -TERM $PPID' "$UPDATE" 2>&1) && RC=0 || RC=$?
+[[ $RC -ne 0 ]] || { echo "$OUT"; echo "FAIL t12: script survived its own restart step"; exit 1; }
+jq -r .version "$T/home/version.json" | grep -q '^0.5.0$' || { echo "$OUT"; echo "FAIL t12: version.json not committed before the restart"; exit 1; }
+echo PASS t12
+
+echo "ALL TESTS PASSED (12/12)"
