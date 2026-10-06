@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -315,7 +316,7 @@ func TestUpdateStartPassesRunningVersionToScript(t *testing.T) {
 
 	// And the detail the whole fix turns on: the repo layout is set too, so the
 	// script resolves binary/web beside the clone rather than in ~/.omniproxy-user.
-	chdirToTempUpdateTree(t, "#!/usr/bin/env bash\necho \"LAYOUT=${OMNIPROXY_LAYOUT:-<unset>}\"\n")
+	chdirToTempUpdateTree(t, "#!/usr/bin/env bash\necho \"LAYOUT=${OMNIPROXY_LAYOUT:-<unset>} PORT=${OMNIPROXY_PORT:-<unset>}\"\n")
 	rec = httptest.NewRecorder()
 	h.apiStartUpdate(rec, httptest.NewRequest(http.MethodPost, "/admin/api/update/start", nil))
 	if rec.Code != http.StatusAccepted {
@@ -324,8 +325,14 @@ func TestUpdateStartPassesRunningVersionToScript(t *testing.T) {
 	if st := waitForUpdateSettled(t, h); st.ExitCode == nil || *st.ExitCode != 0 {
 		t.Fatalf("second exitCode = %v, want 0", st.ExitCode)
 	}
-	if logText := readUpdateLog(); !strings.Contains(logText, "LAYOUT=repo") {
+	logText := readUpdateLog()
+	if !strings.Contains(logText, "LAYOUT=repo") {
 		t.Errorf("repo layout not passed to the script; log:\n%s", logText)
+	}
+	// A prefix install can listen anywhere; a script left to its 8080 default
+	// health-checks a port nothing serves and rolls a good swap back.
+	if want := "PORT=" + strconv.Itoa(config.GetPort()); !strings.Contains(logText, want) {
+		t.Errorf("listen port not passed to the script, want %q; log:\n%s", want, logText)
 	}
 }
 
