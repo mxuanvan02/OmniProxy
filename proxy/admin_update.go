@@ -352,6 +352,10 @@ printf '\n[update] script exited with code %d\n' "$code"
 		// kept serving the untouched old binary.
 		"OMNIPROXY_LAYOUT="+layout,
 		fmt.Sprintf("OMNIPROXY_HOME=%s", home),
+		// The script's health check defaults to port 8080; a proxy listening
+		// elsewhere would fail the check after a perfectly good swap and roll
+		// the update back.
+		fmt.Sprintf("OMNIPROXY_PORT=%d", config.GetPort()),
 	))
 	// The running binary's own version, so update.sh compares against what is
 	// actually executing rather than the git-tracked version.json. In repo layout
