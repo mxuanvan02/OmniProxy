@@ -5,6 +5,27 @@
   let cliApiKeyCache = {};
   let cliToolDetailId = null;
 
+  // Default endpoint offered to the configured CLI tools: the proxy's own
+  // listen address as seen from the machine it runs on. The browser may reach
+  // the admin UI over a remote address (Tailscale, LAN IP), but the tool
+  // configs are written server-side, so their default must stay loopback.
+  let cliLocalEndpoint = '';
+  let cliLocalEndpointPromise = null;
+  function ensureCliLocalEndpoint() {
+    if (cliLocalEndpoint) return Promise.resolve(cliLocalEndpoint);
+    if (!cliLocalEndpointPromise) {
+      cliLocalEndpointPromise = api('/settings').then(function (res) {
+        return res.ok ? res.json() : null;
+      }).then(function (s) {
+        if (!s) return '';
+        var host = s.host && s.host !== '0.0.0.0' && s.host !== '::' ? s.host : '127.0.0.1';
+        cliLocalEndpoint = 'http://' + host + ':' + (s.port || 8080) + '/v1';
+        return cliLocalEndpoint;
+      }).catch(function () { return ''; });
+    }
+    return cliLocalEndpointPromise;
+  }
+
   // ---- Helper: get API key from select/input ----
   async function getCliApiKey(selectId, customId) {
     var sel = $(selectId);
@@ -30,7 +51,7 @@
 
   // ---- Helper: render endpoint select + API key select (used by many tools) ----
   function renderEndpointApiKeyFields(prefix) {
-    var localUrl = (baseUrl || location.origin) + '/v1';
+    var localUrl = cliLocalEndpoint || (baseUrl || location.origin) + '/v1';
     var html = '';
     html += '<div class="form-group"><label data-i18n="cliTools.endpoint"></label>' +
       '<select id="' + prefix + '_ep" class="form-control" data-native-select="true">' +
@@ -1625,6 +1646,10 @@
     var meta = CLI_TOOL_META.find(function (m) { return m.id === toolId; });
     if (!meta) { cliToolDetailId = null; renderCliTools(); return; }
 
+    // Resolve the server-side default endpoint before rendering, so the
+    // select never shows the browser's (possibly remote) origin.
+    await ensureCliLocalEndpoint();
+
     detail.innerHTML =
       '<div class="cli-tool-detail-back" onclick="window.backToCliTools()">' +
       '<i class="fa-solid fa-arrow-left"></i> ' + escapeHtml(t('common.back')) +
@@ -1671,7 +1696,7 @@
     var ep = $(prefix + '_ep');
     if (!ep) return;
     var localUrl = ep.options[0].textContent;
-    var norm = function(u) { return u.replace(/\/+$/, '').replace(/\/v1$/, ''); };
+    var norm = function(u) { return u.replace(/\/+$/, '').replace(/\/v1$/, '').replace(/^(https?:\/\/)localhost:/, '$1127.0.0.1:'); };
     if (norm(baseUrl) === norm(localUrl)) {
       ep.value = 'local';
     } else {
