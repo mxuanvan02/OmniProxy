@@ -50,20 +50,6 @@ function fmtCountdown(resetAt) {
 }
 
 // Absolute reset date: "Today, 3:45 PM" / "Tomorrow, 9:00 AM" / "Jul 25, 2:30 PM"
-function fmtResetAbsolute(resetAt) {
-  if (!resetAt) return null;
-  const b = new Date(resetAt * 1000);
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const tomorrow = new Date(today);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  let dayLabel;
-  if (b >= today && b < tomorrow) dayLabel = 'Today';
-  else if (b >= tomorrow && b < new Date(tomorrow.getTime() + 86400000)) dayLabel = 'Tomorrow';
-  else dayLabel = b.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-  const timeLabel = b.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
-  return dayLabel + ', ' + timeLabel;
-}
 
 function fmtDateStr(s) {
   if (!s) return '—';
@@ -310,7 +296,14 @@ function renderAccountBlock(a) {
   // Quota rows (9router-style: one row per quota dimension)
   let quotasHtml;
   if (a.quotas && a.quotas.length > 0) {
-    quotasHtml = a.quotas.map(q => renderQuotaRow(q)).join('');
+    // Live packages first (soonest reset wins), expired ones collapsed at the end.
+    const sorted = [...a.quotas].sort((x, y) => {
+      const ex = fmtCountdown(x.resetAt) === 'expired' ? 1 : 0;
+      const ey = fmtCountdown(y.resetAt) === 'expired' ? 1 : 0;
+      if (ex !== ey) return ex - ey;
+      return (x.resetAt || 0) - (y.resetAt || 0);
+    });
+    quotasHtml = sorted.map(q => renderQuotaRow(q)).join('');
   } else {
     const pct = a.usagePercent || 0;
     const remaining = a.usageLimit > 0 ? Math.max(0, 100 - pct) : 100;
@@ -382,6 +375,18 @@ function renderAccountBlock(a) {
     </div>`;
 }
 
+// Strips the upstream "(Sub #12345 (5h))" suffix from a package name so the
+// row shows only the human-readable package label; unnamed packages keep
+// their subscription id. The full name stays in the row's title attribute.
+function quotaDisplayName(name) {
+  const s = String(name == null ? '' : name).trim();
+  const m = s.match(/^(.*?)\s*\(Sub\s+#(\d+).*\)$/i);
+  if (m) return m[1] || 'Sub #' + m[2];
+  // Bare subscription id ("Sub #215508 (5h)"): drop the window suffix, the
+  // row's countdown already shows when it resets.
+  return s.replace(/^(Sub\s+#\d+)\s*\([^)]*\)$/i, '$1');
+}
+
 function renderQuotaRow(q) {
   const remaining = q.remaining != null ? q.remaining : 100;
   const style = quotaStyle(remaining);
@@ -396,52 +401,52 @@ function renderQuotaRow(q) {
       <div class="quota-row-unlimited">
         <span class="quota-row-unlimited-name">
           <i class="fa-solid fa-infinity" style="font-size:10px;color:var(--muted-foreground)"></i>
-          ${escapeHtml(q.name)}
+          ${escapeHtml(quotaDisplayName(q.name))}
         </span>
         <span class="quota-row-unlimited-value">${usedLabel}${unitSuffix}</span>
       </div>`;
   }
 
-  // ─── Limited row: progress bar + remaining % ──────────────
+  // ─── Limited row: name + used/total + countdown on one line, thin bar ──
   const totalLabel = fmtNum(q.total);
-
-  // Reset time
-  let resetHtml = '';
   const countdown = fmtCountdown(q.resetAt);
-  const absolute = fmtResetAbsolute(q.resetAt);
-  if (countdown || absolute) {
+  const isExpired = countdown === 'expired';
+
+  // Right side: countdown for live rows; expired rows drop the bar entirely.
+  let metaHtml;
+  if (isExpired) {
+    metaHtml = `<span class="quota-row-reset" style="color:#dc2626">expired</span>`;
+  } else if (countdown) {
     const prefix = q.recurring ? 'in ' : 'expires in ';
-    if (countdown && countdown !== 'expired') {
-      resetHtml = `<div class="quota-row-reset">${escapeHtml(prefix + countdown)}</div>`;
-    } else if (countdown === 'expired') {
-      resetHtml = `<div class="quota-row-reset" style="color:#dc2626">expired</div>`;
-    }
-    if (absolute) {
-      resetHtml += `<div class="quota-row-reset-abs">${escapeHtml(absolute)}</div>`;
-    }
+    metaHtml = `<span class="quota-row-reset">${escapeHtml(prefix + countdown)}</span>`;
   } else if (!q.recurring) {
-    resetHtml = `<div class="quota-row-reset-abs">one-time credits</div>`;
+    metaHtml = `<span class="quota-row-reset-abs">one-time</span>`;
+  } else {
+    metaHtml = '';
   }
 
-  const barWidth = Math.min(Math.max(remaining, 0), 100);
   const usedDisplay = `${usedLabel} / ${totalLabel}${unitSuffix}`;
+  const barWidth = Math.min(Math.max(remaining, 0), 100);
+  // Expired rows read as dead, not as "healthy": neutral dot instead of 🟢.
+  const emoji = isExpired ? '⚪' : style.emoji;
+  const barHtml = isExpired ? '' : `
+      <div class="quota-row-bar" style="background:${style.bgLight};border-color:${remaining === 0 ? 'var(--border)' : 'transparent'}">
+        <div class="quota-row-bar-fill" style="width:${barWidth}%;background:${style.bg}"></div>
+      </div>`;
 
   return `
-    <div class="quota-row">
+    <div class="quota-row${isExpired ? ' quota-row-expired' : ''}" title="${escapeHtml(q.name)}">
       <div class="quota-row-header">
         <span class="quota-row-name">
-          <span class="quota-row-emoji">${style.emoji}</span>
-          ${escapeHtml(q.name)}
+          <span class="quota-row-emoji">${emoji}</span>
+          ${escapeHtml(quotaDisplayName(q.name))}
         </span>
         <span class="quota-row-value">
           <span class="quota-row-used${isOverdraft ? ' quota-row-overdraft' : ''}">${usedDisplay}</span>
           <span class="quota-row-remaining" style="color:${style.text}">${remaining}%</span>
+          ${metaHtml}
         </span>
-      </div>
-      <div class="quota-row-bar" style="background:${style.bgLight};border-color:${remaining === 0 ? 'var(--border)' : 'transparent'}">
-        <div class="quota-row-bar-fill" style="width:${barWidth}%;background:${style.bg}"></div>
-      </div>
-      ${resetHtml}
+      </div>${barHtml}
     </div>`;
 }
 

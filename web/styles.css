@@ -5492,6 +5492,9 @@ img.brand-icon {
 .quota-row-reset-abs {
   font-size: 10px; color: var(--muted-foreground); margin-top: 1px;
 }
+.quota-row-expired { opacity: 0.55; }
+.quota-row-expired .quota-row-name,
+.quota-row-expired .quota-row-used { text-decoration: line-through; }
 
 .quota-pagination {
   display: flex; align-items: center; justify-content: center; gap: 12px;
