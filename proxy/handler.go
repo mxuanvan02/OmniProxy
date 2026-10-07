@@ -8255,6 +8255,9 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			// still has a check to complete. The card renders it as a button, so
 			// the operator can act on it without reading the truncated 403.
 			"antigravityVerifyUrl": a.AntigravityVerifyURL,
+			// Code Assist tier as loadCodeAssist last reported it; empty until
+			// a control-plane call has succeeded for this account.
+			"antigravityTier": a.AntigravityTier,
 		}
 	}
 	json.NewEncoder(w).Encode(result)
@@ -12215,6 +12218,7 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		// account card must not disagree about whether a verification step is
 		// still outstanding.
 		"antigravityVerifyUrl": account.AntigravityVerifyURL,
+		"antigravityTier":      account.AntigravityTier,
 	}
 
 	json.NewEncoder(w).Encode(result)

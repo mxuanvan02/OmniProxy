@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"omniproxy/auth"
 	"omniproxy/config"
 	"omniproxy/logger"
@@ -347,13 +348,39 @@ func antigravityWebLink(raw string) string {
 	return url
 }
 
+// pinAntigravityAuthUser makes the verification page act on one specific
+// Google identity. Google ships the link with an empty authuser parameter,
+// which lets the browser complete the check on whatever session it defaults
+// to — an operator with several Google accounts open verifies the wrong one,
+// sees "Authentication successful", and the flagged account stays flagged.
+// Setting authuser to the account email forces Google's account chooser onto
+// that identity before the check runs.
+func pinAntigravityAuthUser(raw, email string) string {
+	email = strings.TrimSpace(email)
+	if raw == "" || email == "" {
+		return raw
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	query := parsed.Query()
+	query.Set("authuser", email)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
+}
+
 // markAntigravityNeedsVerification stores the page the account owner has to
 // open. The account keeps its credentials, its project and its enabled state —
 // only the link is recorded, so the admin UI can offer the action instead of a
 // raw 403.
 func markAntigravityNeedsVerification(account *config.Account, body string) {
-	url := antigravityValidationLink(body)
-	if account == nil || url == "" || account.AntigravityVerifyURL == url {
+	link := antigravityValidationLink(body)
+	if account == nil || link == "" {
+		return
+	}
+	url := pinAntigravityAuthUser(link, account.Email)
+	if account.AntigravityVerifyURL == url {
 		return
 	}
 	account.AntigravityVerifyURL = url

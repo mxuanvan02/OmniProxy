@@ -202,6 +202,21 @@ let detailAllowedError = '';
     if (s.includes('FREE')) return t('subscription.free');
     return type || t('subscription.free');
   }
+  function isAntigravityAccount(a) {
+    return String((a && (a.authMethod || a.provider)) || '').toLowerCase().includes('antigravity');
+  }
+  // Antigravity plans are Code Assist tiers reported by loadCodeAssist, not
+  // Kiro subscription types. Unknown tier renders nothing — guessing "Free"
+  // for an account whose control-plane call has not run yet is a wrong tag.
+  function antigravityTierBadge(a) {
+    const tier = String((a && a.antigravityTier) || '').toUpperCase();
+    if (!tier) return '';
+    let cls = 'badge-free';
+    if (tier.includes('ENTERPRISE')) cls = 'badge-proplus';
+    else if (tier.includes('PRO') || tier.includes('STANDARD')) cls = 'badge-pro';
+    else if (tier !== 'FREE' && tier !== 'LEGACY') cls = 'badge-info';
+    return '<span class="badge ' + cls + '">' + escapeHtml(tier) + '</span>';
+  }
   function getSubBadge(type) {
     const s = (type || '').toUpperCase();
     if (s.includes('POWER')) return '<span class="badge badge-power">' + escapeHtml(formatSubscriptionLabel(type)) + '</span>';
@@ -662,7 +677,7 @@ let detailAllowedError = '';
         '<div class="account-email" title="' + escapeAttr(accountIdentity) + '">' + escapeHtml(accountIdentityShort) + '</div>' +
         '<div class="account-nickname">' + (a.nickname ? '<span class="nickname-badge">' + escapeHtml(a.nickname) + '</span>' : '') + '</div>' +
         '<div class="account-meta">' +
-        (isKiroNative ? getSubBadge(a.subscriptionType) : '') +
+        (isKiroNative ? (isAntigravityAccount(a) ? antigravityTierBadge(a) : getSubBadge(a.subscriptionType)) : '') +
         (isKiroNative ? getTrialBadge(a) : '') +
         weightBadge +
         overageBadge +
@@ -1470,7 +1485,7 @@ let detailAllowedError = '';
       // Usage sections above, so no separate subscription section needed.
       (isKiroNative ?
         '<div class="detail-section"><h4>' + escapeHtml(t('detail.subscription')) + '</h4><div class="detail-grid">' +
-        detailItem(t('detail.subscriptionType'), a.subscriptionTitle || (a.subscriptionType ? formatSubscriptionLabel(a.subscriptionType) : '-')) +
+        detailItem(t('detail.subscriptionType'), isAntigravityAccount(a) ? (a.antigravityTier || '-') : (a.subscriptionTitle || (a.subscriptionType ? formatSubscriptionLabel(a.subscriptionType) : '-'))) +
         detailItem(t('detail.mainQuota'), (a.usageCurrent != null ? a.usageCurrent.toFixed(1) : 0) + ' / ' + (a.usageLimit != null ? a.usageLimit.toFixed(0) : 0)) +
         detailItem(t('detail.resetDate'), a.nextResetDate || '-') +
         (a.trialUsageLimit > 0 ?
