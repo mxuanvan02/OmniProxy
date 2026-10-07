@@ -1,5 +1,5 @@
 {
-  "version": "0.6.7",
+  "version": "0.6.8",
   "changelog": "Self-update survives its own restart: the version claim is committed before the service restarts (the updater is a child of the process the restart kills), rollback restores the old claim, and the update script health-checks the port the proxy actually listens on instead of assuming 8080.",
   "download": "https://github.com/mxuanvan02/OmniProxy"
 }

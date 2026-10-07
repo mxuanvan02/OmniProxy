@@ -2,6 +2,12 @@
 
 All notable changes to OmniProxy are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.8] — 2026-10-08
+
+### Fixed
+- **The Antigravity verification link could verify the wrong Google identity.** Google returns the `VALIDATION_REQUIRED` page with an empty `authuser` parameter, so the browser completed the owner check on its default session: the operator saw "Authentication successful" while the flagged account kept failing with 403. The stored link now pins `authuser` to the account email, so Google's account chooser targets the identity that is actually flagged.
+- **Antigravity plan tags were wrong for paid accounts.** Cards ran Antigravity through the Kiro subscription badge, which falls back to "Free" when `subscriptionType` is empty — mislabeling accounts whose `loadCodeAssist` reports a paid tier such as `standard-tier`. Both account payloads now expose `antigravityTier`; the card and the detail view badge the real tier, and an unknown tier renders no badge instead of a guessed one.
+
 ## [0.6.7] — 2026-10-07
 
 ### Fixed
