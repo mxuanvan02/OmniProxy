@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"runtime"
 	"strings"
 	"testing"
@@ -436,8 +437,28 @@ func TestAntigravityValidationDoesNotBan(t *testing.T) {
 			if !account.Enabled {
 				t.Error("account was disabled, want it left enabled")
 			}
-			if account.AntigravityVerifyURL != tc.wantVerify {
-				t.Errorf("AntigravityVerifyURL = %q, want %q", account.AntigravityVerifyURL, tc.wantVerify)
+			if tc.wantVerify == "" {
+				if account.AntigravityVerifyURL != "" {
+					t.Errorf("AntigravityVerifyURL = %q, want empty", account.AntigravityVerifyURL)
+				}
+				return
+			}
+			// The stored link must keep Google's page and parameters while
+			// pinning authuser to the flagged account's identity — an empty
+			// authuser lets the browser verify its default session instead.
+			got, err := url.Parse(account.AntigravityVerifyURL)
+			if err != nil {
+				t.Fatalf("stored verify url is unparsable: %v", err)
+			}
+			want, _ := url.Parse(tc.wantVerify)
+			if auth := got.Query().Get("authuser"); auth != account.Email {
+				t.Errorf("authuser = %q, want %q", auth, account.Email)
+			}
+			gotQ, wantQ := got.Query(), want.Query()
+			gotQ.Del("authuser")
+			wantQ.Del("authuser")
+			if got.Host+got.Path != want.Host+want.Path || gotQ.Encode() != wantQ.Encode() {
+				t.Errorf("AntigravityVerifyURL = %q, want %q with authuser pinned", account.AntigravityVerifyURL, tc.wantVerify)
 			}
 		})
 	}
@@ -498,6 +519,34 @@ func TestAntigravityValidationLinkIgnoresUnusableBodies(t *testing.T) {
 	} {
 		if got := antigravityValidationLink(raw); got != "" {
 			t.Errorf("antigravityValidationLink(%q) = %q, want empty", raw, got)
+		}
+	}
+}
+
+func TestPinAntigravityAuthUser(t *testing.T) {
+	// Google ships the link with an empty authuser, which lets the browser
+	// verify whatever session it defaults to instead of the flagged account.
+	raw := "https://accounts.google.com/signin/continue?sarp=1&authuser&flowName=GlifWebSignIn"
+	got := pinAntigravityAuthUser(raw, "xvantest03@gmail.com")
+	parsed, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("pinAntigravityAuthUser produced an unparsable url %q: %v", got, err)
+	}
+	if q := parsed.Query().Get("authuser"); q != "xvantest03@gmail.com" {
+		t.Errorf("authuser = %q, want the account email", q)
+	}
+	if !strings.Contains(got, "sarp=1") || !strings.Contains(got, "flowName=GlifWebSignIn") {
+		t.Errorf("existing query params lost: %q", got)
+	}
+
+	// Degenerate inputs pass through untouched.
+	for _, tc := range []struct{ raw, email string }{
+		{"https://accounts.google.com/signin/continue", ""},
+		{"", "a@b.c"},
+		{"://not a url", "a@b.c"},
+	} {
+		if got := pinAntigravityAuthUser(tc.raw, tc.email); got != tc.raw {
+			t.Errorf("pinAntigravityAuthUser(%q, %q) = %q, want unchanged", tc.raw, tc.email, got)
 		}
 	}
 }
