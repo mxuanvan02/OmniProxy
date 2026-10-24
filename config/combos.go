@@ -62,6 +62,46 @@ func GetComboByName(name string) *ComboEntry {
 	return nil
 }
 
+// comboGraphHasCycle reports whether adding or updating candidate would create a
+// cycle among the configured combos. others holds the other combos unchanged;
+// candidate replaces any previous entry with the same name. A plain nested chain
+// without a back-edge is not a cycle, so ordinary nested combos stay legal.
+func comboGraphHasCycle(candidate ComboEntry, others []ComboEntry) bool {
+	byName := make(map[string]ComboEntry, len(others)+1)
+	for _, c := range others {
+		byName[c.Name] = c
+	}
+	byName[candidate.Name] = candidate
+
+	visiting := make(map[string]bool)
+	visited := make(map[string]bool)
+
+	var dfs func(name string) bool
+	dfs = func(name string) bool {
+		if visiting[name] {
+			return true
+		}
+		if visited[name] {
+			return false
+		}
+		visiting[name] = true
+		entry, ok := byName[name]
+		if !ok {
+			visiting[name] = false
+			return false
+		}
+		for _, m := range entry.Models {
+			if dfs(strings.TrimSpace(m)) {
+				return true
+			}
+		}
+		visiting[name] = false
+		visited[name] = true
+		return false
+	}
+	return dfs(candidate.Name)
+}
+
 // AddCombo appends a new combo entry. It generates an ID if none is provided.
 func AddCombo(entry ComboEntry) (ComboEntry, error) {
 	cfgLock.Lock()
@@ -89,6 +129,9 @@ func AddCombo(entry ComboEntry) (ComboEntry, error) {
 	}
 	if entry.Strategy != "round-robin" {
 		entry.Strategy = "fallback"
+	}
+	if comboGraphHasCycle(entry, cfg.Combos) {
+		return ComboEntry{}, errors.New("combo would create a cycle at " + entry.Name)
 	}
 	cfg.Combos = append(cfg.Combos, entry)
 	if err := saveLocked(); err != nil {
@@ -122,6 +165,10 @@ func UpdateCombo(id string, patch ComboUpdateRequest) error {
 	if idx < 0 {
 		return errors.New("combo not found")
 	}
+	// Apply the patch to a copy, validate the full graph on the copy, and only
+	// commit to cfg once the result is legal. Validating after mutating cfg
+	// would leave a rejected update visible to later reads.
+	updated := cfg.Combos[idx]
 	if patch.Name != nil {
 		newName := strings.TrimSpace(*patch.Name)
 		if newName == "" {
@@ -135,21 +182,28 @@ func UpdateCombo(id string, patch ComboUpdateRequest) error {
 				return errors.New("combo name already exists")
 			}
 		}
-		cfg.Combos[idx].Name = newName
+		updated.Name = newName
 	}
 	if len(patch.Models) > 0 {
-		if len(patch.Models) < 1 {
-			return errors.New("combo must have at least 1 model")
-		}
-		cfg.Combos[idx].Models = patch.Models
+		updated.Models = patch.Models
 	}
 	if patch.Strategy != nil {
 		if *patch.Strategy == "round-robin" {
-			cfg.Combos[idx].Strategy = "round-robin"
+			updated.Strategy = "round-robin"
 		} else {
-			cfg.Combos[idx].Strategy = "fallback"
+			updated.Strategy = "fallback"
 		}
 	}
+	others := make([]ComboEntry, 0, len(cfg.Combos)-1)
+	for i, c := range cfg.Combos {
+		if i != idx {
+			others = append(others, c)
+		}
+	}
+	if comboGraphHasCycle(updated, others) {
+		return errors.New("combo would create a cycle at " + updated.Name)
+	}
+	cfg.Combos[idx] = updated
 	return saveLocked()
 }
 

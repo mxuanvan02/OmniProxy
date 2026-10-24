@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"omniproxy/config"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -53,17 +55,20 @@ func TestExpandComboModelsDeduplicatesLeavesPreservingFirstOccurrence(t *testing
 }
 
 func TestExpandComboModelsRejectsCycles(t *testing.T) {
-	mustInitConfig(t)
-	a, err := config.AddCombo(config.ComboEntry{Name: "cycle-a", Models: []string{"cycle-b"}})
-	if err != nil {
+	// The runtime guard must still catch cycles that predate validation: a
+	// config written before AddCombo/UpdateCombo rejected back-edges can carry
+	// a cycle on disk. Build such a config file and load it.
+	cfgPath := filepath.Join(t.TempDir(), "config.json")
+	cfgJSON := `{"combos":[
+		{"id":"c1","name":"cycle-a","models":["cycle-b"],"strategy":"fallback"},
+		{"id":"c2","name":"cycle-b","models":["cycle-a"],"strategy":"fallback"}
+	]}`
+	if err := os.WriteFile(cfgPath, []byte(cfgJSON), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = config.DeleteCombo(a.ID) })
-	b, err := config.AddCombo(config.ComboEntry{Name: "cycle-b", Models: []string{"cycle-a"}})
-	if err != nil {
-		t.Fatal(err)
+	if err := config.Init(cfgPath); err != nil {
+		t.Fatalf("config.Init: %v", err)
 	}
-	t.Cleanup(func() { _ = config.DeleteCombo(b.ID) })
 
 	if _, err := expandComboModels("cycle-a"); err == nil || !strings.Contains(err.Error(), "cycle") {
 		t.Fatalf("expandComboModels error = %v, want cycle error", err)
