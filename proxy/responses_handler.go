@@ -129,7 +129,10 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 	// Check if model is a combo name — only on the top-level request, not
 	// on sub-requests dispatched by the combo handler itself.
 	if r.Context().Value(comboBypassKey) == nil {
-		if comboName, comboModels, ok := resolveComboModels(openaiReq.Model); ok {
+		if comboName, comboModels, ok, comboErr := resolveComboModelsWithError(openaiReq.Model); comboErr != nil {
+			h.sendOpenAIError(w, http.StatusBadRequest, "invalid_request_error", comboErr.Error())
+			return
+		} else if ok {
 			h.handleComboRequest(w, r, comboName, comboModels, body, "responses")
 			return
 		}

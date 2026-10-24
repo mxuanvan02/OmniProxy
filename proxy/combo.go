@@ -34,17 +34,77 @@ type comboRotationEntry struct {
 
 var comboRotationMap sync.Map // key: comboName -> *comboRotationEntry
 
-// resolveComboModels returns (comboName, models, true) if modelStr is a known combo name.
-// Returns ("", nil, false) if modelStr contains "/" (provider/model) or is not found.
+const maxComboExpansionDepth = 32
+
+// expandComboModels flattens nested combo references while preserving the
+// operator's declared order. A combo name is a reference only when it exactly
+// matches another combo; provider/model IDs remain ordinary leaves.
+func expandComboModels(modelStr string) ([]string, error) {
+	var expand func(string, int, map[string]bool) ([]string, error)
+	expand = func(name string, depth int, active map[string]bool) ([]string, error) {
+		if depth >= maxComboExpansionDepth {
+			return nil, fmt.Errorf("combo expansion depth exceeds %d at %q", maxComboExpansionDepth, name)
+		}
+		entry := config.GetComboByName(name)
+		if entry == nil {
+			return []string{name}, nil
+		}
+		if active[name] {
+			return nil, fmt.Errorf("combo expansion cycle detected at %q", name)
+		}
+		nextActive := make(map[string]bool, len(active)+1)
+		for key, value := range active {
+			nextActive[key] = value
+		}
+		nextActive[name] = true
+		out := make([]string, 0, len(entry.Models))
+		seenLeaves := make(map[string]bool)
+		for _, model := range entry.Models {
+			model = strings.TrimSpace(model)
+			if model == "" {
+				return nil, fmt.Errorf("combo %q contains an empty model", name)
+			}
+			leaves, err := expand(model, depth+1, nextActive)
+			if err != nil {
+				return nil, err
+			}
+			for _, leaf := range leaves {
+				if !seenLeaves[leaf] {
+					seenLeaves[leaf] = true
+					out = append(out, leaf)
+				}
+			}
+		}
+		return out, nil
+	}
+	return expand(modelStr, 0, nil)
+}
+
+// resolveComboModels returns (comboName, flattened models, true) if modelStr is
+// a known combo name. It preserves the old no-error contract for callers that
+// only need to distinguish a model from a combo; request handlers use
+// resolveComboModelsWithError so malformed nested configuration is surfaced.
 func resolveComboModels(modelStr string) (string, []string, bool) {
-	if strings.Contains(modelStr, "/") {
+	name, models, ok, err := resolveComboModelsWithError(modelStr)
+	if err != nil {
 		return "", nil, false
+	}
+	return name, models, ok
+}
+
+func resolveComboModelsWithError(modelStr string) (string, []string, bool, error) {
+	if strings.Contains(modelStr, "/") {
+		return "", nil, false, nil
 	}
 	entry := config.GetComboByName(modelStr)
 	if entry == nil || len(entry.Models) < 1 {
-		return "", nil, false
+		return "", nil, false, nil
 	}
-	return entry.Name, entry.Models, true
+	models, err := expandComboModels(entry.Name)
+	if err != nil {
+		return entry.Name, nil, true, err
+	}
+	return entry.Name, models, true, nil
 }
 
 // getRotatedModels returns the model list in execution order.

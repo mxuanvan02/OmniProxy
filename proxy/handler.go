@@ -3782,7 +3782,10 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	// Skip combo resolution for sub-requests dispatched by the combo handler itself
 	// (prevents infinite recursion when a combo model shares the combo name).
 	if r.Context().Value(comboBypassKey) == nil {
-		if comboName, comboModels, ok := resolveComboModels(req.Model); ok {
+		if comboName, comboModels, ok, comboErr := resolveComboModelsWithError(req.Model); comboErr != nil {
+			h.sendClaudeError(w, http.StatusBadRequest, "invalid_request_error", comboErr.Error())
+			return
+		} else if ok {
 			body, _ := json.Marshal(req)
 			h.handleComboRequest(w, r, comboName, comboModels, body, "claude")
 			return
@@ -5257,7 +5260,10 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	// Skip combo resolution for sub-requests dispatched by the combo handler itself
 	// (prevents infinite recursion when a combo model shares the combo name).
 	if r.Context().Value(comboBypassKey) == nil {
-		if comboName, comboModels, ok := resolveComboModels(req.Model); ok {
+		if comboName, comboModels, ok, comboErr := resolveComboModelsWithError(req.Model); comboErr != nil {
+			h.sendOpenAIError(w, http.StatusBadRequest, "invalid_request_error", comboErr.Error())
+			return
+		} else if ok {
 			body, _ := json.Marshal(req)
 			h.handleComboRequest(w, r, comboName, comboModels, body, "openai")
 			return
