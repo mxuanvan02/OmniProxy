@@ -1899,7 +1899,10 @@ let detailAllowedError = '';
     // Do not infer a model from provider/account type.
     const picked = $('testModelChoice') ? String($('testModelChoice').value || '').trim() : '';
     const model = picked || String(testModalModels[0] || '').trim();
-    return { model: model };
+    const prompt = $('testChatPrompt') ? String($('testChatPrompt').value || '').trim() : '';
+    const req = { model: model };
+    if (prompt) req.prompt = prompt;
+    return req;
   }
   function renderTestLog() {
     const c = $('testModalLog');
@@ -2015,6 +2018,7 @@ let detailAllowedError = '';
       modeField +
       (testModalMode === 'chat' ? '<label for="testModelChoice">' + escapeHtml(t('accounts.selectModel')) + '</label>' : '') +
       modelField +
+      (testModalMode === 'chat' ? '<div class="form-group mt-2"><label for="testChatPrompt">' + escapeHtml(t('accounts.chatPrompt') || 'Prompt tuỳ chỉnh (tuỳ chọn)') + '</label><textarea id="testChatPrompt" class="form-control w-full text-xs" rows="2" placeholder="' + escapeAttr(t('accounts.chatPromptPlaceholder') || 'Say OK') + '"></textarea></div>' : '') +
       '</div>' +
       '<div class="test-log-card">' +
       '<div class="test-log-header">' +

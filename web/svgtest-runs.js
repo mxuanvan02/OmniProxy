@@ -148,6 +148,26 @@ function bindSvgTestEvents() {
     svgtestState.resultModelFilter = this.value.trim().toLowerCase();
     renderSvgTestGroup(svgtestState.currentGroup);
   });
+  const raf = byId('svgtestResultAccountFilter');
+  if (raf) raf.addEventListener('change', function () {
+    svgtestState.resultAccountFilter = this.value;
+    renderSvgTestGroup(svgtestState.currentGroup);
+  });
+  const rff = byId('svgtestResultFamilyFilter');
+  if (rff) rff.addEventListener('change', function () {
+    svgtestState.resultFamilyFilter = this.value;
+    renderSvgTestGroup(svgtestState.currentGroup);
+  });
+  const deleteFailed = byId('svgtestDeleteFailed');
+  if (deleteFailed) deleteFailed.addEventListener('click', () => {
+    const entries = Array.isArray(svgtestState.currentEntries) ? svgtestState.currentEntries : [];
+    bulkDeleteSvgTestEntries(svgtestDeleteFailedTargets(entries), 'svgtest.confirmDeleteFailed');
+  });
+  const deleteErrors = byId('svgtestDeleteErrors');
+  if (deleteErrors) deleteErrors.addEventListener('click', () => {
+    const entries = Array.isArray(svgtestState.currentEntries) ? svgtestState.currentEntries : [];
+    bulkDeleteSvgTestEntries(svgtestDeleteErrorTargets(entries), 'svgtest.confirmDeleteErrors');
+  });
   svgtestState.bound = true;
 }
 

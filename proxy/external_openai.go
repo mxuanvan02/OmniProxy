@@ -1941,7 +1941,13 @@ func resolveExternalTestModel(account *config.Account) string {
 	if account == nil {
 		return "auto"
 	}
-	models, err := fetchExternalProviderModels(account)
+	var models []ModelInfo
+	var err error
+	if isAgentRouterAccount(account) {
+		models, err = fetchAgentRouterModels(account)
+	} else {
+		models, err = fetchExternalProviderModels(account)
+	}
 	if err != nil || len(models) == 0 {
 		return "auto"
 	}
@@ -1964,14 +1970,10 @@ func resolveExternalTestModel(account *config.Account) string {
 // upstream latency on success, or an error describing the failure.
 func testExternalProvider(account *config.Account) (time.Duration, error) {
 	start := time.Now()
-	if isAgentRouterAccount(account) {
-		if _, err := CallAgentRouterTest(account); err != nil {
-			return 0, err
-		}
-		return time.Since(start), nil
-	}
-
 	model := resolveExternalTestModel(account)
+	if (model == "" || model == "auto") && isAgentRouterAccount(account) {
+		model = agentRouterTestModel
+	}
 	payload := &KiroPayload{}
 	payload.ConversationState.ChatTriggerType = "MANUAL"
 	payload.ConversationState.ConversationID = "omniproxy-test"

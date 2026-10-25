@@ -532,7 +532,8 @@ func (p *AccountPool) accountHasModel(accountID, model string) bool {
 				return false
 			}
 		}
-		if !p.accounts[i].RestrictModels && len(p.accounts[i].AllowedModels) == 0 {
+		// An empty allowlist means all catalog models are allowed (empty allowedModels = allow all).
+		if len(p.accounts[i].AllowedModels) == 0 {
 			break
 		}
 		allowed := false

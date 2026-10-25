@@ -36,7 +36,7 @@ func TestStrictModelEligibility(t *testing.T) {
 		{name: "mapping cannot change model", account: config.Account{ModelMappings: map[string]string{"gpt-4o": "gpt-4o-mini"}}, catalog: []string{"gpt-4o", "gpt-4o-mini"}},
 		{name: "identity mapping", account: config.Account{ModelMappings: map[string]string{"gpt-4o": "gpt-4o"}}, catalog: []string{"gpt-4o"}, want: true},
 		{name: "permission is not capability", account: config.Account{AllowedModels: []string{"gpt-4o"}}},
-		{name: "deny all", account: config.Account{RestrictModels: true}, catalog: []string{"gpt-4o"}},
+		{name: "empty allowed models allows all catalog models", account: config.Account{RestrictModels: true}, catalog: []string{"gpt-4o"}, want: true},
 		{name: "not allowed", account: config.Account{AllowedModels: []string{"gpt-4o-mini"}}, catalog: []string{"gpt-4o"}},
 		{name: "allowed and supported", account: config.Account{RestrictModels: true, AllowedModels: []string{"gpt-4o"}}, catalog: []string{"gpt-4o"}, want: true},
 	} {

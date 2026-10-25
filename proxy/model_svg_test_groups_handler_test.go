@@ -29,10 +29,10 @@ func TestServableModels(t *testing.T) {
 		t.Errorf("restricted = %v, want [gpt-4o gpt-6-astra]", got)
 	}
 
-	// RestrictModels with an empty allowlist denies everything.
-	denyAll := &config.Account{ID: "a4", RestrictModels: true}
-	if got := servableModels(denyAll, catalog); len(got) != 0 {
-		t.Errorf("restrict-all = %v, want empty", got)
+	// An empty allowlist allows all catalog models.
+	emptyAllow := &config.Account{ID: "a4", RestrictModels: true}
+	if got := servableModels(emptyAllow, catalog); len(got) != len(catalog) {
+		t.Errorf("empty allowlist = %v, want all %v", got, catalog)
 	}
 
 	// An empty catalog yields nothing to offer.

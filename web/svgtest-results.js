@@ -21,18 +21,102 @@ async function renderSvgTestGroup(key) {
     data = await res.json();
   } catch (e) { box.replaceChildren(svgtestEmpty('svgtest.loadError')); return; }
   const entries = Array.isArray(data.entries) ? data.entries : [];
+  svgtestState.currentEntries = entries;
+  populateSvgTestFacets(entries);
   box.replaceChildren();
   const kw = svgtestState.resultModelFilter;
-  const shown = kw ? entries.filter(e => (e.model || '').toLowerCase().includes(kw)) : entries;
+  const acc = svgtestState.resultAccountFilter;
+  const fam = svgtestState.resultFamilyFilter;
+  const shown = entries.filter(e =>
+    (!kw || (e.model || '').toLowerCase().includes(kw))
+    && (!acc || (e.accountId || '') === acc)
+    && (!fam || modelFamily(e.model || '') === fam));
   if (shown.length === 0) { box.replaceChildren(svgtestEmpty('svgtest.noResults')); }
   else for (const e of shown) box.appendChild(buildSvgTestCard(e));
-  // The scatter belongs to whichever group is open, not only to one a run just
-  // produced: it is drawn from stored results, so a group picked from the history
-  // has everything the chart needs. It reads the full entry set, not the filtered
-  // view — the chart compares models against each other, and narrowing the grid by
-  // name must not drop one and leave a misleading spread.
-  if (typeof renderSvgTestScatter === 'function') renderSvgTestScatter(entries);
+  // The scatter follows the same facets as the grid. An operator who narrows to
+  // one account or one family is asking for that comparison, so a chart still
+  // plotting every other account would answer a different question than the grid
+  // beside it. renderSvgTestScatter already reports how many entries it could
+  // not plot, so a narrowed view says what it dropped instead of looking complete.
+  if (typeof renderSvgTestScatter === 'function') renderSvgTestScatter(shown);
   else if (typeof hideSvgTestScatter === 'function') hideSvgTestScatter();
+}
+
+// modelFamily extracts the comparison family of a model id, which is the vendor
+// line an operator sorts by: "qwen3.8-max" and "qwen3.7-plus" are one family, and
+// so are "z-ai/glm-5.3" and "glm-5.3-anthropic". Gateway prefixes are stripped
+// first — a leading "[opencode]" tag and a leading "org/" path both describe
+// where the model is hosted, not what it is, so keeping either would split one
+// family into several options that mean the same thing.
+function modelFamily(model) {
+  let m = (model || '').toLowerCase();
+  if (!m) return '';
+  m = m.replace(/^\[[^\]]*\]/, '');
+  const slash = m.lastIndexOf('/');
+  if (slash >= 0) m = m.slice(slash + 1);
+  const known = ['qwen', 'glm', 'deepseek', 'kimi', 'minimax', 'mimo', 'step', 'doubao', 'muse', 'gemini', 'gpt', 'claude', 'llama', 'mistral'];
+  for (const k of known) if (m.startsWith(k)) return k;
+  return m.split(/[-_.:]/)[0] || m;
+}
+
+// populateSvgTestFacets fills the account and family dropdowns from the open
+// group's entries. Both are rebuilt on every group load so the options always
+// describe exactly what is stored — an option with no entries in this group
+// would only confuse. The account option is keyed by accountId, not by the
+// entry's `provider` field: that field carries the wire dialect ("External
+// OpenAI"), which is the same for every external account and so cannot tell
+// VSLLM apart from seekai.cc, the distinction the operator is actually asking
+// about.
+function populateSvgTestFacets(entries) {
+  const accSel = document.getElementById('svgtestResultAccountFilter');
+  const famSel = document.getElementById('svgtestResultFamilyFilter');
+  if (accSel) {
+    const prev = svgtestState.resultAccountFilter;
+    const seen = new Map();   // accountId -> { name, count }
+    for (const e of entries) {
+      const id = e.accountId || '';
+      if (!id) continue;
+      const cur = seen.get(id) || { name: e.accountName || id, count: 0 };
+      cur.count++;
+      seen.set(id, cur);
+    }
+    accSel.replaceChildren();
+    const ph = document.createElement('option');
+    ph.value = '';
+    ph.textContent = t('svgtest.allAccounts');
+    accSel.appendChild(ph);
+    for (const [id, info] of [...seen.entries()].sort((a, b) => a[1].name.localeCompare(b[1].name))) {
+      const opt = document.createElement('option');
+      opt.value = id;
+      opt.textContent = `${info.name} (${info.count})`;
+      accSel.appendChild(opt);
+    }
+    const keep = [...accSel.options].some(o => o.value === prev);
+    accSel.value = keep ? prev : '';
+    svgtestState.resultAccountFilter = accSel.value;
+  }
+  if (famSel) {
+    const prev = svgtestState.resultFamilyFilter;
+    const fams = new Map();
+    for (const e of entries) {
+      const f = modelFamily(e.model || '');
+      if (f) fams.set(f, (fams.get(f) || 0) + 1);
+    }
+    famSel.replaceChildren();
+    const ph = document.createElement('option');
+    ph.value = '';
+    ph.textContent = t('svgtest.allFamilies');
+    famSel.appendChild(ph);
+    for (const [f, n] of [...fams.entries()].sort()) {
+      const opt = document.createElement('option');
+      opt.value = f;
+      opt.textContent = `${f} (${n})`;
+      famSel.appendChild(opt);
+    }
+    const keep = [...famSel.options].some(o => o.value === prev);
+    famSel.value = keep ? prev : '';
+    svgtestState.resultFamilyFilter = famSel.value;
+  }
 }
 
 function buildSvgTestCard(e) {
@@ -93,6 +177,68 @@ function buildSvgTestCard(e) {
   }
   card.appendChild(body);
   return card;
+}
+
+// bulkDeleteSvgTestEntries removes the entries in `matches` from the current
+// group, one DELETE per (model, account) — the same endpoint the card trash
+// uses, so the two flows stay consistent and the group vanishes automatically
+// when its last entry goes. A batch is refused (or stops on the first error)
+// when the group no longer exists or a delete fails, because a partial purge is
+// worse than none. Confirmation always asks first, so an accidental click in
+// the card actions never drops stored results.
+async function bulkDeleteSvgTestEntries(matches, confirmKey) {
+  const key = svgtestState.currentGroup;
+  if (!key || svgtestState.deleting || matches.length === 0) return;
+  const asked = typeof confirmAction === 'function'
+    ? await confirmAction(t(confirmKey, String(matches.length)), { variant: 'danger', confirmText: t('svgtest.delete') })
+    : false;
+  if (!asked) return;
+  svgtestState.deleting = true;
+  let failed = 0;
+  for (const e of matches) {
+    const url = '/test-model-svg/groups/' + encodeURIComponent(key) + '/entries' +
+      '?model=' + encodeURIComponent(e.model || '') +
+      '&accountId=' + encodeURIComponent(e.accountId || '');
+    let res = null;
+    try { res = await api(url, { method: 'DELETE' }); } catch (err) { res = null; }
+    if (!res || !res.ok) {
+      failed++;
+      break;
+    }
+  }
+  svgtestState.deleting = false;
+  if (failed > 0) {
+    toast(t('svgtest.deleteError'), 'error');
+    return;
+  }
+  const groups = await loadSvgTestGroups();
+  const still = groups.some(g => g.promptKey === key);
+  selectSvgTestGroup(still ? key : (groups.length > 0 ? groups[0].promptKey : ''));
+}
+
+// svgtestDeleteFailedTargets picks every shown (model, account) result that
+// failed — no SVG or a stored error — regardless of the model-name filter.
+function svgtestDeleteFailedTargets(entries) {
+  return entries.filter(e => !(e.success && e.svg));
+}
+
+// svgtestDeleteErrorTargets picks the shown entries whose stored error matches
+// a known failure pattern, so an operator can purge, say, every timeout or
+// "empty reply" row in one pass instead of deleting cards one at a time.
+function svgtestDeleteErrorTargets(entries) {
+  const patterns = [
+    /timeout/i,
+    /empty (reply|response)/i,
+    /stream.*(cut|ended|closed|interrupted)/i,
+    /context canceled/i,
+    /HTTP 40[0-9]/i,
+    /HTTP 429/i,
+    /HTTP 5[0-9][0-9]/i,
+    /rate.?limit/i,
+    /no available channel/i,
+    /model_not_found/i,
+  ];
+  return entries.filter(e => !e.success && e.error && patterns.some(p => p.test(e.error)));
 }
 
 // deleteSvgTestEntry drops one stored (model, account) result after a styled

@@ -93,7 +93,7 @@ func servableModels(a *config.Account, catalog []string) []string {
 			allowed[n] = true
 		}
 	}
-	restricted := a.RestrictModels || len(allowed) > 0
+	restricted := len(allowed) > 0
 
 	out := make([]string, 0, len(catalog))
 	for _, m := range catalog {

@@ -7742,7 +7742,10 @@ func (h *Handler) apiGetCliToolApiKey(w http.ResponseWriter, r *http.Request, ke
 // ---- Model Test ----
 func (h *Handler) apiTestModel(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Model string `json:"model"`
+		Model     string `json:"model"`
+		Prompt    string `json:"prompt"`
+		Message   string `json:"message"`
+		MaxTokens int    `json:"max_tokens"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -7755,6 +7758,24 @@ func (h *Handler) apiTestModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	testPrompt := strings.TrimSpace(req.Prompt)
+	if testPrompt == "" {
+		testPrompt = strings.TrimSpace(req.Message)
+	}
+	hasCustomPrompt := testPrompt != ""
+	if testPrompt == "" {
+		testPrompt = "Say OK"
+	}
+
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		if hasCustomPrompt {
+			maxTokens = 256
+		} else {
+			maxTokens = 20
+		}
+	}
+
 	port := config.GetPort()
 	host := config.GetHost()
 	if host == "0.0.0.0" {
@@ -7764,8 +7785,8 @@ func (h *Handler) apiTestModel(w http.ResponseWriter, r *http.Request) {
 
 	payload := map[string]interface{}{
 		"model":      req.Model,
-		"messages":   []map[string]string{{"role": "user", "content": "hi"}},
-		"max_tokens": 1,
+		"messages":   []map[string]string{{"role": "user", "content": testPrompt}},
+		"max_tokens": maxTokens,
 		"stream":     false,
 	}
 	body, _ := json.Marshal(payload)
@@ -7791,7 +7812,7 @@ func (h *Handler) apiTestModel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := &http.Client{Timeout: 30 * time.Second}
 	start := time.Now()
 	resp, err := client.Do(httpReq)
 	latency := time.Since(start).Milliseconds()
@@ -7809,8 +7830,19 @@ func (h *Handler) apiTestModel(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		var chatResp struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		reply := ""
+		if json.NewDecoder(resp.Body).Decode(&chatResp) == nil && len(chatResp.Choices) > 0 {
+			reply = chatResp.Choices[0].Message.Content
+		}
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"ok": true, "latencyMs": latencyMs,
+			"ok": true, "latencyMs": latencyMs, "model": req.Model, "reply": reply,
 		})
 	} else {
 		errMsg := fmt.Sprintf("HTTP %d", resp.StatusCode)
@@ -8176,7 +8208,7 @@ func (h *Handler) apiGetAccounts(w http.ResponseWriter, r *http.Request) {
 			"machineId":                 a.MachineId,
 			"weight":                    a.Weight,
 			"allowedModels":             a.AllowedModels,
-			"restrictModels":            a.RestrictModels || len(a.AllowedModels) > 0,
+			"restrictModels":            len(a.AllowedModels) > 0,
 			"overageStatus":             a.OverageStatus,
 			"overageCapability":         a.OverageCapability,
 			"overageCap":                a.OverageCap,
@@ -8382,7 +8414,7 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 				normalized = append(normalized, model)
 			}
 			existing.AllowedModels = normalized
-			existing.RestrictModels = true
+			existing.RestrictModels = len(normalized) > 0
 		}
 	}
 	if raw, present := updates["restrictModels"]; present {
@@ -8391,7 +8423,7 @@ func (h *Handler) apiUpdateAccount(w http.ResponseWriter, r *http.Request, id st
 			http.Error(w, "restrictModels must be a boolean", http.StatusBadRequest)
 			return
 		}
-		existing.RestrictModels = value
+		existing.RestrictModels = value && len(existing.AllowedModels) > 0
 		if !value {
 			existing.AllowedModels = []string{}
 		}
@@ -11828,6 +11860,8 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		Query      string `json:"query"`
 		URL        string `json:"url"`
 		Prompt     string `json:"prompt"`
+		Message    string `json:"message"`
+		MaxTokens  int    `json:"max_tokens"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&req)
 
@@ -11921,40 +11955,49 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
-	// AgentRouter's Test Chat is a protocol health check, not a generic
-	// account chat. Keep it identical to the documented Anthropic probe so a
-	// successful result proves the configured key can reach AgentRouter.
-	if isAgentRouterAccount(account) {
-		start := time.Now()
-		reply, err := CallAgentRouterTest(account)
-		if err != nil {
-			w.WriteHeader(500)
-			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
-			return
-		}
-		h.pool.RecordSuccess(account.ID, agentRouterTestModel)
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"success":   true,
-			"reply":     reply,
-			"model":     agentRouterTestModel,
-			"elapsedMs": time.Since(start).Milliseconds(),
-		})
-		return
+	start := time.Now()
+
+	// Parse test prompt from request body (optional, zero-hardcode)
+	testPrompt := strings.TrimSpace(req.Prompt)
+	if testPrompt == "" {
+		testPrompt = strings.TrimSpace(req.Message)
+	}
+	if testPrompt == "" {
+		testPrompt = "Say OK"
 	}
 
-	// Parse test model from request body (optional)
-	if req.Model == "" {
-		req.Model = "claude-sonnet-4"
+	// Parse test model from request body (zero-hardcode)
+	testModel := strings.TrimSpace(req.Model)
+	if testModel == "" {
+		if len(account.AllowedModels) > 0 {
+			testModel = strings.TrimSpace(account.AllowedModels[0])
+		} else if cached := h.pool.GetModelList(account.ID); len(cached) > 0 {
+			testModel = strings.TrimSpace(cached[0])
+		} else if isExternalAccount(account) || isAgentRouterAccount(account) {
+			testModel = resolveExternalTestModel(account)
+		}
+		if testModel == "" || testModel == "auto" {
+			testModel = "claude-sonnet-4"
+		}
 	}
 
 	// Build a minimal chat payload
 	thinkingCfg := config.GetThinkingConfig()
-	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
+	actualModel, thinking := ParseModelAndThinking(testModel, thinkingCfg.Suffix)
+
+	maxTokens := req.MaxTokens
+	if maxTokens <= 0 {
+		if strings.TrimSpace(req.Prompt) != "" || strings.TrimSpace(req.Message) != "" {
+			maxTokens = 256
+		} else {
+			maxTokens = 20
+		}
+	}
 
 	openaiReq := &OpenAIRequest{
 		Model:     actualModel,
-		Messages:  []OpenAIMessage{{Role: "user", Content: "say ok"}},
-		MaxTokens: 5,
+		Messages:  []OpenAIMessage{{Role: "user", Content: testPrompt}},
+		MaxTokens: maxTokens,
 		Stream:    false,
 	}
 	kiroPayload := OpenAIToKiro(openaiReq, thinking)
@@ -12087,11 +12130,13 @@ func (h *Handler) apiTestAccount(w http.ResponseWriter, r *http.Request, id stri
 		h.pool.Reload()
 	}
 
+	h.pool.RecordSuccess(account.ID, actualModel)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success":    true,
 		"reply":      content,
-		"model":      req.Model,
+		"model":      actualModel,
 		"banCleared": wasBanned,
+		"elapsedMs":  time.Since(start).Milliseconds(),
 	})
 }
 
@@ -12184,7 +12229,7 @@ func (h *Handler) apiGetAccountFull(w http.ResponseWriter, r *http.Request, id s
 		"machineId":         account.MachineId,
 		"weight":            account.Weight,
 		"allowedModels":     account.AllowedModels,
-		"restrictModels":    account.RestrictModels || len(account.AllowedModels) > 0,
+		"restrictModels":    len(account.AllowedModels) > 0,
 		"overageStatus":     account.OverageStatus,
 		"overageCapability": account.OverageCapability,
 		"overageCap":        account.OverageCap,
