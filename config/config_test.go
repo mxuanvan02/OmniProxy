@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -76,8 +77,25 @@ func TestSaveAtomicallyReplacesConfigFile(t *testing.T) {
 	if err := json.Unmarshal(data, &persisted); err != nil {
 		t.Fatalf("atomic save left invalid JSON: %v", err)
 	}
-	if len(persisted.Accounts) != 1 || persisted.Accounts[0].RefreshToken != "refresh-rotated" {
-		t.Fatalf("rotated credential was not persisted: %+v", persisted.Accounts)
+	if len(persisted.Accounts) != 1 {
+		t.Fatalf("expected 1 persisted account, got %d", len(persisted.Accounts))
+	}
+	// Credentials are encrypted at rest: the disk must carry the enc: form and
+	// never the rotated plaintext. The plaintext contract is checked after a
+	// fresh load below.
+	if strings.Contains(string(data), "refresh-rotated") || strings.Contains(string(data), "access-rotated") {
+		t.Fatalf("rotated credentials written in plaintext: %s", data)
+	}
+	if !strings.Contains(string(data), "enc:v1:") {
+		t.Fatalf("credentials were not encrypted on disk: %s", data)
+	}
+	if err := Init(configPath); err != nil {
+		t.Fatalf("reload config: %v", err)
+	}
+	reloaded := GetAccounts()
+	if len(reloaded) != 1 || reloaded[0].RefreshToken != "refresh-rotated" ||
+		reloaded[0].AccessToken != "access-rotated" {
+		t.Fatalf("rotated credential was not persisted: %+v", reloaded)
 	}
 	info, err := os.Stat(configPath)
 	if err != nil {

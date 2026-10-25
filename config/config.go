@@ -941,6 +941,9 @@ func loadLocked() error {
 		return err
 	}
 	cfg = &c
+	// Restore plaintext credentials in memory. Legacy plaintext values pass
+	// through unchanged and are encrypted on the next save.
+	decryptAccountCredentials()
 	saveBaseline = configSaveBaseline{
 		apiTimeoutMs:                 c.KiroApiTimeoutMs,
 		streamIdleTimeoutSeconds:     c.StreamIdleTimeoutSeconds,
@@ -1153,6 +1156,12 @@ func Save() error {
 		return err
 	}
 	data, err = preserveNewerRuntimeFields(data)
+	if err != nil {
+		return err
+	}
+	// Encrypt credentials last, after every merge, so no plaintext value can
+	// reach the temp file. In-memory cfg stays plaintext by design.
+	data, err = encryptSensitiveFields(data, filepath.Dir(cfgPath))
 	if err != nil {
 		return err
 	}
