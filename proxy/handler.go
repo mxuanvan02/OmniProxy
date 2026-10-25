@@ -6508,6 +6508,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiGetAdaptiveRouting(w, r)
 	case path == "/adaptive-routing" && r.Method == "PUT":
 		h.apiUpdateAdaptiveRouting(w, r)
+	case path == "/served-models" && r.Method == "GET":
+		h.apiGetServedModels(w, r)
 	case strings.HasPrefix(path, "/combos/") && r.Method == "GET":
 		h.apiGetCombo(w, r, strings.TrimPrefix(path, "/combos/"))
 	case strings.HasPrefix(path, "/combos/") && r.Method == "PUT":

@@ -489,7 +489,9 @@ func (h *Handler) handleComboRequest(
 
 		if status >= 200 && status < 300 {
 			// Log-only relay-substitution check (TraitMark-lite): the buffered
-			// body is already in memory, so the observation is free.
+			// body is already in memory, so the observation is free. The store
+			// feeds GET /admin/api/served-models for the dashboard.
+			observeServedModel(comboName, modelStr, body)
 			warnServedModelMismatch(comboName, modelStr, body)
 			logger.Infof("[COMBO] %s model=%s succeeded status=%d", comboName, modelStr, status)
 			attemptWriter.flushTo(w)
