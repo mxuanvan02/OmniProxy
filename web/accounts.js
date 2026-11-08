@@ -753,7 +753,7 @@ let detailAllowedError = '';
         // The generic "test" button only checks the credential. Media output has
         // to be seen to be verified, so Gommo gets its own run-a-prompt view.
         (isGommo ? '<button class="btn btn-xs btn-outline" data-action="gommoPlayground" data-id="' + idAttr + '">' + escapeHtml(t('gommo.playground') || 'Playground') + '</button>' : '') +
-        (String(a.email || '').indexOf('muse') !== -1 ? '<a class="btn btn-xs btn-primary" href="http://' + (location.hostname || '127.0.0.1') + ':8788/dashboard" target="_blank" rel="noopener noreferrer" title="Đăng nhập Muse AI - import cookies">Đăng nhập Muse</a>' : '') +
+        (String(a.email || '').indexOf('muse') !== -1 ? '<a class="btn btn-xs btn-primary" href="http://10.9.5.232:8788/dashboard" target="_blank" rel="noopener noreferrer" title="Đăng nhập Muse AI - import cookies">Đăng nhập Muse</a>' : '') +
         (reauthRequired ? '<button class="btn btn-sm btn-danger" data-action="loginAgain" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.reauthRequiredHint')) + '">' + escapeHtml(t('accounts.loginAgain')) + '</button>' : '') +
         // An account whose owner still has a Google verification step pending is
         // not banned and not broken — the credential is fine. The link comes from
