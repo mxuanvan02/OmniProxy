@@ -37,7 +37,23 @@ type MergeState struct {
 	HasSubagentSection    bool
 	OmniProxySectionEnd   int
 	SubagentSectionEnd    int
-	Lines                 []ConfigLine
+	// OmniProxyExtraLines holds operator-tuned key-value lines found inside an
+	// existing [model_providers.omniproxy] section (env_key, retry counts,
+	// stream timeouts...). They are re-emitted on every merge so re-applying
+	// OmniProxy never wipes manual tuning; only omniProxyManagedKeys are
+	// owned and rewritten by the merger.
+	OmniProxyExtraLines []string
+	Lines               []ConfigLine
+}
+
+// omniProxyManagedKeys are the [model_providers.omniproxy] keys the merger
+// owns and rewrites on every apply. Everything else in that section is
+// preserved verbatim from the existing config.
+var omniProxyManagedKeys = map[string]bool{
+	"name":                 true,
+	"base_url":             true,
+	"wire_api":             true,
+	"requires_openai_auth": true,
 }
 
 // parseTomlValue strips an inline comment and matching surrounding quotes from
@@ -190,6 +206,13 @@ func scanConfig(lines []string) MergeState {
 				if cl.Key == "model" {
 					state.SubagentModel = cl.Value
 				}
+			} else if currentSection == "model_providers.omniproxy" || currentSection == "model_providers.superkiro" {
+				// Preserve operator-tuned keys inside the OmniProxy provider
+				// section (env_key, retries, stream timeouts...). The merger
+				// re-emits them after its managed keys.
+				if !omniProxyManagedKeys[cl.Key] {
+					state.OmniProxyExtraLines = append(state.OmniProxyExtraLines, cl.Raw)
+				}
 			}
 		}
 
@@ -251,6 +274,9 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent, effort string) error {
 				// custom provider. Without this, Codex assumes no auth is
 				// needed and sends no API key → proxy rejects with 401.
 				output = append(output, `requires_openai_auth = true`)
+				// Re-emit operator-tuned keys preserved by scanConfig
+				// (env_key, retries, stream timeouts...).
+				output = append(output, state.OmniProxyExtraLines...)
 				superKiroInjected = true
 				skipUntilNextSection = true
 				continue
@@ -377,6 +403,11 @@ func MergeCodexConfig(homeDir, model, baseURL, subagent, effort string) error {
 			output = append(output, fmt.Sprintf(`base_url = "%s"`, baseURL))
 			output = append(output, `wire_api = "responses"`)
 			output = append(output, `requires_openai_auth = true`)
+			// Preserve operator-tuned keys when the section existed earlier in
+			// the file but was not reached by the in-loop injector (e.g. it
+			// sat after agents.subagent). Without this the tuning would be
+			// lost on the next apply.
+			output = append(output, state.OmniProxyExtraLines...)
 		}
 
 		if !subagentInjected {
