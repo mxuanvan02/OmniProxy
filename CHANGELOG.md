@@ -2,6 +2,11 @@
 
 All notable changes to OmniProxy are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.9] — 2026-11-08
+
+### Changed
+- **Update modal now has a single one-click Install button.** The secondary "Go to Download" link that opened the GitHub releases page for manual download was removed. The self-update flow (download tarball → verify sha256 → swap binary → restart service) is the only path now.
+
 ## [0.6.8] — 2026-10-08
 
 ### Fixed
