@@ -40,9 +40,33 @@ EXE="${OMNIPROXY_BOOTSTRAP_EXE:-}"
 if [[ -z "$EXE" ]]; then
   PID="$(pgrep -f 'omniproxy( |$)' | head -1 || true)"
   [[ -n "$PID" ]] || fail "no running omniproxy process found (pgrep came up empty); set OMNIPROXY_BOOTSTRAP_EXE to the binary path"
-  # ps -o comm= prints the executable path on both macOS and Linux.
-  EXE="$(ps -o comm= -p "$PID" | awk '{print $1}')"
-  [[ -n "$EXE" && -f "$EXE" ]] || fail "could not resolve the binary path of PID $PID (got: '$EXE'); set OMNIPROXY_BOOTSTRAP_EXE manually"
+  
+  # Try multiple methods to get absolute path (macOS often returns relative paths)
+  EXE=""
+  
+  # Method 1: lsof - find the binary mapped as 'txt' (text segment)
+  if command -v lsof >/dev/null 2>&1; then
+    EXE="$(lsof -p "$PID" 2>/dev/null | awk '$4 == "txt" && $5 == "REG" {print $9; exit}')"
+  fi
+  
+  # Method 2: ps -o command= (full command line, may have absolute path)
+  if [[ -z "$EXE" || ! -f "$EXE" ]]; then
+    EXE="$(ps -o command= -p "$PID" 2>/dev/null | awk '{print $1}')"
+  fi
+  
+  # Method 3: ps -o comm= + resolve relative via cwd
+  if [[ -z "$EXE" || ! -f "$EXE" ]]; then
+    REL_EXE="$(ps -o comm= -p "$PID" 2>/dev/null | awk '{print $1}')"
+    if [[ -n "$REL_EXE" && "$REL_EXE" != /* ]]; then
+      # Relative path — resolve via process cwd
+      CWD="$(lsof -p "$PID" -Fn 2>/dev/null | awk '/^n\// && /cwd$/ {getline; sub(/^n/, ""); print; exit}')"
+      if [[ -n "$CWD" && -f "$CWD/$REL_EXE" ]]; then
+        EXE="$CWD/$REL_EXE"
+      fi
+    fi
+  fi
+  
+  [[ -n "$EXE" && -f "$EXE" ]] || fail "could not resolve the binary path of PID $PID; set OMNIPROXY_BOOTSTRAP_EXE manually (run: ps aux | grep omniproxy)"
   log "running process: PID $PID -> $EXE"
 fi
 # Resolve symlinks so layout detection sees the real file location.
