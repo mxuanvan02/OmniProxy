@@ -2,6 +2,14 @@
 
 All notable changes to OmniProxy are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] — 2026-11-08
+
+### Added
+- **Bulk delete account groups.** Each provider subgroup (gorouter.app, tabitoken.com, ...) now has a trash icon in its header that deletes every account in that group in one click, after a confirmation dialog showing the count and domain.
+
+### Changed
+- **Codex config re-renders after Apply.** The selected model now appears in the input field immediately after a successful apply, instead of only after reopening the Codex detail view.
+
 ## [0.6.9] — 2026-11-08
 
 ### Changed

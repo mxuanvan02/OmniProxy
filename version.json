@@ -1,5 +1,5 @@
 {
-  "version": "0.6.9",
-  "changelog": "Update modal now has a single one-click Install button (no more manual GitHub download link).",
+  "version": "0.7.0",
+  "changelog": "Bulk delete account groups: trash icon on each provider subgroup (gorouter.app, tabitoken.com...) deletes all its accounts in one click. Codex config re-renders after Apply so the selected model shows immediately.",
   "download": "https://github.com/mxuanvan02/OmniProxy"
 }
