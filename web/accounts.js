@@ -559,12 +559,17 @@ let detailAllowedError = '';
   // toggle, so the click target matches what the operator sees; the icon slot is
   // omitted for subgroups, which sit under a category that already carries one.
   function groupHeader(key, label, count, collapsed, icon, cls) {
+    const isSubgroup = cls === 'account-subgroup-header';
+    const deleteBtn = isSubgroup && count > 0
+      ? ' <button class="btn btn-xs btn-danger" data-group-delete="' + escapeAttr(key) + '" title="' + escapeAttr(t('accounts.deleteGroup') || 'Delete all in group') + '"><i class="fa-solid fa-trash"></i></button>'
+      : '';
     return '<div class="' + cls + '" role="button" tabindex="0" data-group-toggle="' + escapeAttr(key) + '"' +
       ' aria-expanded="' + (!collapsed) + '">' +
       '<span class="account-category-chevron"><i class="fa-solid fa-chevron-' + (collapsed ? 'right' : 'down') + '" aria-hidden="true"></i></span>' +
       (icon ? '<span class="account-category-icon"><i class="' + icon + '" aria-hidden="true"></i></span>' : '') +
       '<span class="account-category-title">' + escapeHtml(label) + '</span>' +
       '<span class="account-category-count">' + count + '</span>' +
+      deleteBtn +
       '</div>';
   }
 
@@ -607,6 +612,53 @@ let detailAllowedError = '';
     applyUsageBars(container);
     enhanceCustomSelects(container);
   }
+
+  // deleteGroupAccounts deletes all accounts in a subgroup (e.g. all gorouter.app accounts).
+  // Called from the trash icon in subgroup headers.
+  async function deleteGroupAccounts(groupKey) {
+    // groupKey format: "external:gorouter.app" or "external:api.justwoker.icu"
+    const parts = groupKey.split(':');
+    if (parts.length < 2) return;
+    const domain = parts.slice(1).join(':');
+    
+    // Find all accounts with this baseUrl
+    const accounts = getFilteredAccounts().filter(a => {
+      const raw = String((a && a.baseUrl) || '').trim();
+      const key = raw.replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+      return key === domain;
+    });
+    
+    if (accounts.length === 0) return;
+    
+    const confirmed = await confirmAction(
+      t('accounts.confirmDeleteGroup')
+        ? t('accounts.confirmDeleteGroup')(accounts.length, domain)
+        : `Delete all ${accounts.length} accounts in "${domain}"?`,
+      { confirmText: t('common.delete') || 'Delete', variant: 'danger' }
+    );
+    if (!confirmed) return;
+    
+    // Delete each account
+    let success = 0, failed = 0;
+    for (const acc of accounts) {
+      try {
+        const res = await api('/accounts/' + encodeURIComponent(acc.id), { method: 'DELETE' });
+        if (res.ok) success++;
+        else failed++;
+      } catch (e) {
+        failed++;
+      }
+    }
+    
+    toast(
+      failed === 0
+        ? (t('accounts.deletedGroup') || `Deleted ${success} accounts`)
+        : (t('accounts.deletedGroupPartial') || `Deleted ${success}, failed ${failed}`),
+      failed === 0 ? 'success' : 'warning'
+    );
+    renderAccounts();
+  }
+
 
   // renderAccountCard produces the HTML for a single account row. Extracted
   // from renderAccounts so the grouped view can call it per-account without

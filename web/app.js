@@ -1114,6 +1114,8 @@ let customSelectRefreshQueued = false;
       // Section headers are checked before the card controls: a header contains
       // no card, but a click inside a collapsed/expanded section must not be
       // read as a header toggle either.
+      const deleteBtn = e.target.closest('[data-group-delete]');
+      if (deleteBtn) { deleteGroupAccounts(deleteBtn.dataset.groupDelete); return; }
       const header = e.target.closest('[data-group-toggle]');
       if (header) { toggleGroupCollapsed(header.dataset.groupToggle); return; }
       const cb = e.target.closest('.account-checkbox');
