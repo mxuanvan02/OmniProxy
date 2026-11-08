@@ -38,13 +38,18 @@ command -v jq   >/dev/null 2>&1 || fail "jq is required"
 # ── 1. Locate the running binary ──────────────────────────────────────
 EXE="${OMNIPROXY_BOOTSTRAP_EXE:-}"
 if [[ -z "$EXE" ]]; then
-  PID="$(pgrep -f 'omniproxy( |$)' | head -1 || true)"
-  [[ -n "$PID" ]] || fail "no running omniproxy process found (pgrep came up empty); set OMNIPROXY_BOOTSTRAP_EXE to the binary path"
+  # pgrep -x tìm exact process name (không bắt bash wrapper)
+  PID="$(pgrep -x omniproxy 2>/dev/null | head -1 || true)"
+  # Fallback: pgrep -f nếu -x không tìm thấy (binary có thể có tên khác)
+  if [[ -z "$PID" ]]; then
+    PID="$(pgrep -f 'omniproxy( |$)' 2>/dev/null | head -1 || true)"
+  fi
+  [[ -n "$PID" ]] || fail "no running omniproxy process found; set OMNIPROXY_BOOTSTRAP_EXE to the binary path"
   
   # Try multiple methods to get absolute path (macOS often returns relative paths)
   EXE=""
   
-  # Method 1: lsof - find the binary mapped as 'txt' (text segment)
+  # Method 1: lsof - find the binary mapped as 'txt' (text segment) — most reliable
   if command -v lsof >/dev/null 2>&1; then
     EXE="$(lsof -p "$PID" 2>/dev/null | awk '$4 == "txt" && $5 == "REG" {print $9; exit}')"
   fi
