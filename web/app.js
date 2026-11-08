@@ -847,7 +847,6 @@ let customSelectRefreshQueued = false;
       (changelog ? '<div class="update-notes"><p class="update-notes-title">' + escapeHtml(t('update.changelog')) + '</p><p class="update-notes-body">' + escapeHtml(changelog) + '</p></div>' : '') +
       '<div class="update-actions">' +
       '<button type="button" class="btn btn-primary" id="updateNowBtn"><i class="fa-solid fa-cloud-arrow-down"></i> ' + escapeHtml(t('update.installNow')) + '</button>' +
-      '<a href="' + escapeAttr(url) + '" target="_blank" rel="noopener" class="btn">' + escapeHtml(t('update.goDownload')) + '</a>' +
       '</div>' +
       '</div>';
     openDialog('updateModal');
