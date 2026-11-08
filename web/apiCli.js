@@ -548,7 +548,7 @@
     if (applyBtn) { applyBtn.disabled = true; applyBtn.textContent = t('cliTools.applying'); }
     try {
       var res = await api('/cli-tools/codex', { method: 'POST', body: JSON.stringify({ baseUrl: endpoint, apiKey: apiKey || null, model: model, subagentModel: subagentModel, reasoningEffort: effort }) });
-      if (res.ok) { showToolStatus(prefix, t('cliTools.configSuccess'), 'success'); updateCliBadge('codex', true); }
+      if (res.ok) { showToolStatus(prefix, t('cliTools.configSuccess'), 'success'); updateCliBadge('codex', true); reRenderDetailBody(); }
       else { var d = await res.json().catch(function () { return {}; }); showToolStatus(prefix, (d && d.error) || t('cliTools.configFailed'), 'error'); }
     } catch (e) { showToolStatus(prefix, e.message || t('cliTools.configFailed'), 'error'); }
     finally { if (applyBtn) { applyBtn.disabled = false; applyBtn.textContent = t('cliTools.apply'); } }
