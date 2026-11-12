@@ -2,6 +2,11 @@
 
 All notable changes to OmniProxy are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] — 2026-11-12
+
+### Fixed
+- **Preserve existing environment variables during CLI tools apply.** Applying Hermes settings now uses `upsertEnvFileKey` to update `OPENAI_API_KEY` without overwriting the rest of the `.env` file, preventing accidental erasure of platform bot tokens (Discord, Telegram) and credentials.
+
 ## [0.7.1] — 2026-11-12
 
 ### Added

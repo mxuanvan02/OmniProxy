@@ -1,5 +1,5 @@
 {
-  "version": "0.7.1",
-  "changelog": "v0.7.1: Dynamic Model Limits heuristic (1M context for Qwen Max/Plus), auto-sync agent configurations, Hermes multi-path config support, credential encryption at rest, API CLI quick-configuration enhancements, and bulk delete account groups.",
+  "version": "0.7.2",
+  "changelog": "v0.7.2: Fix CLI tools settings apply to preserve existing environment variables (Discord, Telegram, GitHub tokens) via atomic upsert.",
   "download": "https://github.com/mxuanvan02/OmniProxy"
 }
