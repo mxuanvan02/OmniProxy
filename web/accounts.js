@@ -753,6 +753,7 @@ let detailAllowedError = '';
         // The generic "test" button only checks the credential. Media output has
         // to be seen to be verified, so Gommo gets its own run-a-prompt view.
         (isGommo ? '<button class="btn btn-xs btn-outline" data-action="gommoPlayground" data-id="' + idAttr + '">' + escapeHtml(t('gommo.playground') || 'Playground') + '</button>' : '') +
+        (String(a.email || '').indexOf('muse') !== -1 ? '<a class="btn btn-xs btn-primary" href="http://' + (location.hostname || '127.0.0.1') + ':8788/dashboard" target="_blank" rel="noopener noreferrer" title="Đăng nhập Muse AI - import cookies">Đăng nhập Muse</a>' : '') +
         (reauthRequired ? '<button class="btn btn-sm btn-danger" data-action="loginAgain" data-id="' + idAttr + '" title="' + escapeAttr(t('accounts.reauthRequiredHint')) + '">' + escapeHtml(t('accounts.loginAgain')) + '</button>' : '') +
         // An account whose owner still has a Google verification step pending is
         // not banned and not broken — the credential is fine. The link comes from
@@ -1899,10 +1900,7 @@ let detailAllowedError = '';
     // Do not infer a model from provider/account type.
     const picked = $('testModelChoice') ? String($('testModelChoice').value || '').trim() : '';
     const model = picked || String(testModalModels[0] || '').trim();
-    const prompt = $('testChatPrompt') ? String($('testChatPrompt').value || '').trim() : '';
-    const req = { model: model };
-    if (prompt) req.prompt = prompt;
-    return req;
+    return { model: model };
   }
   function renderTestLog() {
     const c = $('testModalLog');
@@ -2018,7 +2016,6 @@ let detailAllowedError = '';
       modeField +
       (testModalMode === 'chat' ? '<label for="testModelChoice">' + escapeHtml(t('accounts.selectModel')) + '</label>' : '') +
       modelField +
-      (testModalMode === 'chat' ? '<div class="form-group mt-2"><label for="testChatPrompt">' + escapeHtml(t('accounts.chatPrompt') || 'Prompt tuỳ chỉnh (tuỳ chọn)') + '</label><textarea id="testChatPrompt" class="form-control w-full text-xs" rows="2" placeholder="' + escapeAttr(t('accounts.chatPromptPlaceholder') || 'Say OK') + '"></textarea></div>' : '') +
       '</div>' +
       '<div class="test-log-card">' +
       '<div class="test-log-header">' +
@@ -2384,6 +2381,7 @@ let detailAllowedError = '';
     if (type !== 'codexLogin') stopCodexLoginPolling();
     if (type !== 'antigravityLogin') stopAntigravityLoginPolling();
     if (type === 'add') modalAdd(title, body);
+    else if (type === 'muse') modalMuse(title, body);
     else if (type === 'builderid') modalBuilderId(title, body);
     else if (type === 'iam') modalIam(title, body);
     else if (type === 'sso') modalSso(title, body);
@@ -2445,6 +2443,7 @@ let detailAllowedError = '';
       methodCard('external', t('modal.externalTitle'), t('modal.externalDesc')) +
       methodCard('agentrouter', t('modal.agentrouterTitle'), t('modal.agentrouterDesc')) +
       methodCard('antigravity', t('modal.antigravityTitle'), t('modal.antigravityDesc')) +
+      methodCard('muse', 'Muse AI', 'Đăng nhập Muse AI (muse.ai) - OpenAI-compatible') +
       '</div>' +
       '</div>' +
       // ── Media category (image / video / speech generation) ──
@@ -2513,6 +2512,35 @@ let detailAllowedError = '';
         }
       });
     }
+  }
+  function modalMuse(title, body) {
+    title.textContent = 'Muse AI';
+    body.innerHTML =
+      '<p class="help-block">Đăng nhập Muse AI (muse.ai) để sử dụng qua OpenAI-compatible API.</p>' +
+      '<div class="form-group">' +
+      '<label>Các bước thiết lập:</label>' +
+      '<ol style="margin-left:1.5rem;margin-top:0.5rem;line-height:1.8">' +
+      '<li>muse2api proxy đang chạy trên <code>http://127.0.0.1:8788</code></li>' +
+      '<li>Mở dashboard muse2api: <a href="http://127.0.0.1:8788/dashboard" target="_blank" style="color:#3b82f6;text-decoration:underline">http://127.0.0.1:8788/dashboard</a></li>' +
+      '<li>Đăng nhập <a href="https://muse.ai" target="_blank" style="color:#3b82f6;text-decoration:underline">muse.ai</a> bằng tài khoản của bạn</li>' +
+      '<li>Cài Chrome extension để import cookies (tải từ dashboard muse2api)</li>' +
+      '<li>Sau khi import, account sẽ tự động xuất hiện trong OmniProxy</li>' +
+      '</ol>' +
+      '</div>' +
+      '<div class="form-group">' +
+      '<label>API Key (muse2api):</label>' +
+      '<input type="text" id="museApiKey" readonly value="' + (window.__museApiKey || 'Đang tải...') + '" style="font-family:monospace;background:#f3f4f6" />' +
+      '<button class="btn btn-sm" onclick="navigator.clipboard.writeText(document.getElementById(\'museApiKey\').value)" style="margin-top:0.5rem">Copy</button>' +
+      '</div>' +
+      '<div class="modal-footer">' +
+      '<button class="btn btn-secondary" data-modal-goto="add" type="button">' + escapeHtml(t('common.back')) + '</button>' +
+      '<a class="btn btn-primary" href="http://127.0.0.1:8788/dashboard" target="_blank">Mở Dashboard Muse</a>' +
+      '</div>';
+    // Load API key
+    fetch('http://127.0.0.1:8788/admin/key', {headers: {'Authorization': 'Bearer ' + (localStorage.getItem('muse_admin_key') || '')}})
+      .then(r => r.json())
+      .then(d => { window.__museApiKey = d.key || d.api_key || 'N/A'; document.getElementById('museApiKey').value = window.__museApiKey; })
+      .catch(() => { document.getElementById('museApiKey').value = 'Không thể kết nối muse2api'; });
   }
   function modalBuilderId(title, body) {
     title.textContent = t('modal.builderIdTitle');

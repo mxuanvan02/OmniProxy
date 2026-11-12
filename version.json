@@ -1,5 +1,5 @@
 {
-  "version": "0.7.0",
-  "changelog": "Bulk delete account groups: trash icon on each provider subgroup (gorouter.app, tabitoken.com...) deletes all its accounts in one click. Codex config re-renders after Apply so the selected model shows immediately.",
+  "version": "0.7.1",
+  "changelog": "v0.7.1: Dynamic Model Limits heuristic (1M context for Qwen Max/Plus), auto-sync agent configurations, Hermes multi-path config support, credential encryption at rest, API CLI quick-configuration enhancements, and bulk delete account groups.",
   "download": "https://github.com/mxuanvan02/OmniProxy"
 }

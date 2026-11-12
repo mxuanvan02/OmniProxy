@@ -154,15 +154,19 @@ func TestCodexPublishedContextKeepsUpstreamLimit(t *testing.T) {
 	}
 }
 
-func TestExternalWithoutUpstreamLimitDoesNotInheritPolicy(t *testing.T) {
+func TestExternalWithoutUpstreamLimitInheritsPolicy(t *testing.T) {
 	info := ModelInfo{
 		ModelId:  "gpt-5.6-luna",
 		Provider: "openai",
 		External: true,
 	}
 	entry := buildModelInfoWithTokenLimits(info.ModelId, info.Provider, false, &info)
-	if _, ok := entry["token_limits"]; ok {
-		t.Fatalf("external model without upstream metadata inherited token limits: %#v", entry["token_limits"])
+	limits, ok := entry["token_limits"].(map[string]interface{})
+	if !ok {
+		t.Fatal("external model without upstream metadata should inherit policy token limits")
+	}
+	if limits["maxInputTokens"] != 272_000 {
+		t.Fatalf("inherited input limit = %#v, want 272000", limits["maxInputTokens"])
 	}
 }
 

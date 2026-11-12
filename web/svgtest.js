@@ -14,9 +14,6 @@ let svgtestState = {
   modelFilter: '',
   accountFilter: '',
   resultModelFilter: '',   // narrows the results grid by model name
-  resultAccountFilter: '', // narrows by provider ("p:x") or account id ("a:x")
-  resultFamilyFilter: '',  // narrows by model family (qwen, glm, ...)
-  currentEntries: [],      // entries of the open group, for bulk delete
   defaultPrompt: '',
   promptDirty: false,      // operator typed; stop overwriting the box on refresh
   currentGroup: '',        // prompt key the results grid is showing

@@ -67,7 +67,10 @@ func policyModelLimits(model string) (int, int, bool) {
 		model = strings.TrimSpace(model[idx+1:])
 	}
 	model, _ = ParseModelAndThinking(model, "-thinking")
+
 	switch model {
+	case "model-s", "model-t", "model-o", "model-a":
+		return 0, 0, false
 	case defaultAgentModel:
 		return 272000, 128000, true
 	case deepResearchModel:
@@ -76,15 +79,69 @@ func policyModelLimits(model string) (int, int, bool) {
 		return 272000, 128000, true
 	case "claude-opus-5", "claude-sonnet-5", "claude-haiku-5":
 		return 1_000_000, 128_000, true
-	default:
-		// Claude 4.6+ (claude-opus-4.8, claude-sonnet-4.7, fable 5, ...) also
-		// carry a 1M window. Reuse the runtime classifier so the catalog we
-		// publish to clients cannot disagree with context accounting.
-		if strings.HasPrefix(model, "claude-") && isLargeContextModel(model) {
+	}
+
+	// 1. Qwen Family
+	// DashScope flagship Qwen models (qwen4-max, qwen3.8-max, qwen3.7-plus, qwen-max, etc.) feature 1M context.
+	if strings.Contains(model, "qwen") {
+		if strings.Contains(model, "max") || strings.Contains(model, "plus") || strings.Contains(model, "qwen4") || strings.Contains(model, "qwen3") {
 			return 1_000_000, 128_000, true
 		}
-		return 0, 0, false
+		return 1_000_000, 8192, true
 	}
+
+	// 2. Claude Family (Claude 4.6+, Claude 5, etc.)
+	if strings.HasPrefix(model, "claude-") {
+		if isLargeContextModel(model) || strings.Contains(model, "-5") || strings.Contains(model, "claude-5") || strings.Contains(model, "4-8") || strings.Contains(model, "4.8") || strings.Contains(model, "4-7") || strings.Contains(model, "4.7") || strings.Contains(model, "4-6") || strings.Contains(model, "4.6") {
+			return 1_000_000, 128_000, true
+		}
+		return 200_000, 8192, true
+	}
+
+	// 3. Gemini Family (Gemini 1.5, 2.x, 3.x, 4)
+	if strings.Contains(model, "gemini") {
+		return 1_000_000, 65536, true
+	}
+
+	// 4. MiniMax Family
+	if strings.Contains(model, "minimax") {
+		return 1_000_000, 8192, true
+	}
+
+	// 5. Kimi Family (Moonshot AI)
+	if strings.Contains(model, "kimi") {
+		return 1_000_000, 8192, true
+	}
+
+	// 6. OpenAI GPT-5 / GPT-6 / Codex
+	if strings.HasPrefix(model, "gpt-5") || strings.HasPrefix(model, "gpt-6") {
+		if strings.Contains(model, "mini") || strings.Contains(model, "spark") {
+			return 200_000, 100_000, true
+		}
+		return 272_000, 128_000, true
+	}
+
+	// 7. DeepSeek Family
+	if strings.Contains(model, "deepseek") {
+		return 128_000, 8192, true
+	}
+
+	// 8. GLM Family
+	if strings.Contains(model, "glm") {
+		return 128_000, 8192, true
+	}
+
+	// 9. Grok Family
+	if strings.Contains(model, "grok") {
+		return 131_072, 8192, true
+	}
+
+	// 10. Mimo
+	if strings.Contains(model, "mimo") {
+		return 128_000, 8192, true
+	}
+
+	return 0, 0, false
 }
 
 func (h *Handler) omniProxyModelCatalog(extra ...string) []ModelInfo {
@@ -400,8 +457,11 @@ func upsertYAMLProviderBlock(raw, providerName, providerBlock string) string {
 	lines := strings.Split(raw, "\n")
 	providersIdx := -1
 	for i, line := range lines {
-		if strings.TrimSpace(line) == "providers:" && len(line)-len(strings.TrimLeft(line, " ")) == 0 {
+		trimmed := strings.TrimSpace(line)
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if indent == 0 && (trimmed == "providers:" || strings.HasPrefix(trimmed, "providers:") || strings.HasPrefix(trimmed, "providers :")) {
 			providersIdx = i
+			lines[i] = "providers:"
 			break
 		}
 	}
@@ -457,7 +517,9 @@ func upsertYAMLModelSection(raw, model, provider, baseURL, apiKey string, limits
 	// Locate the top-level `model:` section.
 	modelIdx := -1
 	for i, line := range lines {
-		if strings.TrimSpace(line) == "model:" && len(line)-len(strings.TrimLeft(line, " ")) == 0 {
+		trimmed := strings.TrimSpace(line)
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if indent == 0 && (trimmed == "model:" || strings.HasPrefix(trimmed, "model:") || strings.HasPrefix(trimmed, "model :")) {
 			modelIdx = i
 			break
 		}
@@ -560,10 +622,19 @@ func upsertYAMLModelSection(raw, model, provider, baseURL, apiKey string, limits
 		newSection = append(newSection, fmt.Sprintf("  %s: %s", k, yamlQuoteIfNeeded(v)))
 	}
 
-	// Reassemble.
+	// Reassemble, stripping any duplicate root-level model: lines that may linger below.
+	remaining := make([]string, 0, len(lines[end:]))
+	for _, l := range lines[end:] {
+		trimmed := strings.TrimSpace(l)
+		indent := len(l) - len(strings.TrimLeft(l, " "))
+		if indent == 0 && (trimmed == "model:" || strings.HasPrefix(trimmed, "model:") || strings.HasPrefix(trimmed, "model :") || trimmed == "providers: {}") {
+			continue
+		}
+		remaining = append(remaining, l)
+	}
 	out := append([]string{}, lines[:modelIdx]...)
 	out = append(out, newSection...)
-	out = append(out, lines[end:]...)
+	out = append(out, remaining...)
 	return strings.TrimRight(strings.Join(out, "\n"), "\n") + "\n"
 }
 
@@ -592,6 +663,68 @@ func yamlQuoteIfNeeded(v string) string {
 		return `"` + v + `"`
 	}
 	return v
+}
+
+func hermesConfigPaths(homeDir string) []string {
+	paths := []string{filepath.Join(homeDir, ".hermes", "config.yaml")}
+	if envHome := strings.TrimSpace(os.Getenv("HERMES_HOME")); envHome != "" {
+		p := filepath.Join(envHome, "config.yaml")
+		found := false
+		for _, ex := range paths {
+			if ex == p {
+				found = true
+				break
+			}
+		}
+		if !found {
+			paths = append(paths, p)
+		}
+	}
+	stackCfg := filepath.Join(homeDir, "AI", "hermes-stack", "config", "config.yaml")
+	if _, err := os.Stat(stackCfg); err == nil {
+		found := false
+		for _, ex := range paths {
+			if ex == stackCfg {
+				found = true
+				break
+			}
+		}
+		if !found {
+			paths = append(paths, stackCfg)
+		}
+	}
+	return paths
+}
+
+func hermesEnvPaths(homeDir string) []string {
+	paths := []string{filepath.Join(homeDir, ".hermes", ".env")}
+	if envHome := strings.TrimSpace(os.Getenv("HERMES_HOME")); envHome != "" {
+		p := filepath.Join(envHome, ".env")
+		found := false
+		for _, ex := range paths {
+			if ex == p {
+				found = true
+				break
+			}
+		}
+		if !found {
+			paths = append(paths, p)
+		}
+	}
+	stackEnv := filepath.Join(homeDir, "AI", "hermes-stack", "config", ".env")
+	if _, err := os.Stat(filepath.Dir(stackEnv)); err == nil {
+		found := false
+		for _, ex := range paths {
+			if ex == stackEnv {
+				found = true
+				break
+			}
+		}
+		if !found {
+			paths = append(paths, stackEnv)
+		}
+	}
+	return paths
 }
 
 func backupToolConfig(toolID string) string {
@@ -626,10 +759,7 @@ func backupToolConfig(toolID string) string {
 			filepath.Join(homeDir, ".config", "jcode", "provider-9router.env"),
 		}
 	case "hermes":
-		configPaths = []string{
-			filepath.Join(homeDir, ".hermes", "config.yaml"),
-			filepath.Join(homeDir, ".hermes", ".env"),
-		}
+		configPaths = append(hermesConfigPaths(homeDir), hermesEnvPaths(homeDir)...)
 	case "droid":
 		configPaths = []string{filepath.Join(homeDir, ".factory", "settings.json")}
 	case "openclaw":
@@ -692,10 +822,7 @@ func getToolConfigPaths(homeDir, toolID string) []string {
 			filepath.Join(homeDir, ".config", "jcode", "provider-9router.env"),
 		}
 	case "hermes":
-		return []string{
-			filepath.Join(homeDir, ".hermes", "config.yaml"),
-			filepath.Join(homeDir, ".hermes", ".env"),
-		}
+		return append(hermesConfigPaths(homeDir), hermesEnvPaths(homeDir)...)
 	case "droid":
 		return []string{filepath.Join(homeDir, ".factory", "settings.json")}
 	case "openclaw":
@@ -722,7 +849,23 @@ func checkToolInstalled(toolID string) bool {
 		return true
 	default:
 		cmd := exec.Command("which", toolID)
-		return cmd.Run() == nil
+		if cmd.Run() == nil {
+			return true
+		}
+		home, _ := os.UserHomeDir()
+		if home != "" {
+			candidates := []string{
+				filepath.Join(home, ".local", "bin", toolID),
+				filepath.Join(home, ".cargo", "bin", toolID),
+				filepath.Join(home, "bin", toolID),
+			}
+			for _, p := range candidates {
+				if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+					return true
+				}
+			}
+		}
+		return false
 	}
 }
 
@@ -2527,6 +2670,175 @@ func (h *Handler) refreshModelsCache() {
 		h.modelsCacheMu.Unlock()
 		logger.Infof("[ModelsCache] Cached %d models", len(aggregated))
 	}
+	h.syncClaudeSettingsModels()
+	h.syncHermesConfigModels()
+}
+
+// syncClaudeSettingsModels merges the current models cache into
+// ~/.claude/settings.json so Claude Code picks up newly discovered models
+// (e.g. from a freshly added account) without requiring a manual Configure.
+func (h *Handler) syncClaudeSettingsModels() {
+	h.modelsCacheMu.RLock()
+	if len(h.cachedModels) == 0 {
+		h.modelsCacheMu.RUnlock()
+		return
+	}
+	modelIDs := make([]string, 0, len(h.cachedModels))
+	for _, m := range h.cachedModels {
+		modelIDs = append(modelIDs, m.ModelId)
+	}
+	h.modelsCacheMu.RUnlock()
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	settingsPath := filepath.Join(homeDir, ".claude", "settings.json")
+	current := map[string]interface{}{}
+	if data, err := os.ReadFile(settingsPath); err == nil {
+		json.Unmarshal(data, &current)
+	}
+	newModels := mergeClaudeAvailableModels(current["availableModels"], modelIDs)
+	// Only write when the list actually grew — avoids unnecessary churn.
+	if old, ok := current["availableModels"].([]interface{}); ok && len(old) == len(newModels) {
+		return
+	}
+	current["availableModels"] = newModels
+	data, err := json.MarshalIndent(current, "", "  ")
+	if err != nil {
+		return
+	}
+	if err := os.WriteFile(settingsPath, data, 0600); err != nil {
+		logger.Warnf("[SyncSettings] Failed to update %s: %v", settingsPath, err)
+		return
+	}
+	logger.Infof("[SyncSettings] Updated Claude Code availableModels: %d models", len(newModels))
+}
+
+// syncHermesConfigModels refreshes the providers.omniproxy.models block and the
+// top-level model: limits in ~/.hermes/config.yaml whenever the models cache
+// changes (new account added, upstream catalog updated). Mirrors what the
+// Configure button does but runs automatically after refreshModelsCache.
+func (h *Handler) syncHermesConfigModels() {
+	h.modelsCacheMu.RLock()
+	if len(h.cachedModels) == 0 {
+		h.modelsCacheMu.RUnlock()
+		return
+	}
+	catalog := append([]ModelInfo(nil), h.cachedModels...)
+	h.modelsCacheMu.RUnlock()
+
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	cfgPaths := hermesConfigPaths(homeDir)
+	for _, configPath := range cfgPaths {
+		yamlContent := ""
+		if data, err := os.ReadFile(configPath); err == nil {
+			yamlContent = string(data)
+		}
+		if !strings.Contains(yamlContent, "omniproxy") {
+			continue
+		}
+
+		defaultModel := extractHermesDefaultModel(yamlContent)
+		if defaultModel == "" {
+			continue
+		}
+		baseURL := extractHermesBaseURL(yamlContent)
+		if baseURL == "" {
+			baseURL = "http://127.0.0.1:8080/v1"
+		}
+		apiKey := extractHermesAPIKey(yamlContent)
+		if apiKey == "" {
+			apiKey = "sk-test"
+		}
+
+		providerBlock := hermesProviderBlock(baseURL, apiKey, catalog)
+		yamlContent = upsertYAMLProviderBlock(yamlContent, "omniproxy", providerBlock)
+
+		contextWindow, maxTokens, hasLimits := h.modelTokenLimits(defaultModel)
+		if hasLimits {
+			yamlContent = upsertYAMLModelSection(yamlContent, defaultModel, "omniproxy", baseURL, apiKey, contextWindow, maxTokens)
+		}
+
+		if err := os.WriteFile(configPath, []byte(yamlContent), 0600); err != nil {
+			logger.Warnf("[SyncSettings] Failed to update %s: %v", configPath, err)
+			continue
+		}
+		logger.Infof("[SyncSettings] Updated Hermes config (%s) provider block: %d models", configPath, len(catalog))
+	}
+}
+
+func extractHermesDefaultModel(yaml string) string {
+	lines := strings.Split(yaml, "\n")
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "model:" && len(line)-len(strings.TrimLeft(line, " ")) == 0 {
+			for _, sub := range lines[i+1:] {
+				trimmed := strings.TrimSpace(sub)
+				indent := len(sub) - len(strings.TrimLeft(sub, " "))
+				if indent == 0 && trimmed != "" {
+					break
+				}
+				if strings.HasPrefix(trimmed, "default:") {
+					v := strings.TrimSpace(strings.TrimPrefix(trimmed, "default:"))
+					v = strings.Trim(v, "\"' ")
+					return v
+				}
+			}
+			break
+		}
+	}
+	return ""
+}
+
+func extractHermesBaseURL(yaml string) string {
+	lines := strings.Split(yaml, "\n")
+	inOmni := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if indent == 2 && trimmed == "omniproxy:" {
+			inOmni = true
+			continue
+		}
+		if inOmni {
+			if indent <= 2 && trimmed != "" && trimmed != "omniproxy:" {
+				break
+			}
+			if strings.HasPrefix(trimmed, "base_url:") {
+				v := strings.TrimSpace(strings.TrimPrefix(trimmed, "base_url:"))
+				v = strings.Trim(v, "\"' ")
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+func extractHermesAPIKey(yaml string) string {
+	lines := strings.Split(yaml, "\n")
+	inOmni := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		indent := len(line) - len(strings.TrimLeft(line, " "))
+		if indent == 2 && trimmed == "omniproxy:" {
+			inOmni = true
+			continue
+		}
+		if inOmni {
+			if indent <= 2 && trimmed != "" && trimmed != "omniproxy:" {
+				break
+			}
+			if strings.HasPrefix(trimmed, "api_key:") {
+				v := strings.TrimSpace(strings.TrimPrefix(trimmed, "api_key:"))
+				v = strings.Trim(v, "\"' ")
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 // fetchAndCacheAccountModels fetches and writes model cache for a single account.
@@ -2697,6 +3009,8 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 			Source: "/v1/models",
 		}, nil)
 		logger.Infof("[ModelsCache] Refreshed %d models for external provider %s", len(models), account.Email)
+		h.syncClaudeSettingsModels()
+		h.syncHermesConfigModels()
 		return nil
 	}
 	if err := h.ensureValidToken(account); err != nil {
@@ -2734,6 +3048,8 @@ func (h *Handler) fetchAndCacheAccountModels(account *config.Account) error {
 		Source: "kiro ListAvailableModels",
 	}, nil)
 	logger.Infof("[ModelsCache] Refreshed %d models for account %s", len(models), account.Email)
+	h.syncClaudeSettingsModels()
+	h.syncHermesConfigModels()
 	return nil
 }
 
@@ -3410,17 +3726,21 @@ func mergeModelInfo(base ModelInfo, extra ModelInfo) ModelInfo {
 // Canonical Claude limits override stale gateway metadata; other models retain
 // catalog metadata as the authority, with policy values filling only gaps.
 func modelInfoTokenLimits(info ModelInfo) (int, int, bool) {
-	// External catalogs are authoritative when present and must not inherit
-	// policy limits from a coincidentally identical Codex/Claude model ID. A
-	// provider may publish only input or only output; preserve that partial
-	// metadata rather than inventing the missing side.
+	// External catalogs are authoritative when present and specify limits.
+	// When external upstreams (e.g. OpenAI-compatible gateways) omit token limits metadata,
+	// fall back to policyModelLimits to dynamically classify the model family.
 	if info.External {
-		if info.TokenLimits == nil {
-			return 0, 0, false
+		if info.TokenLimits != nil {
+			input := info.TokenLimits.MaxInputTokens
+			output := info.TokenLimits.MaxOutputTokens
+			if input > 0 || output > 0 {
+				return input, output, true
+			}
 		}
-		input := info.TokenLimits.MaxInputTokens
-		output := info.TokenLimits.MaxOutputTokens
-		return input, output, input > 0 || output > 0
+		if input, output, ok := policyModelLimits(info.ModelId); ok {
+			return input, output, true
+		}
+		return 0, 0, false
 	}
 
 	policyInput, policyOutput, hasPolicy := policyModelLimits(info.ModelId)
@@ -6695,9 +7015,13 @@ func (h *Handler) apiApplyCliToolSettings(w http.ResponseWriter, r *http.Request
 		// list may name context variants (claude-opus-5[1m]) and other routable
 		// families this handler knows nothing about, and dropping them would make
 		// models that work today start being refused.
+		guaranteedModels := append([]string{"claude-sonnet-5", "claude-opus-5"}, sotaModelIDs...)
+		if m := strings.TrimSpace(req.Model); m != "" {
+			guaranteedModels = append(guaranteedModels, m)
+		}
 		current["availableModels"] = mergeClaudeAvailableModels(
 			current["availableModels"],
-			append([]string{"claude-sonnet-5", "claude-opus-5"}, sotaModelIDs...),
+			guaranteedModels,
 		)
 		applySotaPickerRows(current)
 		applyClaudeModelEffort(current, strings.TrimSpace(req.Model), req.ReasoningEffort)
@@ -6961,48 +7285,51 @@ requires_api_key = true
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
 	case "hermes":
-		hermesDir := filepath.Join(homeDir, ".hermes")
-		if err := os.MkdirAll(hermesDir, 0700); err != nil {
-			http.Error(w, `{"error":"cannot create config directory"}`, 500)
-			return
-		}
 		hermesBPURL := ensureV1(req.BaseURL)
 		hermesModel := req.Model
 		if hermesModel == "" {
 			hermesModel = defaultAgentModel
 		}
 		hermesModel = hermesModelID(hermesModel)
-		yamlContent := ""
-		configPath := filepath.Join(hermesDir, "config.yaml")
-		if data, err := os.ReadFile(configPath); err == nil {
-			yamlContent = string(data)
-		}
 		catalog := h.omniProxyModelCatalog(hermesModel, imageAgentModel, deepResearchModel)
 		providerBlock := hermesProviderBlock(hermesBPURL, req.APIKey, catalog)
-		if strings.TrimSpace(yamlContent) == "" {
-			yamlContent = fmt.Sprintf(`model:
+		contextWindow, maxTokens, hasLimits := h.modelTokenLimits(hermesModel)
+
+		cfgPaths := hermesConfigPaths(homeDir)
+		for _, configPath := range cfgPaths {
+			if err := os.MkdirAll(filepath.Dir(configPath), 0700); err != nil {
+				continue
+			}
+			yamlContent := ""
+			if data, err := os.ReadFile(configPath); err == nil {
+				yamlContent = string(data)
+			}
+			if strings.TrimSpace(yamlContent) == "" {
+				yamlContent = fmt.Sprintf(`model:
   default: "%s"
   provider: "omniproxy"
   base_url: "%s"
 `, hermesModel, hermesBPURL)
+			}
+			if hasLimits {
+				yamlContent = upsertYAMLModelSection(yamlContent, hermesModel, "omniproxy", hermesBPURL, req.APIKey, contextWindow, maxTokens)
+			} else {
+				yamlContent = upsertYAMLModelSection(yamlContent, hermesModel, "omniproxy", hermesBPURL, req.APIKey)
+			}
+			yamlContent = upsertYAMLProviderBlock(yamlContent, "omniproxy", providerBlock)
+			yamlContent = upsertYAMLAuxiliaryModels(yamlContent, hermesBPURL, req.APIKey)
+			if err := os.WriteFile(configPath, []byte(yamlContent), 0600); err != nil {
+				logger.Warnf("[ApplyCliSettings] Failed to write %s: %v", configPath, err)
+			}
 		}
-		// Always update the top-level model: section so default, provider,
-		// base_url, api_key, and api_mode point to OmniProxy — even when the
-		// config already exists with a different provider (e.g. omniroute).
-		contextWindow, maxTokens, hasLimits := h.modelTokenLimits(hermesModel)
-		if hasLimits {
-			yamlContent = upsertYAMLModelSection(yamlContent, hermesModel, "omniproxy", hermesBPURL, req.APIKey, contextWindow, maxTokens)
-		} else {
-			yamlContent = upsertYAMLModelSection(yamlContent, hermesModel, "omniproxy", hermesBPURL, req.APIKey)
-		}
-		yamlContent = upsertYAMLProviderBlock(yamlContent, "omniproxy", providerBlock)
-		yamlContent = upsertYAMLAuxiliaryModels(yamlContent, hermesBPURL, req.APIKey)
-		if err := os.WriteFile(filepath.Join(hermesDir, "config.yaml"), []byte(yamlContent), 0600); err != nil {
-			http.Error(w, `{"error":"failed to write config.yaml"}`, 500)
-			return
-		}
+
+		envPaths := hermesEnvPaths(homeDir)
 		envContent2 := fmt.Sprintf("OPENAI_API_KEY=%s\n", req.APIKey)
-		os.WriteFile(filepath.Join(hermesDir, ".env"), []byte(envContent2), 0600)
+		for _, ep := range envPaths {
+			if err := os.MkdirAll(filepath.Dir(ep), 0700); err == nil {
+				os.WriteFile(ep, []byte(envContent2), 0600)
+			}
+		}
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 
 	case "droid":
@@ -7820,7 +8147,7 @@ func (h *Handler) apiTestModel(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 45 * time.Second}
 	start := time.Now()
 	resp, err := client.Do(httpReq)
 	latency := time.Since(start).Milliseconds()
