@@ -727,6 +727,42 @@ func hermesEnvPaths(homeDir string) []string {
 	return paths
 }
 
+// upsertEnvFileKey updates or appends a KEY=value in an env file, preserving all other lines and variables.
+func upsertEnvFileKey(filePath, key, val string) error {
+	if err := os.MkdirAll(filepath.Dir(filePath), 0700); err != nil {
+		return err
+	}
+	existing, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return os.WriteFile(filePath, []byte(fmt.Sprintf("%s=%s\n", key, val)), 0600)
+		}
+		return err
+	}
+
+	lines := strings.Split(string(existing), "\n")
+	prefix := key + "="
+	found := false
+	for i, l := range lines {
+		trimmed := strings.TrimSpace(l)
+		if strings.HasPrefix(trimmed, prefix) || trimmed == key {
+			lines[i] = fmt.Sprintf("%s=%s", key, val)
+			found = true
+			break
+		}
+	}
+	if !found {
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines[len(lines)-1] = fmt.Sprintf("%s=%s", key, val)
+			lines = append(lines, "")
+		} else {
+			lines = append(lines, fmt.Sprintf("%s=%s", key, val), "")
+		}
+	}
+	newContent := strings.Join(lines, "\n")
+	return os.WriteFile(filePath, []byte(newContent), 0600)
+}
+
 func backupToolConfig(toolID string) string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -7324,10 +7360,9 @@ requires_api_key = true
 		}
 
 		envPaths := hermesEnvPaths(homeDir)
-		envContent2 := fmt.Sprintf("OPENAI_API_KEY=%s\n", req.APIKey)
 		for _, ep := range envPaths {
-			if err := os.MkdirAll(filepath.Dir(ep), 0700); err == nil {
-				os.WriteFile(ep, []byte(envContent2), 0600)
+			if err := upsertEnvFileKey(ep, "OPENAI_API_KEY", req.APIKey); err != nil {
+				logger.Warnf("[ApplyCliSettings] Failed to update %s: %v", ep, err)
 			}
 		}
 		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})

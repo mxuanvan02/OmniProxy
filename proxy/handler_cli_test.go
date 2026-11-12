@@ -709,3 +709,44 @@ func TestApplyCodexCliSettingsKeepsConfiguredEffortWhenRequestOmitsIt(t *testing
 		t.Fatalf("Apply downgraded the configured effort to medium:\n%s", got)
 	}
 }
+
+func TestApplyHermesSettingsPreservesExistingEnvVariables(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	hermesDir := filepath.Join(homeDir, ".hermes")
+	if err := os.MkdirAll(hermesDir, 0700); err != nil {
+		t.Fatalf("mkdir .hermes: %v", err)
+	}
+	envPath := filepath.Join(hermesDir, ".env")
+	initialEnv := "DISCORD_BOT_TOKEN=my-secret-discord-token\nTELEGRAM_BOT_TOKEN=my-telegram-token\nOPENAI_API_KEY=old-key\n"
+	if err := os.WriteFile(envPath, []byte(initialEnv), 0600); err != nil {
+		t.Fatalf("write initial .env: %v", err)
+	}
+
+	h := &Handler{cachedModels: []ModelInfo{cliTestModel("qwen4-max", 1000000, 128000)}}
+	req := httptest.NewRequest(http.MethodPost, "/cli-tools/hermes", strings.NewReader(`{"baseUrl":"http://proxy","apiKey":"new-applied-key","model":"qwen4-max"}`))
+	rec := httptest.NewRecorder()
+	h.apiApplyCliToolSettings(rec, req, "hermes")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("apply Hermes status = %d: %s", rec.Code, rec.Body.String())
+	}
+
+	updated, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("read updated .env: %v", err)
+	}
+	content := string(updated)
+	if !strings.Contains(content, "DISCORD_BOT_TOKEN=my-secret-discord-token") {
+		t.Fatalf("DISCORD_BOT_TOKEN was destroyed by apply:\n%s", content)
+	}
+	if !strings.Contains(content, "TELEGRAM_BOT_TOKEN=my-telegram-token") {
+		t.Fatalf("TELEGRAM_BOT_TOKEN was destroyed by apply:\n%s", content)
+	}
+	if !strings.Contains(content, "OPENAI_API_KEY=new-applied-key") {
+		t.Fatalf("OPENAI_API_KEY was not updated:\n%s", content)
+	}
+	if strings.Contains(content, "OPENAI_API_KEY=old-key") {
+		t.Fatalf("old OPENAI_API_KEY was not replaced:\n%s", content)
+	}
+}
