@@ -2,6 +2,16 @@
 
 All notable changes to OmniProxy are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] — 2026-11-12
+
+### Added
+- **Dynamic model limits and 1M Qwen support.** Model token limits now automatically synchronize from upstream accounts and propagate across configured CLI tools. Models such as `qwen4-max` are recognized with 1,000,000 tokens context window and 128,000 max output tokens.
+- **Multi-path Hermes configuration sync.** The CLI tools API now automatically discovers, backs up, and applies configuration to both standard `~/.hermes/` and custom `$HERMES_HOME` (e.g. `~/AI/hermes-stack/config/`).
+
+### Changed
+- **CLI tools configuration and reload automation.** Applying CLI tool configurations (Hermes, Claude Code, Codex, etc.) automatically ensures model definitions, provider endpoints, and context windows are synchronized.
+- **Model heuristics and upstream limit inheritance.** Improved model pattern matching to prevent version heuristics collisions (e.g. Claude 4.5 vs Claude 5) and allow external models to seamlessly inherit policy token limits.
+
 ## [0.7.0] — 2026-11-08
 
 ### Added
